@@ -63,6 +63,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [rateLimitInputs, setRateLimitInputs] = useState(() => createRateLimitInputs({ ...defaultAria2Settings, ...initial.aria2 }, initial.cloudUploadLimit ?? 0));
   const [deleteTransferredShareFilesAfterDownload, setDeleteTransferredShareFilesAfterDownload] = useState(initial.deleteTransferredShareFilesAfterDownload ?? true);
   const [downloadStatusNotifications, setDownloadStatusNotifications] = useState(initial.downloadStatusNotifications ?? true);
+  const [associateDownloadLinks, setAssociateDownloadLinks] = useState(initial.associateDownloadLinks ?? true);
   const [privacyDownloadEnabled, setPrivacyDownloadEnabled] = useState(initial.privacyDownloadEnabled ?? false);
   const [privacyPasswordConfigured, setPrivacyPasswordConfigured] = useState(initial.privacyPasswordConfigured ?? false);
   const [privacyCurrentPassword, setPrivacyCurrentPassword] = useState('');
@@ -83,10 +84,10 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [activeTab, setActiveTab] = useState<SettingsTab>('display');
   const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
 
-  useEffect(() => { const nextAria2 = { ...defaultAria2Settings, ...initial.aria2 }; const nextCloudUploadLimit = initial.cloudUploadLimit ?? 0; setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setAria2(nextAria2); setCloudUploadLimit(nextCloudUploadLimit); setRateLimitInputs(createRateLimitInputs(nextAria2, nextCloudUploadLimit)); setDeleteTransferredShareFilesAfterDownload(initial.deleteTransferredShareFilesAfterDownload ?? true); setDownloadStatusNotifications(initial.downloadStatusNotifications ?? true); setPrivacyDownloadEnabled(initial.privacyDownloadEnabled ?? false); setPrivacyPasswordConfigured(initial.privacyPasswordConfigured ?? false); }, [initial]);
+  useEffect(() => { const nextAria2 = { ...defaultAria2Settings, ...initial.aria2 }; const nextCloudUploadLimit = initial.cloudUploadLimit ?? 0; setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setAria2(nextAria2); setCloudUploadLimit(nextCloudUploadLimit); setRateLimitInputs(createRateLimitInputs(nextAria2, nextCloudUploadLimit)); setDeleteTransferredShareFilesAfterDownload(initial.deleteTransferredShareFilesAfterDownload ?? true); setDownloadStatusNotifications(initial.downloadStatusNotifications ?? true); setAssociateDownloadLinks(initial.associateDownloadLinks ?? true); setPrivacyDownloadEnabled(initial.privacyDownloadEnabled ?? false); setPrivacyPasswordConfigured(initial.privacyPasswordConfigured ?? false); }, [initial]);
 
   function currentSettings(overrides: Partial<AppSettings> = {}): AppSettings {
-    return { downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata, aria2, ...(cloudUploadLimit || initial.cloudUploadLimit !== undefined ? { cloudUploadLimit } : {}), deleteTransferredShareFilesAfterDownload, ...(initial.downloadStatusNotifications !== undefined ? { downloadStatusNotifications } : {}), ...overrides };
+    return { downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata, aria2, ...(cloudUploadLimit || initial.cloudUploadLimit !== undefined ? { cloudUploadLimit } : {}), deleteTransferredShareFilesAfterDownload, ...(initial.downloadStatusNotifications !== undefined ? { downloadStatusNotifications } : {}), ...(initial.associateDownloadLinks !== undefined ? { associateDownloadLinks } : {}), ...overrides };
   }
 
   function saveWithoutStatus(settings: AppSettings) {
@@ -202,6 +203,14 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   function updateDownloadStatusNotifications(enabled: boolean) {
     setDownloadStatusNotifications(enabled);
     saveWithoutStatus(currentSettings({ downloadStatusNotifications: enabled }));
+  }
+
+  function updateAssociateDownloadLinks(enabled: boolean) {
+    setAssociateDownloadLinks(enabled);
+    void Promise.resolve(onChange(currentSettings({ associateDownloadLinks: enabled }))).catch((error: unknown) => {
+      setAssociateDownloadLinks(!enabled);
+      onNotice?.({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+    });
   }
 
   async function updatePrivacyDownload(enabled: boolean) {
@@ -361,6 +370,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
         </form>
         <label className="setting-row"><span><b>{t('settings.transferredCleanup')}</b></span><input aria-label={t('settings.transferredCleanup')} type="checkbox" checked={deleteTransferredShareFilesAfterDownload} onChange={(event) => updateTransferredShareCleanup(event.target.checked)} /></label>
         <label className="setting-row"><span><b>{t('settings.downloadNotifications')}</b></span><input aria-label={t('settings.downloadNotifications')} type="checkbox" checked={downloadStatusNotifications} onChange={(event) => updateDownloadStatusNotifications(event.target.checked)} /></label>
+        <label className="setting-row"><span><b>{t('settings.associateDownloadLinks')}</b></span><input aria-label={t('settings.associateDownloadLinks')} type="checkbox" checked={associateDownloadLinks} onChange={(event) => updateAssociateDownloadLinks(event.target.checked)} /></label>
       </>}
       {activeTab === 'network' && <>
       <form className="proxy-settings" onSubmit={saveProxy}>

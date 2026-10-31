@@ -270,8 +270,14 @@ export const defaultSettings: AppSettings = {
   privacyDownloadEnabled: false,
   privacyPasswordConfigured: false,
   cloudUploadLimit: 0,
-  downloadStatusNotifications: true
+  downloadStatusNotifications: true,
+  associateDownloadLinks: true
 };
+
+/** Links clicked in browsers that started or reached the app; each call takes them once. */
+export async function takeExternalLinks(): Promise<string[]> {
+  return isTauriRuntime() ? invoke<string[]>('take_external_links') : [];
+}
 
 export async function getSettings(): Promise<AppSettings> {
   return isTauriRuntime() ? invoke<AppSettings>('get_settings') : defaultSettings;

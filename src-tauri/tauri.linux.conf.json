@@ -7,6 +7,10 @@
     ]
   },
   "bundle": {
-    "resources": ["binaries/aria2-next-x86_64-unknown-linux-gnu"]
+    "resources": ["binaries/aria2-next-x86_64-unknown-linux-gnu"],
+    "linux": {
+      "deb": { "desktopTemplate": "linux/versadown.desktop" },
+      "rpm": { "desktopTemplate": "linux/versadown.desktop" }
+    }
   }
 }

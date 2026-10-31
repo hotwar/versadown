@@ -189,6 +189,7 @@ export interface AppSettings {
   aria2: Aria2Settings;
   deleteTransferredShareFilesAfterDownload: boolean;
   downloadStatusNotifications?: boolean;
+  associateDownloadLinks?: boolean;
   privacyDownloadEnabled?: boolean;
   privacyPasswordConfigured?: boolean;
   cloudUploadLimit?: number;

@@ -12,11 +12,13 @@ mod downloader;
 mod duplicates;
 pub mod engine_binary;
 mod engine_runtime;
+mod external_links;
 mod ftp;
 mod launcher;
 mod launcher_drag;
 mod launcher_input;
 mod launcher_window;
+mod link_association;
 mod local_upload_picker;
 mod magnet_metadata;
 mod models;
@@ -212,7 +214,25 @@ async fn main_window_interaction_state(app: tauri::AppHandle) -> Result<serde_js
 
 pub fn run() {
     webview_memory::apply_process_defaults();
-    tauri::Builder::default()
+    // Managed before any plugin: the single-instance callback can queue links
+    // while setup is still running.
+    let builder =
+        tauri::Builder::default().manage(external_links::PendingExternalLinks::default());
+    // A second launch, such as a link clicked in a browser, hands its arguments
+    // to the running app and exits. Background UI tests run their own instance.
+    let builder = if std::env::var("VERSADOWN_BACKGROUND_UI_TEST").as_deref() == Ok("1") {
+        builder
+    } else {
+        builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            let links = external_links::links_from_args(args.iter().skip(1));
+            if links.is_empty() {
+                launcher::reveal_manager(app, None);
+            } else {
+                external_links::deliver(app, links);
+            }
+        }))
+    };
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -321,6 +341,16 @@ pub fn run() {
             settings.aria2.validate().map_err(std::io::Error::other)?;
             std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings)?)?;
             let launcher_visibility = settings.launcher_visibility;
+            if background_ui_test.as_deref() != Some("1") {
+                let enabled = settings.associate_download_links;
+                let data_dir = data_dir.clone();
+                // xdg-mime can take a moment; startup does not wait for it.
+                std::thread::spawn(move || {
+                    if let Err(error) = link_association::sync(enabled, &data_dir) {
+                        eprintln!("Unable to update link association: {error}");
+                    }
+                });
+            }
             let cloud_upload_limit = settings.cloud_upload_limit;
             let destination = std::path::PathBuf::from(&settings.download_directory);
             std::fs::create_dir_all(&destination)?;
@@ -465,9 +495,15 @@ pub fn run() {
                     }
                 }
             });
+            // A link that started the app waits until the manager takes it.
+            external_links::deliver(
+                app.handle(),
+                external_links::links_from_args(std::env::args_os().skip(1)),
+            );
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            external_links::take_external_links,
             launcher_drag::drag_launcher_window,
             launcher_input::set_launcher_input_regions,
             launcher_input::launcher_input_hit_test_for_test,

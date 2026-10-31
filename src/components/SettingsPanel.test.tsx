@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { SettingsPanel } from './SettingsPanel';
@@ -212,6 +212,34 @@ it('saves the download status notification preference from common settings', asy
 
   expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ downloadStatusNotifications: false }));
   expect(notificationToggle).not.toBeChecked();
+});
+
+it('turns browser link association off and back on from common settings', async () => {
+  const user = userEvent.setup();
+  const onChange = vi.fn().mockResolvedValue(undefined);
+  render(<SettingsPanel initial={{ ...initial, associateDownloadLinks: true }} onChange={onChange} />);
+
+  const toggle = screen.getByRole('checkbox', { name: '关联磁力、迅雷和电驴链接' });
+  expect(toggle).toBeChecked();
+  await user.click(toggle);
+
+  expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ associateDownloadLinks: false }));
+  expect(toggle).not.toBeChecked();
+  await user.click(toggle);
+  expect(onChange).toHaveBeenLastCalledWith(expect.objectContaining({ associateDownloadLinks: true }));
+});
+
+it('restores the link association toggle and reports why it could not be changed', async () => {
+  const user = userEvent.setup();
+  const onNotice = vi.fn();
+  const onChange = vi.fn().mockRejectedValue(new Error('无法设置默认程序：xdg-mime 退出码 1'));
+  render(<SettingsPanel initial={{ ...initial, associateDownloadLinks: false }} onChange={onChange} onNotice={onNotice} />);
+
+  const toggle = screen.getByRole('checkbox', { name: '关联磁力、迅雷和电驴链接' });
+  await user.click(toggle);
+
+  await waitFor(() => expect(toggle).not.toBeChecked());
+  expect(onNotice).toHaveBeenCalledWith({ kind: 'error', message: '无法设置默认程序：xdg-mime 退出码 1' });
 });
 
 it('refreshes models when its selector is opened and saves the complete AI configuration on selection', async () => {

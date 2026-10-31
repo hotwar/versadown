@@ -41,6 +41,7 @@ const messages = {
   'settings.launcher.hidden': 'Hide',
   'settings.transferredCleanup': 'Delete transferred files after download',
   'settings.downloadNotifications': 'Download status notifications',
+  'settings.associateDownloadLinks': 'Open magnet, Thunder and eD2k links',
   'settings.enableProxy': 'Enable download proxy server',
   'settings.enableProxyAria': 'Enable download proxy',
   'settings.proxy.protocol': 'Protocol',

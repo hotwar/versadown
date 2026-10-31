@@ -146,6 +146,9 @@ pub struct AppSettings {
     pub delete_transferred_share_files_after_download: bool,
     #[serde(default = "default_download_status_notifications")]
     pub download_status_notifications: bool,
+    /// Opens magnet, thunder and ed2k links clicked in browsers with VersaDown.
+    #[serde(default = "default_associate_download_links")]
+    pub associate_download_links: bool,
     #[serde(default)]
     pub privacy_download_enabled: bool,
     #[serde(default)]
@@ -157,6 +160,10 @@ const fn default_delete_transferred_share_files_after_download() -> bool {
 }
 
 const fn default_download_status_notifications() -> bool {
+    true
+}
+
+const fn default_associate_download_links() -> bool {
     true
 }
 
@@ -172,6 +179,7 @@ impl Default for AppSettings {
             cloud_upload_limit: 0,
             delete_transferred_share_files_after_download: true,
             download_status_notifications: true,
+            associate_download_links: true,
             privacy_download_enabled: false,
             privacy_password_configured: false,
         }

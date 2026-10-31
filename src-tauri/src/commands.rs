@@ -3967,6 +3967,19 @@ pub async fn update_settings(
             .reconfigure_aria2_settings(settings.aria2.clone())
             .await?;
     }
+    if settings.associate_download_links != previous.associate_download_links {
+        let enabled = settings.associate_download_links;
+        let data_dir = state
+            .settings_path
+            .parent()
+            .ok_or_else(|| "数据目录不可用".to_string())?
+            .to_path_buf();
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::link_association::sync(enabled, &data_dir)
+        })
+        .await
+        .map_err(|error| error.to_string())??;
+    }
     state
         .runtime
         .set_cloud_upload_limit(settings.cloud_upload_limit);

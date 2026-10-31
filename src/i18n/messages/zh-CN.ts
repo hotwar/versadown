@@ -41,6 +41,7 @@ const messages = {
   'settings.launcher.hidden': '关闭显示',
   'settings.transferredCleanup': '下载完成后自动删除转存文件',
   'settings.downloadNotifications': '下载状态变动通知',
+  'settings.associateDownloadLinks': '关联磁力、迅雷和电驴链接',
   'settings.enableProxy': '启用下载代理服务器',
   'settings.enableProxyAria': '启用下载代理',
   'settings.proxy.protocol': '协议',

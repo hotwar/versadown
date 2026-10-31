@@ -19,12 +19,12 @@ const state = vi.hoisted(() => ({
   getSettings: vi.fn(), configurePrivacy: vi.fn(), privacyVisibility: vi.fn(), windowSnapshot: vi.fn(),
   updateCheck: vi.fn(), openExternalUrl: vi.fn(), cloudInvoke: vi.fn(),
   dragDropHandler: undefined as undefined | ((event: { payload: unknown }) => void),
-  onDragDropEvent: vi.fn(), scaleFactor: vi.fn()
+  onDragDropEvent: vi.fn(), scaleFactor: vi.fn(), takeExternalLinks: vi.fn()
 }));
 
 vi.mock('./lib/api', () => ({
   isTauriRuntime: () => true, listPersistedTasks: state.list, parseDownload: state.parse,
-  syncMainWindowIcon: vi.fn().mockResolvedValue(undefined),
+  syncMainWindowIcon: vi.fn().mockResolvedValue(undefined), takeExternalLinks: state.takeExternalLinks,
   scanDownloadInputs: vi.fn().mockResolvedValue([]),
   confirmDownload: state.confirm, confirmCloudShareDownload: state.confirmCloud, discardPreparedDownload: state.discardPrepared, runTaskAction: state.taskAction, selectDownloadFiles: state.selectFiles, cancelDownloadFile: state.cancelFile,
   getDownloadEngineState: state.getEngineState, retryDownloadEngine: state.retryEngine,
@@ -126,6 +126,7 @@ beforeEach(() => {
   state.openExternalUrl.mockResolvedValue(undefined);
   state.dragDropHandler = undefined;
   state.scaleFactor.mockReset().mockResolvedValue(1);
+  state.takeExternalLinks.mockReset().mockResolvedValue([]);
   state.onDragDropEvent.mockReset().mockImplementation((handler) => {
     state.dragDropHandler = handler;
     return Promise.resolve(() => undefined);
@@ -1866,6 +1867,29 @@ it('opens the normal new-download dialog with an accepted floating-ball drop', a
 
   expect(screen.getByRole('dialog', { name: t('download.new') })).toBeVisible();
   await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith('magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'));
+});
+
+it('opens a new task with the links that launched the app from a browser', async () => {
+  const links = ['magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567', 'ed2k://|file|a.mkv|1024|0123456789ABCDEF0123456789ABCDEF|/'];
+  state.takeExternalLinks.mockResolvedValueOnce(links);
+  render(<App />);
+
+  expect(await screen.findByRole('dialog', { name: t('download.new') })).toBeVisible();
+  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith(links.join('\n')));
+  expect(state.confirm).not.toHaveBeenCalled();
+});
+
+it('opens a new task when a browser hands a link to the running app', async () => {
+  const link = 'thunder://QUFodHRwOi8vZXhhbXBsZS5jb20vYS56aXBaWg==';
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('external-links-available')).toBeDefined());
+  expect(screen.queryByRole('dialog', { name: t('download.new') })).toBeNull();
+
+  state.takeExternalLinks.mockResolvedValueOnce([link]);
+  act(() => { state.listeners.get('external-links-available')?.({ payload: null }); });
+
+  expect(await screen.findByRole('dialog', { name: t('download.new') })).toBeVisible();
+  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith(link));
 });
 
 it('switches the manager to all tasks when the launcher is double-clicked', async () => {

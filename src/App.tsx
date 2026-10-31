@@ -15,7 +15,7 @@ import { CloudNavigation } from './components/CloudNavigation';
 import { SettingsPanel } from './components/SettingsPanel';
 import { AboutPanel } from './components/AboutPanel';
 import { EngineStatusToast } from './components/EngineStatusBanner';
-import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, deleteTasks, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, syncMainWindowIcon, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
+import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, deleteTasks, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, syncMainWindowIcon, takeExternalLinks, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { createTaskUpdateMerger, subscribeToDownloadEvents, type TaskSnapshotScope } from './lib/downloadEvents';
 import { isPrivateTask, normalizeQueueTask, normalizeQueueTasks } from './lib/queueTask';
@@ -1002,6 +1002,31 @@ export function App() {
       setNewDownloadInput(input);
       setNewDownloadOpen(true);
     }).then((stop) => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    // Links clicked in a browser wait in the native app until this window takes
+    // them: the one that launched the app, and any that arrive while it runs.
+    // Taking them drains the queue, so they are shown even if this effect was
+    // torn down meanwhile (a StrictMode remount) rather than lost.
+    const openExternalLinks = () => {
+      void takeExternalLinks().then((links) => {
+        if (!links.length) return;
+        setView('downloads');
+        setDownloadTab('active');
+        setHeaderPanel(null);
+        setNewDownloadInput(links.join('\n'));
+        setNewDownloadOpen(true);
+      }).catch(() => undefined);
+    };
+    listen('external-links-available', openExternalLinks)
+      .then((stop) => { if (disposed) stop(); else unlisten = stop; })
+      .catch(() => undefined);
+    openExternalLinks();
     return () => { disposed = true; unlisten?.(); };
   }, []);
 

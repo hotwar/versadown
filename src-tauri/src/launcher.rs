@@ -424,7 +424,7 @@ fn toggle_manager_visibility(app: &AppHandle) {
     }
 }
 
-fn reveal_manager(app: &AppHandle, destination: Option<&str>) {
+pub(crate) fn reveal_manager(app: &AppHandle, destination: Option<&str>) {
     let Some(manager) = app.get_webview_window("main") else {
         return;
     };
