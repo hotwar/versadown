@@ -1048,7 +1048,7 @@ it('uses permanent deletion for an active task instead of only cancelling it', a
   const dialog = screen.getByRole('dialog', { name: '彻底删除任务' });
   const deleteFiles = within(dialog).getByRole('checkbox', { name: '同时删除下载文件' });
   if ((deleteFiles as HTMLInputElement).checked) await user.click(deleteFiles);
-  await user.click(within(dialog).getByRole('button', { name: '彻底删除' }));
+  await user.click(within(dialog).getByRole('button', { name: '彻底删除任务' }));
 
   await waitFor(() => expect(state.deleteTasks).toHaveBeenCalledWith(['delete-active'], false));
   expect(state.taskAction).not.toHaveBeenCalled();
@@ -1139,7 +1139,7 @@ it('deletes every selected active task from the multi-selection menu', async () 
   const dialog = screen.getByRole('dialog', { name: '彻底删除任务' });
   const deleteFiles = within(dialog).getByRole('checkbox', { name: '同时删除下载文件' });
   if ((deleteFiles as HTMLInputElement).checked) await user.click(deleteFiles);
-  await user.click(within(dialog).getByRole('button', { name: '彻底删除' }));
+  await user.click(within(dialog).getByRole('button', { name: '彻底删除任务' }));
 
   await waitFor(() => expect(state.deleteTasks).toHaveBeenCalledTimes(1));
   expect(new Set(state.deleteTasks.mock.calls[0]?.[0])).toEqual(new Set(['delete-1', 'delete-2']));
@@ -1157,7 +1157,7 @@ it('pauses every selected running task from the multi-selection menu', async () 
   fireEvent.click(await screen.findByText('first-running.zip'));
   fireEvent.click(screen.getByText('second-running.zip'), { ctrlKey: true });
   fireEvent.contextMenu(screen.getByText('first-running.zip'));
-  fireEvent.click(screen.getByRole('menuitem', { name: '暂停下载' }));
+  fireEvent.click(screen.getByRole('menuitem', { name: '暂停' }));
 
   await waitFor(() => {
     expect(state.taskAction).toHaveBeenCalledWith('pause-1', 'pause');
@@ -1181,7 +1181,7 @@ it('permanently deletes every selected completed task from the multi-selection m
   const dialog = screen.getByRole('dialog', { name: '彻底删除任务' });
   const deleteFiles = within(dialog).getByRole('checkbox', { name: '同时删除下载文件' });
   if ((deleteFiles as HTMLInputElement).checked) await user.click(deleteFiles);
-  await user.click(within(dialog).getByRole('button', { name: '彻底删除' }));
+  await user.click(within(dialog).getByRole('button', { name: '彻底删除任务' }));
 
   await waitFor(() => expect(state.deleteTasks).toHaveBeenCalledTimes(1));
   expect(new Set(state.deleteTasks.mock.calls[0]?.[0])).toEqual(new Set(['done-delete-1', 'done-delete-2']));
@@ -1388,8 +1388,8 @@ it('opens one batch dialog for pasted links and closes after the first selected 
   const dialog = await screen.findByRole('dialog', { name: '新建下载' });
   expect(within(dialog).getByText('first.zip')).toBeVisible();
   expect(within(dialog).getByText('second.zip')).toBeVisible();
-  await user.click(within(dialog).getByRole('button', { name: '解压密码和后处理' }));
-  await user.type(within(dialog).getByRole('textbox', { name: '解压密码和后处理' }), '密码 88in');
+  await user.click(within(dialog).getByRole('button', { name: '后处理与密码' }));
+  await user.type(within(dialog).getByRole('textbox', { name: '后处理与密码' }), '密码 88in');
   await user.click(within(dialog).getByRole('button', { name: '新建任务' }));
 
   await waitFor(() => expect(state.confirm).toHaveBeenCalledTimes(2));
@@ -1793,11 +1793,11 @@ it('retrieves a compatible service model from its selector and persists the sele
   await user.click(screen.getByRole('button', { name: /设置/ }));
   await user.click(screen.getByRole('tab', { name: '高级' }));
   await user.click(screen.getByRole('checkbox', { name: '启用 AI 智能分析' }));
-  await user.type(screen.getByRole('textbox', { name: 'AI 服务地址' }), 'https://gateway.example.test/v1');
-  await user.type(screen.getByLabelText('AI API Key'), 'sk-local-secret');
-  fireEvent.pointerDown(screen.getByRole('combobox', { name: 'AI 模型' }));
+  await user.type(screen.getByRole('textbox', { name: '服务地址' }), 'https://gateway.example.test/v1');
+  await user.type(screen.getByLabelText('API Key'), 'sk-local-secret');
+  fireEvent.pointerDown(screen.getByRole('combobox', { name: '模型' }));
   await screen.findByRole('option', { name: 'gpt-5-mini' });
-  await user.selectOptions(screen.getByRole('combobox', { name: 'AI 模型' }), 'gpt-5-mini');
+  await user.selectOptions(screen.getByRole('combobox', { name: '模型' }), 'gpt-5-mini');
 
   await waitFor(() => expect(state.updateAiSettings).toHaveBeenCalledWith({
     enabled: true,
