@@ -3,6 +3,8 @@ name: Desktop release
 on:
   workflow_dispatch:
   push:
+    branches:
+      - 'build/installers/**'
     tags:
       - 'v*'
 
@@ -11,6 +13,7 @@ permissions:
 
 jobs:
   linux:
+    name: Linux · x86_64 installers
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
@@ -23,6 +26,9 @@ jobs:
           node-version: '24'
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> ../.tools/linux-release-target
       - name: Check release tag version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -44,6 +50,7 @@ jobs:
           if-no-files-found: error
 
   windows:
+    name: Windows · x86_64 installer
     runs-on: windows-2022
     timeout-minutes: 120
     steps:
@@ -56,6 +63,9 @@ jobs:
           node-version: '24'
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> ../.tools/release-target
       - name: Check release tag version
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -90,14 +100,17 @@ jobs:
           if-no-files-found: error
 
   macos:
+    name: macOS · ${{ matrix.name }} installers
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: macos-14
             arch: arm64
+            name: Apple Silicon (ARM64)
           - runner: macos-15-intel
             arch: x86_64
+            name: Intel (x86_64)
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     steps:
@@ -110,6 +123,9 @@ jobs:
           node-version: '24'
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
       - name: Check release versions
         shell: bash
         run: |
