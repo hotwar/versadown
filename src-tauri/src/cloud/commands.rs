@@ -45,6 +45,7 @@ pub use upload_commands::*;
 mod tests;
 
 pub struct CloudState {
+    pub(crate) credential_restore_failed: bool,
     pub store: SystemCredentialStore,
     pub share_plans: share::CloudSharePlanStore,
     pub share_refresh_budget: share::CloudShareRefreshBudget,
@@ -147,7 +148,8 @@ impl CloudState {
         Ok(removed_plans)
     }
     pub fn new(root: PathBuf) -> Result<Self, QuarkError> {
-        let state = Self {
+        let mut state = Self {
+            credential_restore_failed: false,
             share_plans: share::CloudSharePlanStore::new(SystemCredentialStore::new(root.clone())?),
             share_refresh_budget: Default::default(),
             cloud_download_refresh_budget: Default::default(),
@@ -158,11 +160,8 @@ impl CloudState {
             store: SystemCredentialStore::new(root)?,
             http: ReqwestTransport::new()?,
         };
-        for descriptor in ProviderRegistry::global().all() {
-            state
-                .auth_supervisor
-                .restore(&state.store, descriptor.provider)?;
-        }
+        state.credential_restore_failed =
+            restore_startup_authorizations(&state.auth_supervisor, &state.store);
         Ok(state)
     }
     pub fn start_authorization_maintenance(self: &Arc<Self>) {
@@ -211,6 +210,25 @@ impl CloudState {
             });
         }
     }
+}
+
+fn restore_startup_authorizations(
+    supervisor: &auth_supervisor::AuthSupervisor,
+    store: &impl CredentialStore,
+) -> bool {
+    let mut failed = false;
+    for descriptor in ProviderRegistry::global().all() {
+        if let Err(error) = supervisor.restore(store, descriptor.provider) {
+            // Failed reads never become persisted disconnects. Credential
+            // operations remain authoritative and report the original error.
+            eprintln!(
+                "Unable to restore {} credentials: {error}",
+                descriptor.provider.key()
+            );
+            failed = true;
+        }
+    }
+    failed
 }
 
 #[cfg(test)]

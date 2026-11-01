@@ -1,0 +1,65 @@
+name: Desktop checks
+
+on:
+  pull_request:
+  push:
+    branches: [master, main, 'codex/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2022, macos-14, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    env:
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev librsvg2-dev
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm run build
+      - name: Check frontend and platform resource contracts
+        run: |
+          pnpm exec vitest run src/lib/api.test.ts src/lib/downloadEvents.test.ts src/lib/launcherWindow.test.ts src/lib/mainWindow.test.ts src/components/LauncherWindow.test.tsx src/components/StartupNotice.test.tsx src/components/SettingsPanel.test.tsx src/i18n/index.test.ts --exclude '.worktrees/**'
+          node --test scripts/bundle-resource-config.test.mjs
+      - name: Check native download and window behavior
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --test engine_binary --test aria2_live --test parser_policy --test window_config --test window_lifecycle --test engine_runtime --test ftp_download --test cloud_provider_contract --test aria2_bt --test magnet_metadata
+      - name: Check parser and startup failure handling
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib parser::
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib unavailable_credential_storage_does_not_reset_or_delete_saved_accounts
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib macos_cookie_scope_tests
+      - name: Check macOS native cookies and graceful quit
+        if: runner.os == 'macOS'
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --features native-smoke --test macos_native_smoke
+      - name: Build native application with embedded frontend
+        run: cargo build --locked --manifest-path src-tauri/Cargo.toml --features custom-protocol,gui-subsystem

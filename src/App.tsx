@@ -15,6 +15,7 @@ import { CloudNavigation } from './components/CloudNavigation';
 import { SettingsPanel } from './components/SettingsPanel';
 import { AboutPanel } from './components/AboutPanel';
 import { EngineStatusToast } from './components/EngineStatusBanner';
+import { StartupNotice } from './components/StartupNotice';
 import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, deleteTasks, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, syncMainWindowIcon, takeExternalLinks, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { createTaskUpdateMerger, subscribeToDownloadEvents, type TaskSnapshotScope } from './lib/downloadEvents';
@@ -1707,6 +1708,7 @@ export function App() {
           <button className="window-close" aria-label={t('dialog.close')} onClick={() => void runWindowAction('hide')}><WindowIcon kind="close" /></button>
         </div>
       </header>
+      <StartupNotice />
       <EngineStatusToast state={engineState} onRetry={() => {
         if (engineState.retrying) return;
         setEngineState((current) => ({ ...current, retrying: true, error: undefined }));

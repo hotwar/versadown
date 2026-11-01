@@ -1,4 +1,10 @@
 const messages = {
+  'macos.links.registrationFailed': '无法更新 macOS 下载链接关联，请重试。',
+  'macos.links.storageFailed': '无法保存下载链接关联，请检查应用数据目录的访问权限。',
+  'macos.links.bundleRequired': '请安装并打开 VersaDown.app 后再更改链接关联。',
+  'macos.links.chooseAlternative': '没有其他应用可处理此类链接，请先选择其他默认应用，再关闭关联。',
+
+  'startup.credentialsUnavailable': '系统凭据存储暂不可用。普通下载仍可使用，网盘账号与隐私任务保持保护。请解锁登录钥匙串后重新启动 VersaDown。',
   'app.title': '万能下载 VersaDown',
   'app.brand': '万能下载',
   'common.automatic': '自动（系统语言）',

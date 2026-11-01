@@ -1,12 +1,14 @@
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::{downloader::load_torrent_base64, DownloadError, MagnetMetadataSettings};
+use crate::{DownloadError, MagnetMetadataSettings};
 
 const METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const METADATA_USER_AGENT: &str = "VersaDown/0.1";
 const METADATA_REQUEST_ATTEMPTS: usize = 3;
 const METADATA_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(250);
+const MAX_CACHED_TORRENT_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Error)]
 pub enum MagnetMetadataError {
@@ -119,7 +121,7 @@ pub async fn resolve_magnet_metadata(
         let torrent_url = resolve_download_url(&base_url, metadata.download_url.trim())?;
         // A stale cache entry must not hide an otherwise useful file listing or
         // force the user to wait for a second DHT lookup before seeing the task.
-        load_torrent_base64(torrent_url.as_str()).await.ok()
+        fetch_cached_torrent(&client, torrent_url).await
     };
     if torrent.is_none() && title.is_none() && files.is_empty() {
         return Ok(None);
@@ -129,6 +131,24 @@ pub async fn resolve_magnet_metadata(
         title,
         files,
     }))
+}
+
+async fn fetch_cached_torrent(client: &reqwest::Client, url: url::Url) -> Option<String> {
+    let mut response = client.get(url).send().await.ok()?.error_for_status().ok()?;
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_CACHED_TORRENT_BYTES as u64)
+    {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.ok()? {
+        if chunk.len() > MAX_CACHED_TORRENT_BYTES - bytes.len() {
+            return None;
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    (!bytes.is_empty()).then(|| STANDARD.encode(bytes))
 }
 
 /// Returns a raw torrent only when the metadata service has one that can actually

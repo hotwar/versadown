@@ -409,12 +409,20 @@ fn validated(kind: CandidateKind, source: String) -> ValidatedCandidate {
 
 fn extract_raw_candidates(text: &str) -> Vec<String> {
     let pattern = Regex::new(
-        r"(?i)(ed2k:[^\s<>；]*?\|/|magnet:[^\s<>；]*|thunder://[^\s<>；]*|ftp:[^\s<>；]+|https?://[^\s<>；]+|file://[^\s<>；]+|[a-z]:\\[^\r\n<>]*?\.torrent)",
+        r#"(?i)(ed2k:[^\s<>；]*?\|/|magnet:[^\s<>；]*|thunder://[^\s<>；]*|ftp:[^\s<>；]+|https?://[^\s<>；]+|file://[^\s<>；]+|"/[^"\r\n]+\.torrent"|'/[^'\r\n]+\.torrent'|[a-z]:\\[^\r\n<>]*?\.torrent|/[^\s<>；"']+\.torrent)"#,
     )
     .expect("static candidate pattern");
     pattern
         .find_iter(text)
-        .map(|match_| trim_extracted_candidate(match_.as_str()))
+        .map(|match_| {
+            let raw = match_.as_str();
+            let candidate = if raw.starts_with("\"/") || raw.starts_with("'/") {
+                &raw[1..raw.len() - 1]
+            } else {
+                raw
+            };
+            trim_extracted_candidate(candidate)
+        })
         .collect()
 }
 
@@ -646,12 +654,35 @@ mod tests {
 
     #[test]
     fn scan_recognizes_a_local_torrent_inside_mixed_text() {
+        #[cfg(windows)]
         let values = scan_download_inputs(r"复制 C:\Downloads\release.torrent 完成");
+        #[cfg(not(windows))]
+        let values = scan_download_inputs("复制 /Users/example/Downloads/release.torrent 完成");
 
         assert_eq!(values.len(), 1);
         assert!(values[0].valid);
         assert_eq!(values[0].kind, Some(CandidateKind::Torrent));
+        #[cfg(windows)]
         assert_eq!(values[0].input, r"C:\Downloads\release.torrent");
+        #[cfg(not(windows))]
+        assert_eq!(values[0].input, "/Users/example/Downloads/release.torrent");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scan_preserves_quoted_local_torrent_paths_with_spaces_and_unicode() {
+        let values = scan_download_inputs("下载 \"/Users/example/下载文件/My release.torrent\" 完成");
+        assert_eq!(values.len(), 1);
+        assert!(values[0].valid);
+        assert_eq!(values[0].input, "/Users/example/下载文件/My release.torrent");
+    }
+
+    #[test]
+    fn local_path_quote_handling_does_not_strip_a_signed_url_apostrophe() {
+        let source = "https://example.test/archive.zip?signature=abc'";
+        let values = scan_download_inputs(source);
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].input, source);
     }
 
     #[test]

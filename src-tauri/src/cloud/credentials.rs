@@ -55,6 +55,21 @@ pub struct SystemCredentialStore {
     service: String,
 }
 
+fn credential_error(operation: &str, key: &str, error: KeyringError) -> QuarkError {
+    #[cfg(target_os = "macos")]
+    match &error {
+        // These are OS errors from Security.framework, with no secret data.
+        // Avoid Debug on other variants: BadEncoding can contain raw bytes.
+        KeyringError::PlatformFailure(cause) | KeyringError::NoStorageAccess(cause) => {
+            eprintln!("macOS credential {operation} failed for {key}: {cause}")
+        }
+        _ => eprintln!("macOS credential {operation} failed for {key}"),
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (operation, key, error);
+    QuarkError::Storage
+}
+
 pub(crate) const BAIDU_BROWSER_PASSWORD_PREFERENCE_KEY: &str =
     "cloud-password-baidu-browser-preferred";
 pub(crate) const BAIDU_BROWSER_PROFILE_USERNAME_KEY: &str =
@@ -121,27 +136,27 @@ impl SystemCredentialStore {
         if !credential_key_is_supported(key) {
             return Err(QuarkError::Storage);
         }
-        Entry::new(&self.service, key).map_err(|_| QuarkError::Storage)
+        Entry::new(&self.service, key).map_err(|error| credential_error("open", key, error))
     }
 }
 impl CredentialStore for SystemCredentialStore {
     fn save(&self, k: &str, v: &[u8]) -> Result<(), QuarkError> {
         self.entry(k)?
             .set_secret(v)
-            .map_err(|_| QuarkError::Storage)
+            .map_err(|error| credential_error("save", k, error))
     }
     fn load(&self, k: &str) -> Result<Option<Vec<u8>>, QuarkError> {
         match self.entry(k)?.get_secret() {
             Ok(value) => Ok(Some(value)),
             Err(KeyringError::NoEntry) => Ok(None),
-            Err(_) => Err(QuarkError::Storage),
+            Err(error) => Err(credential_error("read", k, error)),
         }
     }
     fn remove(&self, k: &str) -> Result<(), QuarkError> {
         match self.entry(k)?.delete_credential() {
             Ok(()) => Ok(()),
             Err(KeyringError::NoEntry) => Ok(()),
-            Err(_) => Err(QuarkError::Storage),
+            Err(error) => Err(credential_error("remove", k, error)),
         }
     }
 }

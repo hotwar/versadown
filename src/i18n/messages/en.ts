@@ -1,4 +1,10 @@
 const messages = {
+  'macos.links.registrationFailed': 'Unable to update macOS download link associations. Please try again.',
+  'macos.links.storageFailed': 'Unable to save download link associations. Check access to the application data directory.',
+  'macos.links.bundleRequired': 'Install and open VersaDown.app before changing link associations.',
+  'macos.links.chooseAlternative': 'No alternative application can handle this link type. Choose another default application before disabling the association.',
+
+  'startup.credentialsUnavailable': 'System credential storage is unavailable. Standard downloads remain available; cloud accounts and private tasks stay protected. Unlock your login keychain and restart VersaDown.',
   'app.title': 'VersaDown Universal Downloader',
   'app.brand': 'VersaDown',
   'common.automatic': 'Automatic (system language)',

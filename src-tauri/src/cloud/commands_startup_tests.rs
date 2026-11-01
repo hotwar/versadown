@@ -5,6 +5,19 @@ use std::sync::{
 };
 use std::time::Duration;
 
+#[test]
+fn unavailable_credential_storage_does_not_reset_or_delete_saved_accounts() {
+    struct Unavailable;
+    impl crate::cloud::CredentialStore for Unavailable {
+        fn load(&self, _: &str) -> Result<Option<Vec<u8>>, QuarkError> { Err(QuarkError::Storage) }
+        fn save(&self, _: &str, _: &[u8]) -> Result<(), QuarkError> { panic!("must not overwrite credentials after a failed read") }
+        fn remove(&self, _: &str) -> Result<(), QuarkError> { panic!("must not remove credentials after a failed read") }
+    }
+    let supervisor = crate::cloud::auth_supervisor::AuthSupervisor::default();
+    assert!(super::restore_startup_authorizations(&supervisor, &Unavailable));
+    assert!(matches!(supervisor.restore(&Unavailable, CloudProvider::Quark), Err(QuarkError::Storage)));
+}
+
 fn test_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

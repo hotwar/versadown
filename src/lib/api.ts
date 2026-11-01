@@ -2,6 +2,7 @@ import { AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCo
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { version as appVersion } from '../../src-tauri/tauri.conf.json';
 import type { ThemeId } from './theme';
+import { t, type TranslationKey } from '../i18n';
 
 function fileNameFrom(value: string) {
   if (/^ed2k:\/\/\|file\|/i.test(value)) {
@@ -284,7 +285,15 @@ export async function getSettings(): Promise<AppSettings> {
 }
 
 export async function updateSettings(settings: AppSettings): Promise<AppSettings> {
-  return isTauriRuntime() ? invoke<AppSettings>('update_settings', { settings }) : settings;
+  if (!isTauriRuntime()) return settings;
+  try {
+    return await invoke<AppSettings>('update_settings', { settings });
+  } catch (error) {
+    if (typeof error === 'string' && error.startsWith('macos.links.')) {
+      throw new Error(t(error as TranslationKey));
+    }
+    throw error;
+  }
 }
 
 export async function configurePrivacyDownload(enabled: boolean, currentPassword?: string, newPassword?: string): Promise<AppSettings> {
