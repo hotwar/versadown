@@ -31,6 +31,7 @@ import { installWindowResizePerformanceMode } from './lib/windowResizePerformanc
 import { connectWindowInteraction, createWindowInteraction, supportsNativeWindowDrag, type WindowInteractionSnapshot } from './lib/windowInteraction';
 import { applyStoredTaskOrder, mergeVisibleTaskOrder } from './lib/taskOrder';
 import { applyMainWindowDpiSizing } from './lib/mainWindow';
+import { settleTaskOperations } from './lib/taskBatch';
 import { t, useTranslation } from './i18n';
 
 type TaskListTab = 'all' | 'active' | 'completed' | 'failed';
@@ -414,7 +415,8 @@ export function App() {
     const sorted = taskSorts[downloadTab] === 'manual'
       ? applyStoredTaskOrder(unsortedVisibleTasks, taskOrders[downloadTab])
       : sortTasks(unsortedVisibleTasks, taskSorts[downloadTab]);
-    return downloadTab === 'all' || downloadTab === 'active' ? prioritizeNewActiveTasks(sorted, newActiveTaskIds) : sorted;
+    const mode = taskSorts[downloadTab];
+    return mode === 'default-all' || mode === 'created-desc' ? prioritizeNewActiveTasks(sorted, newActiveTaskIds) : sorted;
   }, [downloadTab, newActiveTaskIds, taskOrders, taskSorts, unsortedVisibleTasks]);
   const detailsTask = useMemo(() => filteredPrivacyTasks.flatMap((task) => [task, ...(task.children ?? [])]).find((task) => task.id === detailsTaskId), [detailsTaskId, filteredPrivacyTasks]);
   const downloadingTasks = filteredPrivacyTasks.filter((task) => task.status === 'downloading');
@@ -554,8 +556,8 @@ export function App() {
   function addNewDownloadTask(task: QueueTask) {
     applyTaskProjection(task);
     if (isActiveDownloadTask(task.status)) {
-      // Newly created active tasks stay visible first without changing the
-      // sort choice for the current session.
+      // Only default/newest-first views prioritize new tasks. An explicit
+      // name, size, progress or manual order remains authoritative.
       setNewActiveTaskIds((current) => [task.id, ...current.filter((id) => id !== task.id)]);
     }
   }
@@ -943,7 +945,7 @@ export function App() {
   }
 
   async function runLauncherBatchAction(command: 'pause' | 'resume') {
-    const targets = tasksRef.current.filter((task) => (privacyVisibility.unlocked || !isPrivateTask(task)) && (command === 'pause' ? task.status === 'downloading' : task.status === 'paused'));
+    const targets = tasksRef.current.filter((task) => (privacyVisibility.unlocked || !isPrivateTask(task)) && (command === 'pause' ? ['downloading', 'queued'].includes(task.status) : task.status === 'paused'));
     if (!targets.length) return;
     const actionTargets = command === 'resume'
       ? targets.filter((task) => !pendingStartTaskIds.current.has(task.id))
@@ -951,7 +953,7 @@ export function App() {
     if (!actionTargets.length) return;
     const optimisticTargets = command === 'resume' ? actionTargets : [];
     optimisticTargets.forEach(queueTaskOptimistically);
-    const results = await Promise.allSettled(actionTargets.map((task) => runTaskAction(task.id, command)));
+    const results = await settleTaskOperations(actionTargets.map((task) => ({ task, run: () => runTaskAction(task.id, command) })), command === 'pause');
     let failure: unknown;
     let refreshNeeded = false;
     for (const [index, result] of results.entries()) {
@@ -1321,7 +1323,7 @@ export function App() {
         if (privacyTarget !== undefined) return isPrivateTask(task) === privacyTarget
           ? []
           : [{ task, run: () => setTaskPrivacy(task.id, privacyTarget) }];
-        if (command === 'pause') return task.status === 'downloading'
+        if (command === 'pause') return ['downloading', 'queued'].includes(task.status)
           ? [{ task, run: () => runTaskAction(task.id, 'pause').then((result) => result.queueTask ?? result.task) }]
           : [];
         if (command === 'resume') {
@@ -1332,7 +1334,7 @@ export function App() {
         return [];
       });
       operations.filter((operation) => operation.optimisticStart).forEach(({ task }) => queueTaskOptimistically(task));
-      const results = await Promise.allSettled(operations.map(({ run }) => run()));
+      const results = await settleTaskOperations(operations, command === 'pause');
       let failure: unknown;
       const newlyHiddenIds = new Set<string>();
       let refreshNeeded = false;

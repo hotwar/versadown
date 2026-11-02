@@ -51,6 +51,13 @@ pub(crate) fn schedule(app: &AppHandle) -> tauri::Result<()> {
             return;
         }
         eprintln!("NATIVE_PARENT_DOMAIN_COOKIE_OK");
+        if let Err(error) = launcher_geometry(&app).await {
+            eprintln!("NATIVE_LAUNCHER_GEOMETRY_FAILED: {error}");
+            app.state::<std::sync::Arc<crate::ApplicationLifecycle>>()
+                .begin_exit();
+            app.exit(1);
+            return;
+        }
         for _ in 0..250 {
             if app
                 .state::<crate::commands::AppState>()
@@ -71,5 +78,62 @@ pub(crate) fn schedule(app: &AppHandle) -> tauri::Result<()> {
             .begin_exit();
         app.exit(1);
     });
+    Ok(())
+}
+
+async fn launcher_geometry(app: &AppHandle) -> Result<(), String> {
+    let window = app
+        .get_webview_window("launcher")
+        .ok_or("missing launcher")?;
+    window.show().map_err(|e| e.to_string())?;
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let monitor = window
+        .primary_monitor()
+        .map_err(|e| e.to_string())?
+        .ok_or("missing monitor")?;
+    let scale = monitor.scale_factor();
+    let area = monitor.work_area();
+    // The transparent canvas must be able to leave the work area while its
+    // visible 64px icon reaches the top-left and bottom-right corners.
+    for (x, y) in [
+        (
+            area.position.x - (346.0 * scale) as i32,
+            area.position.y - (328.0 * scale) as i32,
+        ),
+        (
+            area.position.x + area.size.width as i32 - (410.0 * scale) as i32,
+            area.position.y - (328.0 * scale) as i32,
+        ),
+        (
+            area.position.x - (346.0 * scale) as i32,
+            area.position.y + area.size.height as i32 - (392.0 * scale) as i32,
+        ),
+        (
+            area.position.x + area.size.width as i32 - (410.0 * scale) as i32,
+            area.position.y + area.size.height as i32 - (392.0 * scale) as i32,
+        ),
+    ] {
+        // The renderer's initial bottom-right anchor can finish after show.
+        // Wait for our position request to settle rather than racing it.
+        let mut actual = window.outer_position().map_err(|e| e.to_string())?;
+        for _ in 0..20 {
+            window
+                .set_position(tauri::PhysicalPosition::new(x, y))
+                .map_err(|e| e.to_string())?;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            actual = window.outer_position().map_err(|e| e.to_string())?;
+            if (actual.x - x).abs() <= 2 && (actual.y - y).abs() <= 2 {
+                break;
+            }
+        }
+        if (actual.x - x).abs() > 2 || (actual.y - y).abs() > 2 {
+            return Err(format!(
+                "requested ({x}, {y}), actual ({}, {})",
+                actual.x, actual.y
+            ));
+        }
+    }
+    eprintln!("NATIVE_LAUNCHER_GEOMETRY_OK");
+    window.hide().map_err(|e| e.to_string())?;
     Ok(())
 }

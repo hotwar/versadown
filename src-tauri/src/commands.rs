@@ -4032,6 +4032,23 @@ mod tests {
         assert!(stage_dropped_torrent_file(root.path(), "not-a-torrent.zip", "eA==").is_err());
     }
 
+    #[tokio::test]
+    async fn staged_torrent_scans_and_loads_from_a_path_with_spaces() {
+        let root = tempfile::tempdir().unwrap();
+        let staged = stage_dropped_torrent_file(
+            &root.path().join("Application Support"),
+            "测试 file.torrent",
+            &STANDARD.encode(b"torrent-bytes"),
+        ).unwrap();
+        let input = staged.to_str().unwrap();
+        let scanned = crate::scan_download_inputs(input);
+        assert_eq!(scanned.len(), 1);
+        assert!(scanned[0].valid);
+        assert_eq!(scanned[0].input, input);
+        let loaded = crate::downloader::load_torrent_base64(&scanned[0].input).await.unwrap();
+        assert_eq!(STANDARD.decode(loaded).unwrap(), b"torrent-bytes");
+    }
+
     #[test]
     fn discard_prepared_accepts_only_pre_submission_statuses() {
         assert!(prepared_task_can_be_discarded(TaskStatus::Draft));

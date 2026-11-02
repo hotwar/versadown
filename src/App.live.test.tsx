@@ -774,7 +774,7 @@ it('sorts only the active task tab from the menu beside total speed', async () =
   expect(visibleNames()).toEqual(['delta.zip', 'beta.zip']);
 });
 
-it('places a newly added download first without changing the active sort preference', async () => {
+it('keeps a newly added download in the explicitly selected sort order', async () => {
   window.localStorage.removeItem('task-list-order-v1');
   const active = [
     { id: 'existing-zeta', name: 'zeta.zip', kind: 'file' as const, status: 'downloading' as const, progress: 20 },
@@ -798,7 +798,7 @@ it('places a newly added download first without changing the active sort prefere
   await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
   act(() => { state.listeners.get('launcher-parse')?.({ payload: 'https://example.test/middle.zip' }); });
 
-  await waitFor(() => expect(visibleNames()).toEqual(['middle.zip', 'alpha.zip', 'zeta.zip']));
+  await waitFor(() => expect(visibleNames()).toEqual(['alpha.zip', 'middle.zip', 'zeta.zip']));
   await user.click(screen.getByRole('button', { name: '排序任务' }));
   expect(screen.getByRole('menuitemradio', { name: '按文件名称从 A 到 Z' })).toHaveAttribute('aria-checked', 'true');
   act(() => { state.onTask?.({ id: 'new-middle', name: 'middle.zip', kind: 'file', status: 'completed', progress: 100 }); });
@@ -1934,6 +1934,24 @@ it('uses the existing native task action for floating-ball batch resume', async 
   expect(screen.getByRole('button', { name: 'archive.iso 排队中' })).toBeEnabled();
   await act(async () => { action.resolve({ task: { ...pausedTask, status: 'downloading' } }); });
   expect(await screen.findByRole('button', { name: '暂停 archive.iso' })).toBeVisible();
+});
+
+it('pauses queued tasks before freeing active slots when the launcher pauses all', async () => {
+  const active: QueueTask = { ...oldTask, id: 'active' };
+  const queued: QueueTask = { ...oldTask, id: 'queued', name: 'waiting.zip', status: 'queued' };
+  state.list.mockResolvedValue([active, queued]);
+  const waitingPause = deferred<{ task: QueueTask }>();
+  state.taskAction.mockImplementation((id: string) => id === queued.id
+    ? waitingPause.promise : Promise.resolve({ task: { ...active, status: 'paused' } }));
+  render(<App />);
+  await screen.findByText('waiting.zip');
+  await waitFor(() => expect(state.listeners.get('launcher-command')).toBeDefined());
+  act(() => { state.listeners.get('launcher-command')?.({ payload: 'pause-all' }); });
+  await waitFor(() => expect(state.taskAction).toHaveBeenCalledWith('queued', 'pause'));
+  expect(state.taskAction).not.toHaveBeenCalledWith('active', 'pause');
+  await act(async () => { waitingPause.resolve({ task: { ...queued, status: 'paused' } }); });
+  await waitFor(() => expect(state.taskAction).toHaveBeenCalledWith('active', 'pause'));
+  expect(await screen.findByRole('button', { name: '继续 waiting.zip' })).toBeVisible();
 });
 
 it('cancels one expanded torrent file without cancelling the parent task', async () => {

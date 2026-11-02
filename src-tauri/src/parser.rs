@@ -143,7 +143,7 @@ fn is_access_code_parameter(name: &str) -> bool {
 }
 
 fn access_code_from_text(input: &str) -> Option<String> {
-    Regex::new(r"(?i)(?:提取码|访问码)\s*[:：]\s*([a-z0-9]+)")
+    Regex::new(r"(?i)(?:提取码|访问码|access\s*code)\s*[:：]\s*([a-z0-9]+)")
         .expect("static access code pattern")
         .captures(input)
         .and_then(|captures| captures.get(1))
@@ -412,16 +412,30 @@ fn extract_raw_candidates(text: &str) -> Vec<String> {
         r#"(?i)(ed2k:[^\s<>；]*?\|/|magnet:[^\s<>；]*|thunder://[^\s<>；]*|ftp:[^\s<>；]+|https?://[^\s<>；]+|file://[^\s<>；]+|"/[^"\r\n]+\.torrent"|'/[^'\r\n]+\.torrent'|[a-z]:\\[^\r\n<>]*?\.torrent|/[^\s<>；"']+\.torrent)"#,
     )
     .expect("static candidate pattern");
-    pattern
-        .find_iter(text)
-        .map(|match_| {
-            let raw = match_.as_str();
-            let candidate = if raw.starts_with("\"/") || raw.starts_with("'/") {
-                &raw[1..raw.len() - 1]
+    // Native file drops and staged torrents are one absolute path per line.
+    // Application Support and user filenames often contain spaces; applying
+    // the mixed-text regex first would silently truncate such paths.
+    text.lines()
+        .flat_map(|line| {
+            let source = line.trim();
+            if std::path::Path::new(source).is_absolute()
+                && source.to_ascii_lowercase().ends_with(".torrent")
+            {
+                vec![source.to_string()]
             } else {
-                raw
-            };
-            trim_extracted_candidate(candidate)
+                pattern
+                    .find_iter(line)
+                    .map(|match_| {
+                        let raw = match_.as_str();
+                        let candidate = if raw.starts_with("\"/") || raw.starts_with("'/") {
+                            &raw[1..raw.len() - 1]
+                        } else {
+                            raw
+                        };
+                        trim_extracted_candidate(candidate)
+                    })
+                    .collect()
+            }
         })
         .collect()
 }
@@ -683,6 +697,18 @@ mod tests {
         let values = scan_download_inputs(source);
         assert_eq!(values.len(), 1);
         assert_eq!(values[0].input, source);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scan_preserves_unquoted_native_and_staged_paths_with_spaces() {
+        let input = "/Users/test/Library/Application Support/com.versadown.desktop/dropped-torrents/id/My 文件.torrent\n/Users/test/下载/Other file.torrent";
+        let values = scan_download_inputs(input);
+        assert_eq!(values.len(), 2);
+        for (value, line) in values.iter().zip(input.lines()) {
+            assert!(value.valid);
+            assert_eq!(value.input, line);
+        }
     }
 
     #[test]

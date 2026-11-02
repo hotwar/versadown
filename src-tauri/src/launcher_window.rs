@@ -2,6 +2,10 @@ use tauri::{AppHandle, Manager, WebviewWindow, WebviewWindowBuilder};
 
 use crate::{launcher, launcher_input, LauncherVisibility};
 
+#[cfg(target_os = "macos")]
+#[path = "launcher_window_macos.rs"]
+mod macos;
+
 const LAUNCHER_LABEL: &str = "launcher";
 
 /// A hidden launcher never renders, so it should not own a web process. The
@@ -20,6 +24,8 @@ pub fn ensure_launcher_window(
     visibility: LauncherVisibility,
 ) -> Result<Option<WebviewWindow>, String> {
     if let Some(window) = app.get_webview_window(LAUNCHER_LABEL) {
+        #[cfg(target_os = "macos")]
+        macos::allow_canvas_above_screen(&window)?;
         return Ok(Some(window));
     }
     if !should_create_launcher_window(visibility) {
@@ -43,6 +49,8 @@ pub fn ensure_launcher_window(
         }
     };
     let window = builder.build().map_err(|error| error.to_string())?;
+    #[cfg(target_os = "macos")]
+    macos::allow_canvas_above_screen(&window)?;
     #[cfg(target_os = "linux")]
     allow_launcher_above_screen_top(&window)?;
     crate::webview_memory::configure_webview(&window);

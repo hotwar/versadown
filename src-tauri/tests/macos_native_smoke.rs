@@ -37,7 +37,8 @@ fn main() {
     }
     let root = tempfile::tempdir().unwrap();
     // The real app runs on this process's main thread, with no user tasks,
-    // login attempts or visible manager/launcher windows.
+    // login attempts or visible manager window. The geometry regression
+    // briefly shows only the isolated launcher.
     std::env::set_var("VERSADOWN_BACKGROUND_UI_TEST", "1");
     std::env::set_var("VERSADOWN_NATIVE_SMOKE", "1");
     std::env::set_var("VERSADOWN_TEST_DATA_DIR", root.path().join("data"));
