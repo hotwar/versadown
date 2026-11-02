@@ -445,19 +445,14 @@ function cloudShareCopyUrl(url: string, passCode?: string): string {
   if (!passCode) return url;
   try {
     const parsed = new URL(url);
-    // Keep the Baidu URL usable after a scanner extracts it from the copied
-    // text; the separate human-readable code line is not part of that URL.
+    // Baidu supports an access code in the URL itself. Other providers keep
+    // their returned URL; the code remains a separate field in the dialog.
     if (parsed.hostname === 'pan.baidu.com') {
       parsed.searchParams.set('pwd', passCode);
       return parsed.toString();
     }
   } catch { /* Preserve the provider value if it is not an absolute URL. */ }
   return url;
-}
-
-function cloudShareCopyText(url: string, passCode?: string): string {
-  const link = cloudShareCopyUrl(url, passCode);
-  return passCode ? t('cloud.share.linkWithPassCode', { url: link, passCode }) : link;
 }
 
 function sharePassCodeHint(constraint: SharePassCodeConstraint): string {
@@ -522,7 +517,7 @@ function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstrain
           {updatedPassCodeError && <p role="alert">{updatedPassCodeError}</p>}
           {updateNotice && <p role={updateNotice.error ? 'alert' : 'status'}>{updateNotice.message}</p>}
         </form>}
-        <button className="secondary" onClick={() => onCopy(cloudShareCopyText(share.url, share.passCode))}>{t('cloud.share.copyLink')}</button><button className="primary" disabled={savingPassCode} onClick={onClose}>{t('common.done')}</button>
+        <button className="secondary" onClick={() => onCopy(cloudShareCopyUrl(share.url, share.passCode))}>{t('cloud.share.copyLink')}</button><button className="primary" disabled={savingPassCode} onClick={onClose}>{t('common.done')}</button>
       </> : <form onSubmit={submit}>
         <h3>{t('cloud.share.create')}</h3>
         <p>{t('cloud.share.description', { name: title, options: alwaysGeneratedPassCode ? t('cloud.share.generatedOptions') : sharePassCodeConstraint?.required ? t('cloud.share.requiredOptions', { hint: sharePassCodeHint(sharePassCodeConstraint) }) : sharePassCodeConstraint ? t('cloud.share.optionsWithHint', { hint: sharePassCodeHint(sharePassCodeConstraint) }) : t('cloud.share.options') })}</p>
@@ -1459,7 +1454,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   function copyShareLink(value: string, passCode?: string) {
-    void copyCloudShareLink(cloudShareCopyText(value, passCode)).then(() => setOperation({ kind: 'success', message: t('cloud.share.linkCopied') })).catch((error) => setOperation({ kind: 'error', message: t('cloud.share.copyLinkFailed', { detail: errorMessage(error, t('common.retry')) }) }));
+    void copyCloudShareLink(cloudShareCopyUrl(value, passCode)).then(() => setOperation({ kind: 'success', message: t('cloud.share.linkCopied') })).catch((error) => setOperation({ kind: 'error', message: t('cloud.share.copyLinkFailed', { detail: errorMessage(error, t('common.retry')) }) }));
   }
 
   function runContextAction(action: CloudMenuAction) {

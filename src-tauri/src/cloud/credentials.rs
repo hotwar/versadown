@@ -13,6 +13,10 @@ use std::{
 };
 use zeroize::Zeroize;
 
+#[cfg(target_os = "macos")]
+#[path = "credentials_macos.rs"]
+mod macos;
+
 const SYSTEM_CREDENTIAL_SERVICE_PREFIX: &str = "com.versadown.desktop";
 const SHARE_PROTECTOR_SERVICE: &str = "com.versadown.desktop.share-storage";
 const SHARE_PROTECTOR_KEY: &str = "share-storage-key-v1";
@@ -53,6 +57,10 @@ impl CredentialStore for MemoryCredentialStore {
 pub struct SystemCredentialStore {
     root: PathBuf,
     service: String,
+    #[cfg(target_os = "macos")]
+    legacy_privacy: std::sync::Arc<Mutex<bool>>,
+    #[cfg(all(target_os = "macos", test))]
+    test_key: Option<[u8; 32]>,
 }
 
 // Native UI regression binaries must not access the developer's real
@@ -142,11 +150,35 @@ impl SystemCredentialStore {
     }
     pub fn new(root: PathBuf) -> Result<Self, QuarkError> {
         std::fs::create_dir_all(&root).map_err(|_| QuarkError::Storage)?;
+        #[cfg(target_os = "macos")]
+        macos::register_existing_data(&root)?;
         let root_id = format!("{:x}", Sha256::digest(root.to_string_lossy().as_bytes()));
         Ok(Self {
+            #[cfg(target_os = "macos")]
+            legacy_privacy: Default::default(),
+            #[cfg(all(target_os = "macos", test))]
+            test_key: None,
             root,
             service: format!("{SYSTEM_CREDENTIAL_SERVICE_PREFIX}.{}", &root_id[..24]),
         })
+    }
+    #[cfg(target_os = "macos")]
+    fn master_key(&self, create: bool) -> Result<[u8; 32], QuarkError> {
+        #[cfg(test)]
+        if let Some(key) = self.test_key {
+            return Ok(key);
+        }
+        share_protection_key(create)
+    }
+    #[cfg(target_os = "macos")]
+    pub(crate) fn contains_local(&self, key: &str) -> Result<bool, QuarkError> {
+        Ok(macos::payload(&self.root, key)?.is_some())
+    }
+    #[cfg(target_os = "macos")]
+    pub(crate) fn preserve_legacy_privacy(&self, configured: bool) {
+        if let Ok(mut legacy) = self.legacy_privacy.lock() {
+            *legacy = configured;
+        }
     }
     fn entry(&self, key: &str) -> Result<Entry, QuarkError> {
         if !credential_key_is_supported(key) {
@@ -161,6 +193,14 @@ impl CredentialStore for SystemCredentialStore {
         if let Some(store) = native_smoke_credentials() {
             return store.save(&format!("{}:{k}", self.service), v);
         }
+        #[cfg(target_os = "macos")]
+        {
+            if !credential_key_is_supported(k) {
+                return Err(QuarkError::Storage);
+            }
+            return macos::save(&self.root, &self.service, k, v, self.master_key(true)?);
+        }
+        #[cfg(not(target_os = "macos"))]
         self.entry(k)?
             .set_secret(v)
             .map_err(|error| credential_error("save", k, error))
@@ -170,6 +210,40 @@ impl CredentialStore for SystemCredentialStore {
         if let Some(store) = native_smoke_credentials() {
             return store.load(&format!("{}:{k}", self.service));
         }
+        #[cfg(target_os = "macos")]
+        {
+            if !credential_key_is_supported(k) {
+                return Err(QuarkError::Storage);
+            }
+            if let Some(payload) = macos::payload(&self.root, k)? {
+                return macos::decrypt(&self.service, k, &payload, self.master_key(false)?)
+                    .map(Some);
+            }
+            // An existing privacy password may not silently disappear. Only an
+            // explicit privacy operation reaches this one-time adoption path;
+            // startup checks local metadata and never reads this legacy entry.
+            if k == "privacy-download-password-v1" {
+                let mut legacy = self
+                    .legacy_privacy
+                    .lock()
+                    .map_err(|_| QuarkError::Storage)?;
+                if *legacy {
+                    // Honor a previous master-key denial before asking for any
+                    // legacy privacy access. This path is never used by startup.
+                    let _key = zeroize::Zeroizing::new(self.master_key(true)?);
+                    let secret = zeroize::Zeroizing::new(
+                        self.entry(k)?
+                            .get_secret()
+                            .map_err(|e| credential_error("read", k, e))?,
+                    );
+                    self.save(k, &secret)?;
+                    *legacy = false;
+                    return Ok(Some(secret.to_vec()));
+                }
+            }
+            return Ok(None);
+        }
+        #[cfg(not(target_os = "macos"))]
         match self.entry(k)?.get_secret() {
             Ok(value) => Ok(Some(value)),
             Err(KeyringError::NoEntry) => Ok(None),
@@ -181,6 +255,14 @@ impl CredentialStore for SystemCredentialStore {
         if let Some(store) = native_smoke_credentials() {
             return store.remove(&format!("{}:{k}", self.service));
         }
+        #[cfg(target_os = "macos")]
+        {
+            if !credential_key_is_supported(k) {
+                return Err(QuarkError::Storage);
+            }
+            return macos::remove(&self.root, k);
+        }
+        #[cfg(not(target_os = "macos"))]
         match self.entry(k)?.delete_credential() {
             Ok(()) => Ok(()),
             Err(KeyringError::NoEntry) => Ok(()),
@@ -193,7 +275,7 @@ fn share_protector_entry() -> Result<Entry, QuarkError> {
     Entry::new(SHARE_PROTECTOR_SERVICE, SHARE_PROTECTOR_KEY).map_err(|_| QuarkError::Storage)
 }
 
-fn share_protection_key() -> Result<[u8; 32], QuarkError> {
+fn share_protection_key(create: bool) -> Result<[u8; 32], QuarkError> {
     #[cfg(all(target_os = "macos", feature = "native-smoke"))]
     if native_smoke_credentials().is_some() {
         static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
@@ -203,11 +285,24 @@ fn share_protection_key() -> Result<[u8; 32], QuarkError> {
             key
         }));
     }
+    #[cfg(target_os = "macos")]
+    {
+        return macos::MASTER_KEY.get(|| read_share_protection_key(create));
+    }
+    #[cfg(not(target_os = "macos"))]
+    read_share_protection_key(create)
+}
+
+fn read_share_protection_key(_create: bool) -> Result<[u8; 32], QuarkError> {
     let entry = share_protector_entry()?;
     let mut key = match entry.get_secret() {
         Ok(key) if key.len() == 32 => key,
         Ok(_) => return Err(QuarkError::Storage),
         Err(KeyringError::NoEntry) => {
+            #[cfg(target_os = "macos")]
+            if !_create || macos::KEY_REQUIRED.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(QuarkError::Storage);
+            }
             let mut key = vec![0_u8; 32];
             OsRng.fill_bytes(&mut key);
             entry.set_secret(&key).map_err(|_| QuarkError::Storage)?;
@@ -225,7 +320,7 @@ fn share_protection_key() -> Result<[u8; 32], QuarkError> {
 /// credential store. This replaces the platform-specific adapter while leaving the transactional plan
 /// repository intact on Windows, Linux and macOS.
 pub(crate) fn protect(input: &[u8], encrypt: bool) -> Result<Vec<u8>, QuarkError> {
-    let mut key = share_protection_key()?;
+    let mut key = share_protection_key(encrypt)?;
     let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|_| QuarkError::Storage)?;
     key.zeroize();
     if encrypt {

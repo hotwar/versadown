@@ -347,13 +347,30 @@ pub fn run() {
                 .ok()
                 .and_then(|json| serde_json::from_slice(&json).ok())
                 .unwrap_or_default();
-            match ai_secrets.load(ai::API_KEY_SECRET_NAME) {
-                Ok(key) => settings.ai.api_key_configured = key.is_some(),
-                Err(_) => startup_health.credentials_unavailable = true,
+            #[cfg(target_os = "macos")]
+            {
+                match ai_secrets.contains_local(ai::API_KEY_SECRET_NAME) {
+                    Ok(configured) => settings.ai.api_key_configured = configured,
+                    Err(_) => startup_health.credentials_unavailable = true,
+                }
+                match ai_secrets.contains_local(privacy::PASSWORD_SECRET_NAME) {
+                    Ok(local) => {
+                        ai_secrets.preserve_legacy_privacy(settings.privacy_password_configured && !local);
+                        settings.privacy_password_configured |= local;
+                    }
+                    Err(_) => startup_health.credentials_unavailable = true,
+                }
             }
-            match privacy::password_is_configured(&ai_secrets) {
-                Ok(configured) => settings.privacy_password_configured = configured,
-                Err(_) => startup_health.credentials_unavailable = true,
+            #[cfg(not(target_os = "macos"))]
+            {
+                match ai_secrets.load(ai::API_KEY_SECRET_NAME) {
+                    Ok(key) => settings.ai.api_key_configured = key.is_some(),
+                    Err(_) => startup_health.credentials_unavailable = true,
+                }
+                match privacy::password_is_configured(&ai_secrets) {
+                    Ok(configured) => settings.privacy_password_configured = configured,
+                    Err(_) => startup_health.credentials_unavailable = true,
+                }
             }
             // A failed read must not reset saved configuration or unlock the
             // privacy session. Credential-dependent commands still fail closed.
