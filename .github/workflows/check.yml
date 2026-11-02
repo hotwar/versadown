@@ -73,6 +73,7 @@ jobs:
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::xunlei::tests::xunlei_cancels_shares_with_the_web_management_contract
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib unavailable_credential_storage_does_not_reset_or_delete_saved_accounts
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib macos_cookie_scope_tests
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib private_history_reset
       - name: Check macOS encrypted credentials without accessing Keychain
         if: runner.os == 'macOS'
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::credentials::macos::tests

@@ -355,8 +355,13 @@ pub fn run() {
                 }
                 match ai_secrets.contains_local(privacy::PASSWORD_SECRET_NAME) {
                     Ok(local) => {
-                        ai_secrets.preserve_legacy_privacy(settings.privacy_password_configured && !local);
-                        settings.privacy_password_configured |= local;
+                        if !local && (settings.privacy_password_configured || store.has_private_tasks()?) {
+                            // The prerelease credential reset deliberately drops old
+                            // private history, retaining the downloaded payloads.
+                            store.reset_private_task_history()?;
+                            settings.privacy_download_enabled = false;
+                        }
+                        settings.privacy_password_configured = local;
                     }
                     Err(_) => startup_health.credentials_unavailable = true,
                 }

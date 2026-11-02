@@ -57,8 +57,6 @@ impl CredentialStore for MemoryCredentialStore {
 pub struct SystemCredentialStore {
     root: PathBuf,
     service: String,
-    #[cfg(target_os = "macos")]
-    legacy_privacy: std::sync::Arc<Mutex<bool>>,
     #[cfg(all(target_os = "macos", test))]
     test_key: Option<[u8; 32]>,
 }
@@ -79,18 +77,8 @@ fn native_smoke_credentials() -> Option<&'static MemoryCredentialStore> {
     Some(&STORE)
 }
 
-fn credential_error(operation: &str, key: &str, error: KeyringError) -> QuarkError {
-    #[cfg(target_os = "macos")]
-    match &error {
-        // These are OS errors from Security.framework, with no secret data.
-        // Avoid Debug on other variants: BadEncoding can contain raw bytes.
-        KeyringError::PlatformFailure(cause) | KeyringError::NoStorageAccess(cause) => {
-            eprintln!("macOS credential {operation} failed for {key}: {cause}")
-        }
-        _ => eprintln!("macOS credential {operation} failed for {key}"),
-    }
-    #[cfg(not(target_os = "macos"))]
-    let _ = (operation, key, error);
+#[cfg(not(target_os = "macos"))]
+fn credential_error(_operation: &str, _key: &str, _error: KeyringError) -> QuarkError {
     QuarkError::Storage
 }
 
@@ -154,8 +142,6 @@ impl SystemCredentialStore {
         macos::register_existing_data(&root)?;
         let root_id = format!("{:x}", Sha256::digest(root.to_string_lossy().as_bytes()));
         Ok(Self {
-            #[cfg(target_os = "macos")]
-            legacy_privacy: Default::default(),
             #[cfg(all(target_os = "macos", test))]
             test_key: None,
             root,
@@ -174,12 +160,7 @@ impl SystemCredentialStore {
     pub(crate) fn contains_local(&self, key: &str) -> Result<bool, QuarkError> {
         Ok(macos::payload(&self.root, key)?.is_some())
     }
-    #[cfg(target_os = "macos")]
-    pub(crate) fn preserve_legacy_privacy(&self, configured: bool) {
-        if let Ok(mut legacy) = self.legacy_privacy.lock() {
-            *legacy = configured;
-        }
-    }
+    #[cfg(not(target_os = "macos"))]
     fn entry(&self, key: &str) -> Result<Entry, QuarkError> {
         if !credential_key_is_supported(key) {
             return Err(QuarkError::Storage);
@@ -218,28 +199,6 @@ impl CredentialStore for SystemCredentialStore {
             if let Some(payload) = macos::payload(&self.root, k)? {
                 return macos::decrypt(&self.service, k, &payload, self.master_key(false)?)
                     .map(Some);
-            }
-            // An existing privacy password may not silently disappear. Only an
-            // explicit privacy operation reaches this one-time adoption path;
-            // startup checks local metadata and never reads this legacy entry.
-            if k == "privacy-download-password-v1" {
-                let mut legacy = self
-                    .legacy_privacy
-                    .lock()
-                    .map_err(|_| QuarkError::Storage)?;
-                if *legacy {
-                    // Honor a previous master-key denial before asking for any
-                    // legacy privacy access. This path is never used by startup.
-                    let _key = zeroize::Zeroizing::new(self.master_key(true)?);
-                    let secret = zeroize::Zeroizing::new(
-                        self.entry(k)?
-                            .get_secret()
-                            .map_err(|e| credential_error("read", k, e))?,
-                    );
-                    self.save(k, &secret)?;
-                    *legacy = false;
-                    return Ok(Some(secret.to_vec()));
-                }
             }
             return Ok(None);
         }
