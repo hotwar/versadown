@@ -441,8 +441,23 @@ async function copyCloudShareLink(value: string) {
   await navigator.clipboard.writeText(value);
 }
 
+function cloudShareCopyUrl(url: string, passCode?: string): string {
+  if (!passCode) return url;
+  try {
+    const parsed = new URL(url);
+    // Keep the Baidu URL usable after a scanner extracts it from the copied
+    // text; the separate human-readable code line is not part of that URL.
+    if (parsed.hostname === 'pan.baidu.com') {
+      parsed.searchParams.set('pwd', passCode);
+      return parsed.toString();
+    }
+  } catch { /* Preserve the provider value if it is not an absolute URL. */ }
+  return url;
+}
+
 function cloudShareCopyText(url: string, passCode?: string): string {
-  return passCode ? t('cloud.share.linkWithPassCode', { url, passCode }) : url;
+  const link = cloudShareCopyUrl(url, passCode);
+  return passCode ? t('cloud.share.linkWithPassCode', { url: link, passCode }) : link;
 }
 
 function sharePassCodeHint(constraint: SharePassCodeConstraint): string {
@@ -499,7 +514,7 @@ function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstrain
       {share ? <>
         <h3>{t('cloud.share.created')}</h3>
         <p>{share.name}</p>
-        <form className="cloud-operation-editor"><label>{t('cloud.share.link')}<input aria-label={t('cloud.share.link')} readOnly value={share.url} /></label></form>
+        <form className="cloud-operation-editor"><label>{t('cloud.share.link')}<input aria-label={t('cloud.share.link')} readOnly value={cloudShareCopyUrl(share.url, share.passCode)} /></label></form>
         {share.passCode && <p>{t('cloud.share.passCodeLabel')}：<b>{share.passCode}</b></p>}
         {onUpdatePassCode && <form className="cloud-operation-editor cloud-share-passcode-editor" onSubmit={updatePassCode}>
           <label>{t('cloud.share.changePassCode')}<input aria-label={t('cloud.share.newPassCode')} aria-invalid={Boolean(updatedPassCodeError)} disabled={savingPassCode || busy} value={updatedPassCode} maxLength={sharePassCodeConstraint?.maxLength ?? 32} onChange={(event) => { setUpdatedPassCode(event.target.value); setUpdateNotice(null); }} /></label>

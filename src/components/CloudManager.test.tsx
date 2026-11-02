@@ -606,8 +606,9 @@ it('requires a Baidu code or explicit automatic generation and copies the result
   await user.click(within(dialog).getByRole('button', { name: '创建分享链接' }));
   expect(createCloudShare).toHaveBeenCalledWith('baidu', ['file-1'], { name: '报告.pdf', passCode: 'a7B2' });
   const result = await screen.findByRole('dialog', { name: '分享链接已创建' });
+  expect(within(result).getByRole('textbox', { name: '分享链接' })).toHaveValue('https://pan.baidu.com/s/1created?pwd=a7B2');
   await user.click(within(result).getByRole('button', { name: '复制分享链接' }));
-  await waitFor(() => expect(writeText).toHaveBeenCalledWith('https://pan.baidu.com/s/1created\n提取码：a7B2'));
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith('https://pan.baidu.com/s/1created?pwd=a7B2\n提取码：a7B2'));
 });
 
 it('uses the same four-character alphanumeric share-code guidance for Quark', async () => {
