@@ -58,16 +58,21 @@ jobs:
       - run: pnpm run build
       - name: Check frontend and platform resource contracts
         run: |
-          pnpm exec vitest run src/lib/api.test.ts src/lib/downloadEvents.test.ts src/lib/launcherWindow.test.ts src/lib/mainWindow.test.ts src/components/LauncherWindow.test.tsx src/components/StartupNotice.test.tsx src/components/SettingsPanel.test.tsx src/i18n/index.test.ts --exclude '.worktrees/**'
+          pnpm exec vitest run src/lib/api.test.ts src/lib/downloadEvents.test.ts src/lib/launcherWindow.test.ts src/lib/mainWindow.test.ts src/lib/windowCapabilities.test.ts src/components/LauncherWindow.test.tsx src/components/FloatingLauncher.test.tsx src/components/StartupNotice.test.tsx src/components/SettingsPanel.test.tsx src/components/LocalUploadPicker.test.tsx src/components/CloudManager.test.tsx src/App.live.test.tsx src/i18n/index.test.ts --exclude '.worktrees/**'
           node --test scripts/bundle-resource-config.test.mjs
       - name: Check native download and window behavior
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --test engine_binary --test aria2_live --test parser_policy --test window_config --test window_lifecycle --test engine_runtime --test ftp_download --test cloud_provider_contract --test aria2_bt --test magnet_metadata
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --test engine_binary --test aria2_live --test parser_policy --test window_config --test window_lifecycle --test engine_runtime --test ftp_download --test cloud_provider_contract --test cloud_baidu --test aria2_bt --test magnet_metadata
       - name: Check parser and startup failure handling
         run: |
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib parser::
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib staged_torrent
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib enforces_each_provider_share_code_constraint_before_submitting
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::baidu::tests::share_transfer_
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::xunlei::tests::xunlei_personal_share_uses_the_drive_share_management_protocol
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::xunlei::tests::xunlei_cancels_shares_with_the_web_management_contract
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib unavailable_credential_storage_does_not_reset_or_delete_saved_accounts
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib macos_cookie_scope_tests
-      - name: Check macOS native cookies and graceful quit
+      - name: Check macOS native launcher, cookies and graceful quit
         if: runner.os == 'macOS'
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --features native-smoke --test macos_native_smoke
       - name: Build native application with embedded frontend

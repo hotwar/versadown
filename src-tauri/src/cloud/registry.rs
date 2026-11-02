@@ -393,10 +393,12 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             },
         },
         share_pass_code_constraint: match provider {
+            Baidu => Some(super::baidu::BAIDU_SHARE_PASS_CODE_CONSTRAINT),
             Aliyun => Some(super::aliyun::ALIYUN_SHARE_PASS_CODE_CONSTRAINT),
             Quark => Some(super::quark::QUARK_SHARE_PASS_CODE_CONSTRAINT),
             Uc => Some(super::uc::UC_SHARE_PASS_CODE_CONSTRAINT),
             Pikpak => Some(CloudSharePassCodeConstraint {
+                required: false,
                 min_length: 4,
                 max_length: 4,
                 character_set: super::CloudSharePassCodeCharacterSet::AsciiAlphanumeric,

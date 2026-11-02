@@ -34,8 +34,9 @@ export const cloudCatalog: ProviderDescriptor[] = cloudCatalogRows.map(([
   capabilities: { list: true, createDirectory: true, rename: true, move: true, copy: true, trash: true, delete: true, restore: true, download: true, upload: true, shareInspect: true, shareTransfer: true, recordedTransferResolve: true, shareCreate: true, shareList: true, shareCancel: true },
   maxUploadConcurrency: 2,
   downloadConcurrency: { maxConnectionsPerFile, maxConcurrentTasks },
-  ...((provider === 'quark' || provider === 'uc') ? {
+  ...((provider === 'quark' || provider === 'uc' || provider === 'baidu') ? {
     sharePassCodeConstraint: {
+      required: provider === 'baidu',
       minLength: 4,
       maxLength: 4,
       characterSet: 'asciiAlphanumeric' as const,

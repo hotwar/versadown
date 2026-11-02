@@ -19,6 +19,15 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+pub const BAIDU_SHARE_PASS_CODE_CONSTRAINT: super::CloudSharePassCodeConstraint =
+    super::CloudSharePassCodeConstraint {
+        required: true,
+        min_length: 4,
+        max_length: 4,
+        character_set: super::CloudSharePassCodeCharacterSet::AsciiAlphanumeric,
+        hint: "提取码必须为 4 位字母或数字",
+    };
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,6 +68,44 @@ mod tests {
             // Existing listing fixtures represent public/already accessible shares.
             access_code: None,
         }
+    }
+
+    #[test]
+    fn share_transfer_accepts_a_task_id_and_waits_for_exact_destination_ids() {
+        let http = Http::new(vec![
+            json!({"errno":0,"result":{"bdstoken":"token"}}),
+            json!({"errno":0,"task_id":8}),
+            json!({"errno":0,"status":"running","task_errno":0}),
+            json!({"errno":0,"status":"success","task_errno":0,"list":[{"from_fs_id":11,"to_fs_id":99,"to":"/movie.mp4"}]}),
+        ]);
+        let context =
+            json!({"shorturl":"share123","shareid":22,"uk":33,"bdclnd":"verified-cookie"});
+        let value = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http)
+            .transfer_share_file(&context, "11")
+            .unwrap();
+        assert_eq!(value["extra"]["list"][0]["to_fs_id"], 99);
+        let requests = http.requests.lock().unwrap();
+        assert!(requests[1].url.contains("async=1"));
+        assert!(requests[2].url.contains("/share/taskquery?"));
+        assert!(requests[2].headers["Cookie"].contains("BDCLND=verified-cookie"));
+        assert_eq!(requests.len(), 4);
+    }
+
+    #[test]
+    fn share_transfer_rejects_failed_tasks_without_requesting_download_bytes() {
+        let http = Http::new(vec![
+            json!({"errno":0,"result":{"bdstoken":"token"}}),
+            json!({"errno":0,"task_id":8}),
+            json!({"errno":0,"status":"failed","task_errno":2}),
+        ]);
+        let context =
+            json!({"shorturl":"share123","shareid":22,"uk":33,"bdclnd":"verified-cookie"});
+        assert!(
+            BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http)
+                .transfer_share_file(&context, "11")
+                .is_err()
+        );
+        assert_eq!(http.requests.lock().unwrap().len(), 3);
     }
 
     #[test]
@@ -296,6 +343,19 @@ mod tests {
     #[test]
     #[ignore = "requires explicit share URL, code, saved Baidu session; transfers one file, probes 1 KiB, then trashes the exact created copy"]
     fn live_baidu_share_transfer_download_probe() {
+        struct ProbeHttp(crate::cloud::ReqwestTransport);
+        impl CloudHttpTransport for ProbeHttp {
+            fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                let endpoint = url::Url::parse(&request.url).ok().map(|url| url.path().to_owned()).unwrap_or_default();
+                let response = self.0.send(request)?;
+                let value: Value = serde_json::from_str(&response.body).unwrap_or_default();
+                eprintln!("BAIDU_PROBE {endpoint} HTTP {} errno {:?} code {:?}", response.status, value.get("errno").and_then(Value::as_i64), value.get("code").and_then(Value::as_i64));
+                Ok(response)
+            }
+            fn manages_cookie_session(&self) -> bool { self.0.manages_cookie_session() }
+            fn cookies_for_url(&self, url: &str) -> Result<Vec<String>, QuarkError> { self.0.cookies_for_url(url) }
+            fn isolated_session(&self) -> Result<Option<Box<dyn CloudHttpTransport>>, QuarkError> { self.0.isolated_session() }
+        }
         assert_eq!(
             std::env::var("VERSADOWN_LIVE_BAIDU_SHARE_TRANSFER").as_deref(),
             Ok("1")
@@ -313,7 +373,7 @@ mod tests {
         .unwrap();
         let session: BaiduSession =
             serde_json::from_slice(&credentials.load("baidu").unwrap().unwrap()).unwrap();
-        let http = crate::cloud::ReqwestTransport::new().unwrap();
+        let http = ProbeHttp(crate::cloud::ReqwestTransport::new().unwrap());
         let adapter = BaiduShareAdapter {
             credentials: &credentials,
             http: &http,
@@ -1686,10 +1746,14 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         if file_ids.is_empty() {
             return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into()));
         }
-        if options.generate_pass_code {
-            return Err(QuarkError::InvalidInput(
-                "百度网盘需要设置自定义提取码".into(),
-            ));
+        use rand::distributions::{Alphanumeric, DistString};
+        let pass_code = if options.generate_pass_code {
+            Alphanumeric.sample_string(&mut rand::thread_rng(), 4)
+        } else {
+            options.pass_code.as_deref().unwrap_or_default().trim().to_owned()
+        };
+        if pass_code.len() != 4 || !pass_code.bytes().all(|ch| ch.is_ascii_alphanumeric()) {
+            return Err(QuarkError::InvalidInput(BAIDU_SHARE_PASS_CODE_CONSTRAINT.hint.into()));
         }
         let fsids = file_ids
             .iter()
@@ -1701,26 +1765,90 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let token = self.web_token()?;
-        let pass_code = options
-            .pass_code
-            .as_deref()
-            .filter(|code| !code.trim().is_empty());
         let value = self.web_form(
             "/share/set",
             &write_query(&token, "channel=chunlei"),
             form(&[
                 ("fid_list", json!(fsids).to_string()),
-                (
-                    "schannel",
-                    if pass_code.is_some() { "4" } else { "0" }.into(),
-                ),
+                ("schannel", "4".into()),
                 ("channel_list", "[]".into()),
                 ("period", options.expires_in_days.unwrap_or(0).to_string()),
-                ("pwd", pass_code.unwrap_or_default().into()),
+                ("pwd", pass_code.clone()),
                 ("eflag_disable", "true".into()),
             ]),
         )?;
-        baidu_share_from_value(&value, Some(file_ids), pass_code)
+        baidu_share_from_value(&value, Some(file_ids), Some(&pass_code))
+    }
+
+    fn transfer_share_file(&self, context: &Value, file_id: &str) -> Result<Value, QuarkError> {
+        let token = self.web_token()?;
+        let referer = format!("{PAN}/s/1{}", encoded(&required(context, "shorturl")?));
+        let bdclnd = context["bdclnd"].as_str().unwrap_or("");
+        let response = self.share_http(
+            "POST",
+            &format!(
+                "/share/transfer?{}&shareid={}&from={}&ondup=newcopy&async=1",
+                write_query(&token, ""),
+                numeric_field(context, "shareid")?,
+                numeric_field(context, "uk")?
+            ),
+            Some(form(&[
+                (
+                    "fsidlist",
+                    format!("[{}]", numeric_field(&json!({"id":file_id}), "id")?),
+                ),
+                ("path", "/".into()),
+            ])),
+            bdclnd,
+            Some(&referer),
+        )?;
+        let value = share_json(&response)?;
+        if value
+            .pointer("/extra/list")
+            .and_then(Value::as_array)
+            .is_some_and(|list| !list.is_empty())
+        {
+            return Ok(value);
+        }
+        let task_id = value
+            .get("task_id")
+            .or_else(|| value.get("taskid"))
+            .and_then(string_or_number)
+            .ok_or(QuarkError::InvalidResponse)?;
+        // Valid asynchronous transfers may return only a task ID. Resolve the
+        // exact resulting file ID before journalling it or requesting bytes.
+        for attempt in 0..60 {
+            if attempt > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
+            let response = self.share_http(
+                "GET",
+                &format!(
+                    "/share/taskquery?{}&taskid={}&shareid={}&from={}",
+                    write_query(&token, ""),
+                    encoded(&task_id),
+                    numeric_field(context, "shareid")?,
+                    numeric_field(context, "uk")?
+                ),
+                None,
+                bdclnd,
+                Some(&referer),
+            )?;
+            let value = share_json(&response)?;
+            if value.get("task_errno").and_then(Value::as_i64).unwrap_or(0) != 0
+                || value["status"] == "failed"
+            {
+                return Err(QuarkError::Provider("百度分享无效或请求被拒绝".into()));
+            }
+            if value["status"] == "success" {
+                let list = value
+                    .get("list")
+                    .and_then(Value::as_array)
+                    .ok_or(QuarkError::InvalidResponse)?;
+                return Ok(json!({"extra":{"list":list}}));
+            }
+        }
+        Err(QuarkError::Provider("百度分享无效或请求被拒绝".into()))
     }
 
     pub fn list_shares(&self) -> Result<Vec<CloudShare>, QuarkError> {
@@ -3120,31 +3248,7 @@ impl ShareTransfer for BaiduShareAdapter<'_> {
     ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
         let owner = self.transfer_owner_fingerprint(entry)?;
         let client = self.client()?;
-        let context = &entry.plan.provider_context;
-        let token = client.web_token()?;
-        let referer = format!("{PAN}/s/1{}", encoded(&required(context, "shorturl")?));
-        let response = client.share_http(
-            "POST",
-            &format!(
-                "/share/transfer?{}&shareid={}&from={}&ondup=newcopy&async=0",
-                write_query(&token, ""),
-                numeric_field(context, "shareid")?,
-                numeric_field(context, "uk")?
-            ),
-            Some(form(&[
-                (
-                    "fsidlist",
-                    format!(
-                        "[{}]",
-                        numeric_field(&json!({"id":entry.entry.entry_id}), "id")?
-                    ),
-                ),
-                ("path", "/".into()),
-            ])),
-            context["bdclnd"].as_str().unwrap_or(""),
-            Some(&referer),
-        )?;
-        let value = share_json(&response)?;
+        let value = client.transfer_share_file(&entry.plan.provider_context, &entry.entry.entry_id)?;
         let files = value
             .pointer("/extra/list")
             .and_then(Value::as_array)

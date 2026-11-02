@@ -120,7 +120,7 @@ fn baidu_download_rejects_a_reused_path_before_requesting_file_bytes() {
         .download(&opaque_reference("/movie.mkv"))
         .unwrap_err();
     assert!(
-        matches!(error, QuarkError::Provider(ref message) if message.contains("已移动") || message.contains("不一致"))
+        matches!(error, QuarkError::SourceFileMissing)
     );
     assert!(!http
         .requests()
@@ -1439,4 +1439,38 @@ fn baidu_commits_a_zero_slice_upload_instead_of_treating_precreate_as_a_file() {
     assert!(upload.requests().is_empty());
     assert_eq!(http.requests().len(), 3);
     assert!(http.requests()[2].url.contains("/api/create"));
+}
+
+#[test]
+fn baidu_share_requires_a_valid_code_before_any_network_request() {
+    use versadown_lib::cloud::CloudShareOptions;
+    for code in [None, Some(""), Some("abc"), Some("12345"), Some("a!b2")] {
+        let http = RecordingHttp::sequence(&[]);
+        let options = CloudShareOptions { name: "test".into(), pass_code: code.map(str::to_owned), generate_pass_code: false, expires_in_days: None };
+        assert!(matches!(BaiduClient::new(BaiduSession::cookie("BDUSS=test"), &http).create_share(&["unused".into()], &options), Err(QuarkError::InvalidInput(_))));
+        assert!(http.requests().is_empty());
+    }
+}
+
+#[test]
+fn baidu_share_submits_and_retains_custom_or_generated_codes() {
+    use versadown_lib::cloud::CloudShareOptions;
+    for generated in [false, true] {
+        let http = RecordingHttp::sequence(&[
+            r#"{"errno":0,"result":{"bdstoken":"share-token"}}"#,
+            r#"{"errno":0,"shareid":42,"link":"https://pan.baidu.com/s/1created"}"#,
+        ]);
+        let options = CloudShareOptions { name: "test".into(), pass_code: (!generated).then(|| "a7B2".into()), generate_pass_code: generated, expires_in_days: Some(7) };
+        let id = format!("bdr_{}", URL_SAFE_NO_PAD.encode(r#"{"fsid":"123","path":"/test.pdf"}"#));
+        let share = BaiduClient::new(BaiduSession::cookie("BDUSS=test"), &http).create_share(&[id], &options).unwrap();
+        let code = share.pass_code.unwrap();
+        assert_eq!(code.len(), 4);
+        assert!(code.bytes().all(|ch| ch.is_ascii_alphanumeric()));
+        if !generated { assert_eq!(code, "a7B2"); }
+        let requests = http.requests();
+        let body: BTreeMap<String, String> = url::form_urlencoded::parse(requests[1].body.as_deref().unwrap().as_bytes()).into_owned().collect();
+        assert_eq!(body["schannel"], "4");
+        assert_eq!(body["pwd"], code);
+        assert_eq!(body["period"], "7");
+    }
 }

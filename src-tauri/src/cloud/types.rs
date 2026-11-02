@@ -232,6 +232,7 @@ pub struct CloudShareOptions {
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CloudSharePassCodeConstraint {
+    pub required: bool,
     pub min_length: u8,
     pub max_length: u8,
     pub character_set: CloudSharePassCodeCharacterSet,

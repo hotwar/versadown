@@ -325,3 +325,5 @@ body *{font-weight:400!important}
   color: #66430b;
   font-size: 13px;
 }
+
+.local-upload-hidden-toggle{display:flex;align-items:center;gap:6px;white-space:nowrap}

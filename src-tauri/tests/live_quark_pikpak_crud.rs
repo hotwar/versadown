@@ -33,7 +33,23 @@ impl LiveHttp {
 
 impl CloudHttpTransport for LiveHttp {
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, CloudError> {
-        self.0.send(request)
+        let endpoint = url::Url::parse(&request.url).ok().map(|url| format!("{}{}", url.host_str().unwrap_or("unknown"), url.path())).unwrap_or_default();
+        let response = self.0.send(request)?;
+        let value = serde_json::from_str::<serde_json::Value>(&response.body).unwrap_or_default();
+        eprintln!("API {endpoint}: HTTP {} code {:?} status {:?}", response.status, value.get("code").and_then(serde_json::Value::as_i64), value.get("status").and_then(serde_json::Value::as_i64));
+        if !(200..300).contains(&response.status) {
+            let message = value.get("message").or_else(|| value.get("error")).and_then(serde_json::Value::as_str).unwrap_or("").to_lowercase();
+            let categories: Vec<_> = ["client", "客户端", "storage", "capacity", "容量", "quota", "origin", "跨域", "csrf", "token", "sign", "签名", "login", "登录", "risk", "验证", "permission", "权限"].into_iter().filter(|word| message.contains(word)).collect();
+            eprintln!("API rejection categories: {categories:?}");
+        }
+        Ok(response)
+    }
+    fn manages_cookie_session(&self) -> bool { self.0.manages_cookie_session() }
+    fn cookies_for_url(&self, url: &str) -> Result<Vec<String>, CloudError> {
+        self.0.cookies_for_url(url)
+    }
+    fn isolated_session(&self) -> Result<Option<Box<dyn CloudHttpTransport>>, CloudError> {
+        self.0.isolated_session()
     }
 }
 
@@ -78,6 +94,7 @@ fn error_kind(error: &CloudError) -> &'static str {
         CloudError::AccountMismatch => "account-mismatch",
         CloudError::AuthorizationExpired => "authorization-expired",
         CloudError::WebAuthorizationRequired => "web-authorization-required",
+        CloudError::BaiduOperationVerificationRequired => "baidu-operation-verification-required",
         CloudError::CaptchaRequired => "captcha-required",
         CloudError::PikpakRegionalMembershipRestricted => "regional-membership-restricted",
         CloudError::PikpakOperationVerificationRequired(_) => "operation-verification-required",
@@ -584,6 +601,49 @@ fn audit_provider_residuals(provider: CloudProvider) -> LiveResult<(usize, usize
     ))
 }
 
+// Shared live acceptance for the reported personal-share failures. Every
+// selected remote ID belongs to this invocation's unique fixture directory.
+fn run_reported_share_lifecycle(provider: CloudProvider) -> LiveResult<()> {
+    use versadown_lib::cloud::CloudShareOptions;
+    require_live_authorization()?;
+    let state = CloudState::new(session_root()?)?;
+    let http = LiveHttp::new()?;
+    let root_id = ProviderRegistry::global().get(provider).root_directory_id;
+    eprintln!("{} share phase: validate-session", provider.key());
+    read(&state, &http, provider, |driver| driver.account())?;
+    let name = unique_name(provider, "share-root");
+    let base = mutate(&state, &http, provider, |driver| driver.create_directory(root_id, &name))?;
+    let local = tempfile::tempdir()?;
+    let path = local.path().join("VersaDown-share-test.txt");
+    fs::write(&path, b"VersaDown isolated share acceptance fixture\n")?;
+    let mut share_id = None;
+    let result = (|| -> LiveResult<()> {
+        eprintln!("{} share phase: upload", provider.key());
+        let file = upload(&state, &http, provider, &base.id, &path)?;
+        let options = CloudShareOptions { name: "VersaDown acceptance".into(), pass_code: (provider == CloudProvider::Uc).then(|| "a7B2".into()), generate_pass_code: provider != CloudProvider::Uc, expires_in_days: Some(1) };
+        eprintln!("{} share phase: create", provider.key());
+        let share = mutate(&state, &http, provider, |driver| driver.create_share(&[file.id.clone()], &options))?;
+        share_id = Some(share.id.clone());
+        if share.url.is_empty() { return Err(failure("created share URL is missing")); }
+        eprintln!("{} share phase: list", provider.key());
+        let listed = read(&state, &http, provider, |driver| driver.list_shares())?;
+        if !listed.iter().any(|item| item.id == share.id) { return Err(failure("created share is not listed")); }
+        eprintln!("{} share phase: cancel", provider.key());
+        mutate(&state, &http, provider, |driver| driver.cancel_shares(&[share.id.clone()]))?;
+        share_id = None;
+        let after = read(&state, &http, provider, |driver| driver.list_shares())?;
+        if after.iter().any(|item| item.id == share.id) { return Err(failure("cancelled share remains active")); }
+        Ok(())
+    })();
+    if let Some(id) = share_id {
+        let _ = mutate(&state, &http, provider, |driver| driver.cancel_shares(&[id.clone()]));
+    }
+    let cleanup = trash_and_delete(&state, &http, provider, &base.id, &name);
+    if cleanup.is_ok() { eprintln!("{} share fixture cleanup: PASS", provider.key()); }
+    result?;
+    cleanup
+}
+
 fn run_requested_quark_upload() -> LiveResult<()> {
     require_live_authorization()?;
     let path = std::env::var_os("VERSADOWN_LIVE_QUARK_UPLOAD_PATH")
@@ -679,4 +739,22 @@ fn live_audit_pikpak_e2e_residuals() -> LiveResult<()> {
     let (active, recycle) = audit_provider_residuals(CloudProvider::Pikpak)?;
     eprintln!("PikPak E2E residuals: active={active}, recycle={recycle}");
     Ok(())
+}
+
+#[test]
+#[ignore = "requires saved UC session; creates and removes only its own isolated fixture"]
+fn live_reported_uc_share_lifecycle() -> LiveResult<()> {
+    run_reported_share_lifecycle(CloudProvider::Uc)
+}
+
+#[test]
+#[ignore = "requires saved Xunlei session; creates and removes only its own isolated fixture"]
+fn live_reported_xunlei_share_lifecycle() -> LiveResult<()> {
+    run_reported_share_lifecycle(CloudProvider::Xunlei)
+}
+
+#[test]
+#[ignore = "requires saved Baidu session; creates and removes only its own isolated fixture"]
+fn live_reported_baidu_share_lifecycle() -> LiveResult<()> {
+    run_reported_share_lifecycle(CloudProvider::Baidu)
 }

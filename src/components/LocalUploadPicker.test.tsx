@@ -12,6 +12,25 @@ const home: LocalUploadListing = {
 const photos: LocalUploadListing = { path: '/home/Photos', parentPath: '/home', roots: home.roots, entries: [{ path: '/home/Photos/p.jpg', name: 'p.jpg', kind: 'file' }] };
 const listing = () => vi.fn(async (path?: string) => path === '/home/Photos' ? photos : home);
 
+it('hides dot files and directories until explicitly shown, including select-all', async () => {
+  const user = userEvent.setup();
+  const onConfirm = vi.fn();
+  render(<LocalUploadPicker listEntries={async () => ({ ...home, entries: [...home.entries,
+    { path: '/home/.config', name: '.config', kind: 'directory' },
+    { path: '/home/.env', name: '.env', kind: 'file' },
+  ] })} onConfirm={onConfirm} onCancel={vi.fn()} />);
+  await screen.findByRole('checkbox', { name: '选择 a.txt' });
+  expect(screen.queryByText('.config')).not.toBeInTheDocument();
+  expect(screen.queryByText('.env')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('checkbox', { name: '全选当前目录' }));
+  await user.click(screen.getByRole('button', { name: '确认上传' }));
+  expect(onConfirm.mock.calls[0][0]).not.toContain('/home/.env');
+  expect(onConfirm.mock.calls[0][0]).not.toContain('/home/.config');
+  await user.click(screen.getByRole('checkbox', { name: '显示隐藏文件' }));
+  expect(screen.getByRole('checkbox', { name: '选择 .config' })).toBeVisible();
+  expect(screen.getByRole('checkbox', { name: '选择 .env' })).toBeVisible();
+});
+
 function visibleEntryNames(): string[] {
   return Array.from(document.querySelectorAll('.local-upload-entry:not(.local-upload-parent) .local-upload-entry-name span'))
     .map(element => element.textContent ?? '');

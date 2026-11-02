@@ -615,9 +615,31 @@ mod tests {
         assert!(requests[0].url.ends_with("/v1/shield/captcha/init"));
         assert!(requests[1].url.ends_with("/drive/v1/share"));
         let created: Value = serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
-        assert_eq!(created["share_to"], "encryptedlink");
-        assert_eq!(created["pass_code_option"], "REQUIRED");
-        assert_eq!(created["expiration_days"], 7);
+        assert_eq!(created["share_to"], "copy");
+        assert!(created.get("pass_code_option").is_none());
+        assert_eq!(created["title"], "报告.pdf");
+        assert_eq!(created["restore_limit"], "-1");
+        assert_eq!(created["expiration_days"], "7");
+        assert_eq!(created["params"]["WithPassCodeInLink"], "true");
+    }
+
+    #[test]
+    fn xunlei_cancels_shares_with_the_web_management_contract() {
+        let store = credentials();
+        let http = Http::new(vec![
+            json!({"captcha_token":"share-token","expires_in":300}),
+            json!({}),
+            json!({}),
+        ]);
+        ProviderRegistry::global().driver(CloudProvider::Xunlei, &store, &http)
+            .cancel_shares(&["share-one".into(), "share-two".into()]).unwrap();
+        let requests = http.requests.lock().unwrap();
+        for (request, id) in requests[1..].iter().zip(["share-one", "share-two"]) {
+            assert!(request.url.ends_with("/drive/v1/share/delete"));
+            let body: Value = serde_json::from_str(request.body.as_deref().unwrap()).unwrap();
+            assert_eq!(body, json!({"space":"", "share_id":id}));
+        }
+        assert_eq!(requests.len(), 3);
     }
     #[test]
     fn xunlei_transfer_owner_uses_user_id_not_rotating_access_token() {
@@ -2449,22 +2471,19 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         if file_ids.is_empty() {
             return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into()));
         }
-        // Xunlei shares use the same drive-share contract as PikPak: a protected
-        // link gets a server-generated access code, rather than accepting a
-        // caller-supplied code verbatim.
-        let needs_pass_code = options.generate_pass_code
-            || options
-                .pass_code
-                .as_deref()
-                .is_some_and(|code| !code.trim().is_empty());
+        // Xunlei's web client uses `copy`, not PikPak's encryptedlink /
+        // publiclink enum. The server generates the access code; these are
+        // the actual fields and value types used by its share dialog.
         let value = self.request(
             "POST",
             self.drive_url("/drive/v1/share"),
             Some(json!({
                 "file_ids": file_ids,
-                "share_to": if needs_pass_code { "encryptedlink" } else { "publiclink" },
-                "expiration_days": options.expires_in_days.map(i64::from).unwrap_or(-1),
-                "pass_code_option": if needs_pass_code { "REQUIRED" } else { "NOT_REQUIRED" },
+                "share_to": "copy",
+                "title": options.name,
+                "restore_limit": "-1",
+                "expiration_days": options.expires_in_days.map(|days| days.to_string()).unwrap_or_else(|| "-1".into()),
+                "params": {"subscribe_push": "false", "WithPassCodeInLink": "true"},
             })),
         )?;
         let mut share = xunlei_share_from_value(&value, Some(file_ids), None)?;
@@ -2513,11 +2532,13 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         if share_ids.is_empty() {
             return Err(QuarkError::InvalidInput("请选择至少一个分享".into()));
         }
-        self.request(
-            "POST",
-            self.drive_url("/drive/v1/share:batchDelete"),
-            Some(json!({"ids": share_ids})),
-        )?;
+        for share_id in share_ids {
+            self.request(
+                "POST",
+                self.drive_url("/drive/v1/share/delete"),
+                Some(json!({"space": "", "share_id": share_id})),
+            )?;
+        }
         Ok(())
     }
 
@@ -2753,7 +2774,8 @@ fn xunlei_share_from_value(
             .map(str::to_owned)
             .unwrap_or_else(|| format!("https://pan.xunlei.com/s/{id}")),
         name: value
-            .get("share_name")
+            .get("title")
+            .or_else(|| value.get("share_name"))
             .or_else(|| value.get("name"))
             .and_then(Value::as_str)
             .filter(|name| !name.is_empty())

@@ -15,6 +15,7 @@ export interface DownloadConcurrencyPolicy {
 }
 export type SharePassCodeCharacterSet = 'any' | 'asciiAlphanumeric';
 export interface SharePassCodeConstraint {
+  required?: boolean;
   minLength: number;
   maxLength: number;
   characterSet: SharePassCodeCharacterSet;

@@ -35,6 +35,7 @@ const UC_RECYCLE_BIN_NAME: &str = "回收站";
 
 pub const UC_SHARE_PASS_CODE_CONSTRAINT: CloudSharePassCodeConstraint =
     CloudSharePassCodeConstraint {
+        required: false,
         min_length: 4,
         max_length: 4,
         character_set: CloudSharePassCodeCharacterSet::AsciiAlphanumeric,
