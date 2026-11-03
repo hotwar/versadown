@@ -172,21 +172,25 @@ fn legacy_pikpak_password_session_recovers_its_login_method() {
 
 #[cfg(windows)]
 #[test]
-fn dpapi_session_roundtrip_never_writes_plaintext() {
-    let root = std::env::temp_dir().join(format!("cloud-dpapi-{}", uuid::Uuid::new_v4()));
-    let store = SystemCredentialStore::new(root.clone()).unwrap();
-    store
-        .save("quark", b"cookie-secret-do-not-persist-in-cleartext")
-        .unwrap();
-    let bytes = std::fs::read(root.join("quark.bin")).unwrap();
-    assert!(!bytes.windows(13).any(|v| v == b"cookie-secret"));
+fn windows_session_roundtrip_across_reopen_never_writes_local_secret_files() {
+    let root = tempfile::tempdir().unwrap();
+    {
+        let store = SystemCredentialStore::new(root.path().into()).unwrap();
+        store
+            .save("quark", b"cookie-secret-do-not-persist-in-cleartext")
+            .unwrap();
+    }
+    let store = SystemCredentialStore::new(root.path().into()).unwrap();
     assert_eq!(
         store.load("quark").unwrap().unwrap(),
         b"cookie-secret-do-not-persist-in-cleartext"
     );
+    assert!(
+        std::fs::read_dir(root.path()).unwrap().next().is_none(),
+        "Windows credentials must remain in Credential Manager, not local files"
+    );
     store.remove("quark").unwrap();
     assert!(store.load("quark").unwrap().is_none());
-    std::fs::remove_dir(root).unwrap();
 }
 
 struct Sequence(Mutex<(Vec<CloudHttpResponse>, Vec<CloudHttpRequest>)>);

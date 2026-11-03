@@ -134,7 +134,7 @@ function isAuthorizationPending(error: unknown) {
 function requiresOfficialWebAuthorization(error: unknown) {
   if (typeof error !== 'object' || error === null) return false;
   const code = 'code' in error ? String((error as { code?: unknown }).code).toLowerCase() : '';
-  if (code === 'pikpak_operation_verification_required') return false;
+  if (['pikpak_operation_verification_required', 'xunlei_verification_unavailable'].includes(code)) return false;
   const message = errorMessage(error, '').toLowerCase();
   return ['web_auth_required', 'captcha_required', 'captcha_invalid', 'verification_required', 'web_verification_required', 'risk_verification_required'].includes(code)
     || /captcha|verification required|网页验证|安全验证|风险验证/.test(message);
@@ -170,7 +170,20 @@ function isTerminalWebAuthorizationError(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error && ['provider_error', 'invalid_response', 'credentials_expired'].includes(String((error as { code?: unknown }).code));
 }
 
+function isXunleiVerificationFailure(error: unknown, reason: 'metadata_expired' | 'metadata_missing'): boolean {
+  return typeof error === 'object' && error !== null
+    && 'code' in error && error.code === 'xunlei_verification_unavailable'
+    && 'message' in error && error.message === reason;
+}
+
 function errorMessage(error: unknown, fallback: string) {
+  if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'xunlei_verification_unavailable') {
+    const reason = 'message' in error ? error.message : '';
+    if (reason === 'metadata_missing') return t('cloud.verification.xunlei.metadataMissing');
+    if (reason === 'metadata_expired') return t('cloud.verification.xunlei.metadataExpired');
+    if (reason === 'timestamp_invalid') return t('cloud.verification.xunlei.timestampInvalid');
+    return t('cloud.verification.xunlei.unavailable');
+  }
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as { message?: unknown }).message === 'string') {
     return (error as { message: string }).message;
@@ -879,6 +892,17 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       setDirectoryState(items.length ? 'ready' : 'empty');
       return visibleDirectory;
     } catch (error) {
+      if (provider === 'xunlei' && (
+        isXunleiVerificationFailure(error, 'metadata_expired')
+        || isXunleiVerificationFailure(error, 'metadata_missing')
+      )) {
+        if (isXunleiVerificationFailure(error, 'metadata_expired')) setReauthorizationRequired(true);
+        setDirectoryState(directory ? (directory.items.length ? 'ready' : 'empty') : 'error');
+        const message = errorMessage(error, t('cloud.error.readDirectory'));
+        setAuthorizationStatus(message);
+        if (directory) setOperation({ kind: 'error', message });
+        return null;
+      }
       if (requiresPikpakOperationVerification(error)) {
         showOperationVerification(error);
         setDirectoryState('error');
@@ -1032,7 +1056,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     setReauthorizationRequired(false);
     pendingAuthorizationAction.current = null;
     setPendingAuthorizationName(null);
-    if (pending) setOperation(null);
+    if (pending || reauthorizationRequired) setOperation(null);
     onAccountAuthorized?.(account);
     if (pending) await pending.resume();
     else if (!authorizationOnly) await loadDirectory(account, rootId, [{ id: rootId, name: t('cloud.root') }]);
@@ -1199,10 +1223,10 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
           setOperation(null);
           return;
         }
-        const listedFailures = result.failures.slice(0, 3).map(failure => `${failure.itemName}：${failure.message}`).join('；');
+        const listedFailures = result.failures.slice(0, 3).map(failure => `${failure.itemName}：${errorMessage(failure, failure.message)}`).join('；');
         const remainingFailures = result.failures.length > 3 ? t('cloud.upload.remainingFailures', { count: result.failures.length - 3 }) : '';
         const report: NonNullable<OperationState> = result.cancelled
-          ? { kind: 'cancelled', message: t('cloud.upload.cancelledWithResults', { count: result.uploaded.length, failures: result.failures.some(failure => failure.code !== 'upload_cancelled') ? result.failures.filter(failure => failure.code !== 'upload_cancelled').map(failure => `${failure.itemName}: ${failure.message}`).slice(0, 3).join('; ') : '' }) }
+          ? { kind: 'cancelled', message: t('cloud.upload.cancelledWithResults', { count: result.uploaded.length, failures: result.failures.some(failure => failure.code !== 'upload_cancelled') ? result.failures.filter(failure => failure.code !== 'upload_cancelled').map(failure => `${failure.itemName}: ${errorMessage(failure, failure.message)}`).slice(0, 3).join('; ') : '' }) }
           : result.failures.length
           ? { kind: 'error', message: t('cloud.upload.results', { name: operationLabel, succeeded: result.uploaded.length, failed: result.failures.length, failures: listedFailures, remaining: remainingFailures }) }
           : { kind: 'success', message: t('cloud.upload.itemsCompleted', { count: result.uploaded.length }) };
@@ -1225,6 +1249,9 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
           return;
         }
         if (result.failures.length > 0) {
+          if (provider === 'xunlei' && result.failures.some(failure => isXunleiVerificationFailure(failure, 'metadata_expired'))) {
+            setReauthorizationRequired(true);
+          }
           const first = result.failures.find(failure => ['web_auth_required', 'credentials_expired', 'session_renewed_retry_operation'].includes(failure.code)) ?? result.failures[0];
           if (first.code === 'web_auth_required' || (first.code === 'credentials_expired' && effectiveAuthorizationCapabilities.web)) {
             const authorizationFailures = result.failures.filter(failure => failure.code === 'web_auth_required' || (failure.code === 'credentials_expired' && effectiveAuthorizationCapabilities.web));
@@ -1280,6 +1307,9 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       } else if (isSessionRenewedRetryOperation(error)) {
         setOperation({ kind: 'error', message: t('cloud.operation.recoveredRetry', { name: operationLabel }) });
       } else {
+        if (provider === 'xunlei' && isXunleiVerificationFailure(error, 'metadata_expired')) {
+          setReauthorizationRequired(true);
+        }
         setOperation({ kind: 'error', message: t('cloud.operation.failed', { name: operationLabel, detail: errorMessage(error, t('common.retry')) }) });
       }
     } finally {
@@ -1360,7 +1390,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         onDownloadTask?.(task);
       }));
       if (directoryFailures.length) {
-        const details = directoryFailures.slice(0, 5).map((failure) => `${failure.relativePath}：${failure.message}`).join('；');
+        const details = directoryFailures.slice(0, 5).map((failure) => `${failure.relativePath}：${errorMessage(failure, failure.message)}`).join('；');
         const remaining = directoryFailures.length > 5 ? `；另有 ${directoryFailures.length - 5} 项失败` : '';
         throw new Error(`目录下载已入队 ${queuedDirectoryFiles} 个文件；${details}${remaining}`);
       }

@@ -124,6 +124,7 @@ fn modern_web_directory_uses_bearer_without_legacy_context() {
 #[test]
 fn modern_web_refreshes_without_client_secret() {
     let http = RecordingHttp::sequence(&[
+        r#"{"error":"unauthenticated"}"#,
         r#"{"access_token":"rotated","refresh_token":"rotated-refresh","expires_in":3600}"#,
         r#"{"files":[],"next_page_token":""}"#,
     ]);
@@ -132,14 +133,14 @@ fn modern_web_refreshes_without_client_secret() {
     let client = XunleiClient::new(session, &http);
     assert!(client.directory("0").is_ok());
     let requests = http.requests();
-    assert!(requests[0].url.ends_with("/v1/auth/token"));
+    assert!(requests[1].url.ends_with("/v1/auth/token"));
     let body: serde_json::Value =
-        serde_json::from_str(requests[0].body.as_deref().unwrap()).unwrap();
+        serde_json::from_str(requests[1].body.as_deref().unwrap()).unwrap();
     assert!(body.get("client_secret").is_none());
-    assert_eq!(requests[0].headers["X-Sdk-Version"], "3.4.20");
-    assert_eq!(requests[0].headers["X-Protocol-Version"], "301");
-    assert_eq!(requests[0].headers["X-Action"], "401");
-    assert_eq!(requests[1].headers["Authorization"], "Bearer rotated");
+    assert_eq!(requests[1].headers["X-Sdk-Version"], "3.4.20");
+    assert_eq!(requests[1].headers["X-Protocol-Version"], "301");
+    assert_eq!(requests[1].headers["X-Action"], "401");
+    assert_eq!(requests[2].headers["Authorization"], "Bearer rotated");
 }
 
 // Break caught: HTTP 403 and failed_precondition are ordinary provider failures.
@@ -192,6 +193,7 @@ fn modern_web_mutations_map_root_and_keep_official_paths() {
 #[test]
 fn xunlei_recycle_list_restore_and_delete_refreshes_the_client_session() {
     let http = RecordingHttp::sequence(&[
+        r#"{"error":"unauthenticated"}"#,
         r#"{"access_token":"rotated-access","refresh_token":"rotated-refresh","expires_in":3600}"#,
         r#"{"files":[{"id":"trashed-id","name":"trashed.txt","kind":"drive#file","phase":"PHASE_TYPE_COMPLETE","trashed":true}],"next_page_token":""}"#,
         r#"{}"#,
@@ -214,17 +216,17 @@ fn xunlei_recycle_list_restore_and_delete_refreshes_the_client_session() {
     assert_eq!(client.session().access_token, "rotated-access");
     assert_eq!(client.session().refresh_token, "rotated-refresh");
     let requests = http.requests();
-    assert!(requests[0].url.ends_with("/v1/auth/token"));
-    let list = &requests[1];
+    assert!(requests[1].url.ends_with("/v1/auth/token"));
+    let list = &requests[2];
     assert_eq!(list.method, "GET");
     assert!(list.url.contains("/drive/v1/files?"));
     let query = url::Url::parse(&list.url).unwrap();
     assert!(query
         .query_pairs()
         .any(|(key, value)| { key == "filters" && value.contains(r#""trashed":{"eq":true}"#) }));
-    assert!(requests[2].url.ends_with("/drive/v1/files:batchUntrash"));
-    assert!(requests[3].url.ends_with("/drive/v1/files:batchDelete"));
-    for request in [&requests[2], &requests[3]] {
+    assert!(requests[3].url.ends_with("/drive/v1/files:batchUntrash"));
+    assert!(requests[4].url.ends_with("/drive/v1/files:batchDelete"));
+    for request in [&requests[3], &requests[4]] {
         assert_eq!(request.method, "POST");
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(request.body.as_deref().unwrap()).unwrap()
@@ -294,7 +296,7 @@ fn modern_web_requires_fresh_signature_metadata_for_captcha_renewal() {
     let client = XunleiClient::new(serde_json::from_value(value).unwrap(), &http);
     assert!(matches!(
         client.directory("0"),
-        Err(QuarkError::WebAuthorizationRequired)
+        Err(QuarkError::XunleiVerificationUnavailable("metadata_expired"))
     ));
     assert!(http.requests().is_empty());
 }
@@ -363,6 +365,21 @@ fn modern_web_signature_matches_official_javascript_vectors() {
     }
 }
 
+// Independent vectors evaluated by the current official public JS module 47.
+#[test]
+fn modern_web_19322_signature_matches_official_javascript_vectors() {
+    let mut profile = modern_session().profile;
+    profile.client_version = "1.93.22".into();
+    for (device, timestamp, expected) in [
+        ("synthetic-device", "1793678400000", "1.61380dd25ada7b2245e267fa7240f290"),
+        ("test-device-2", "1793678400001", "1.bfef577f82619c14b89bf5e836ec0cdb"),
+        ("00000000000000000000000000000000", "1700000000000", "1.84292e395f0e371e1e7fdc3921ca82dd"),
+    ] {
+        profile.device_id = device.into();
+        assert_eq!(profile.web_captcha_signature(timestamp).as_deref(), Some(expected));
+    }
+}
+
 // Break caught: a supported profile must replace old captured metadata for a
 // new action, even when the browser token itself still has time remaining.
 #[test]
@@ -417,6 +434,7 @@ fn modern_web_rejects_refresh_for_a_different_user() {
     let mut session = modern_session();
     session.expires_at = 1;
     let http = RecordingHttp::sequence(&[
+        r#"{"error":"unauthenticated"}"#,
         r#"{"access_token":"foreign-token","sub":"foreign-user","expires_in":300}"#,
         r#"{"files":[]}"#,
     ]);
@@ -426,7 +444,7 @@ fn modern_web_rejects_refresh_for_a_different_user() {
         Err(QuarkError::AuthorizationExpired)
     ));
     assert_eq!(client.session().user_id, "modern-user");
-    assert_eq!(http.requests().len(), 1);
+    assert_eq!(http.requests().len(), 2);
 }
 
 // Break caught: captcha renewal for a changed action must use the actual write path.

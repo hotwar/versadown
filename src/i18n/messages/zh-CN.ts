@@ -1,4 +1,9 @@
 const messages = {
+  'cloud.verification.xunlei.shareProfileUnsupported': '当前迅雷网页版本的分享链接解析暂不受支持，请在迅雷官网打开此分享。[XL-SHARE-PROFILE]',
+  'cloud.verification.xunlei.metadataMissing': '缺少迅雷操作验证信息。[XL-LOCAL-MISSING]',
+  'cloud.verification.xunlei.metadataExpired': 'VD 保存的迅雷验证信息已超过本地复用时限。请重新网页授权后重试此操作。[XL-LOCAL-EXPIRED]',
+  'cloud.verification.xunlei.timestampInvalid': '迅雷验证信息的时间戳无效或超前于系统时间，当前请求未发送。请检查系统时间。[XL-LOCAL-TIME]',
+  'cloud.verification.xunlei.unavailable': 'VD 无法准备本次迅雷操作所需的验证信息，请暂用官网完成操作。[XL-LOCAL]',
   'macos.links.registrationFailed': '无法更新 macOS 下载链接关联，请重试。',
   'macos.links.storageFailed': '无法保存下载链接关联，请检查应用数据目录的访问权限。',
   'macos.links.bundleRequired': '请安装并打开 VersaDown.app 后再更改链接关联。',

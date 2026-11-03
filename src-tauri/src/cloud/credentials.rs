@@ -62,9 +62,9 @@ pub struct SystemCredentialStore {
 }
 
 // Native UI regression binaries must not access the developer's real
-// Keychain. This adapter is excluded from shipped application builds and
+// credential storage. This adapter is excluded from shipped application builds and
 // enabled only by the isolated native-smoke harness.
-#[cfg(all(target_os = "macos", feature = "native-smoke"))]
+#[cfg(feature = "native-smoke")]
 fn native_smoke_credentials() -> Option<&'static MemoryCredentialStore> {
     if std::env::var("VERSADOWN_NATIVE_SMOKE").as_deref() != Ok("1")
         || std::env::var("VERSADOWN_BACKGROUND_UI_TEST").as_deref() != Ok("1")
@@ -170,7 +170,7 @@ impl SystemCredentialStore {
 }
 impl CredentialStore for SystemCredentialStore {
     fn save(&self, k: &str, v: &[u8]) -> Result<(), QuarkError> {
-        #[cfg(all(target_os = "macos", feature = "native-smoke"))]
+        #[cfg(feature = "native-smoke")]
         if let Some(store) = native_smoke_credentials() {
             return store.save(&format!("{}:{k}", self.service), v);
         }
@@ -187,7 +187,7 @@ impl CredentialStore for SystemCredentialStore {
             .map_err(|error| credential_error("save", k, error))
     }
     fn load(&self, k: &str) -> Result<Option<Vec<u8>>, QuarkError> {
-        #[cfg(all(target_os = "macos", feature = "native-smoke"))]
+        #[cfg(feature = "native-smoke")]
         if let Some(store) = native_smoke_credentials() {
             return store.load(&format!("{}:{k}", self.service));
         }
@@ -210,7 +210,7 @@ impl CredentialStore for SystemCredentialStore {
         }
     }
     fn remove(&self, k: &str) -> Result<(), QuarkError> {
-        #[cfg(all(target_os = "macos", feature = "native-smoke"))]
+        #[cfg(feature = "native-smoke")]
         if let Some(store) = native_smoke_credentials() {
             return store.remove(&format!("{}:{k}", self.service));
         }
@@ -235,7 +235,7 @@ fn share_protector_entry() -> Result<Entry, QuarkError> {
 }
 
 fn share_protection_key(create: bool) -> Result<[u8; 32], QuarkError> {
-    #[cfg(all(target_os = "macos", feature = "native-smoke"))]
+    #[cfg(feature = "native-smoke")]
     if native_smoke_credentials().is_some() {
         static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
         return Ok(*KEY.get_or_init(|| {

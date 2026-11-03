@@ -24,6 +24,10 @@ use std::{
 };
 
 #[cfg(test)]
+#[path = "xunlei_diagnostics_tests.rs"]
+mod diagnostics_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::cloud::share::{
@@ -142,7 +146,14 @@ mod tests {
                     };
                     let result = client.storage_capacity();
                     if reject {
-                        assert!(matches!(result, Err(QuarkError::WebAuthorizationRequired)));
+                        if supervised {
+                            assert!(matches!(result, Err(QuarkError::WebAuthorizationRequired)));
+                        } else {
+                            assert!(matches!(
+                                result,
+                                Err(QuarkError::XunleiVerificationUnavailable("metadata_missing"))
+                            ));
+                        }
                     } else {
                         assert_eq!(
                             result.unwrap(),
@@ -401,6 +412,126 @@ mod tests {
             access_code: Some("a123".into()),
         }
     }
+    #[test]
+    fn root_only_background_candidate_cannot_replace_operation_ready_session() {
+        let mut existing: XunleiSession =
+            serde_json::from_slice(&credentials().load("xunlei").unwrap().unwrap()).unwrap();
+        existing.profile.client_version = "unsupported-test-version".into();
+        existing.expires_at = now() + 3600;
+        let root_only = existing.clone();
+        existing.web_security.captcha_sign = "synthetic-signature".into();
+        existing.web_security.client_version = existing.profile.client_version.clone();
+        existing.web_security.package_name = existing.profile.package_name.clone();
+        existing.web_security.timestamp = (now() * 1000).to_string();
+        assert!(existing.would_downgrade_operation_verification(&root_only));
+        assert!(!existing.would_downgrade_operation_verification(&existing));
+        existing.expires_at = 1;
+        assert!(!existing.would_downgrade_operation_verification(&root_only));
+    }
+
+    #[test]
+    fn idle_directory_with_missing_signer_recovers_from_a_new_root_ticket() {
+        let store = credentials();
+        let mut session: XunleiSession =
+            serde_json::from_slice(&store.load("xunlei").unwrap().unwrap()).unwrap();
+        session.profile.client_version = "unsupported-test-version".into();
+        session.expires_at = now() + 3600;
+        session.web_security = XunleiWebSecurity {
+            action: "GET:/drive/v1/files".into(),
+            captcha_token: "expired-root".into(),
+            expires_at: now().saturating_sub(1),
+            ..Default::default()
+        };
+        store.save("xunlei", &serde_json::to_vec(&session).unwrap()).unwrap();
+        let http = Http::new(vec![json!({"files":[]})]);
+        auth_supervisor::AuthSupervisor::default().run(
+            &store,
+            CloudProvider::Xunlei,
+            SessionWorkKind::Read,
+            |snapshot| {
+                ProviderRegistry::global().driver(CloudProvider::Xunlei, snapshot, &http)
+                    .list_directory("0")
+            },
+            |phase| {
+                assert!(phase == auth_supervisor::RecoveryPhase::AuthFailure);
+                assert!(http.requests.lock().unwrap().is_empty());
+                session.web_security.expires_at = now() + 120;
+                session.web_security.captcha_token = "new-root".into();
+                store.save("xunlei", &serde_json::to_vec(&session).unwrap())
+            },
+        ).unwrap();
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].headers["X-Captcha-Token"], "new-root");
+    }
+
+    #[test]
+    fn expired_operation_verification_renews_only_from_profile_and_never_replays_mutation() {
+        for kind in [SessionWorkKind::Read, SessionWorkKind::Mutation] {
+            let store = credentials();
+            let supervisor = auth_supervisor::AuthSupervisor::default();
+            let calls = std::cell::Cell::new(0);
+            let result = supervisor.run(
+                &store,
+                CloudProvider::Xunlei,
+                kind,
+                |_| {
+                    calls.set(calls.get() + 1);
+                    if calls.get() == 1 {
+                        Err(QuarkError::XunleiVerificationUnavailable("metadata_expired"))
+                    } else {
+                        Ok(())
+                    }
+                },
+                |phase| {
+                    assert!(phase == auth_supervisor::RecoveryPhase::OperationVerification);
+                    Ok(())
+                },
+            );
+            if kind == SessionWorkKind::Read {
+                assert!(result.is_ok());
+                assert_eq!(calls.get(), 2);
+            } else {
+                assert!(matches!(result, Err(QuarkError::SessionRenewedRetryOperation)));
+                assert_eq!(calls.get(), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_share_profile_does_not_recover_or_replace_personal_session() {
+        let store = credentials();
+        let mut session: XunleiSession =
+            serde_json::from_slice(&store.load("xunlei").unwrap().unwrap()).unwrap();
+        session.profile.client_version = "unsupported-test-version".into();
+        session.expires_at = now() + 3600;
+        session.web_security.action = "GET:/drive/v1/files".into();
+        session.web_security.expires_at = now() + 600;
+        let original = serde_json::to_vec(&session).unwrap();
+        store.save("xunlei", &original).unwrap();
+
+        let http = Http::new(vec![json!({"files":[]})]);
+        let supervisor = auth_supervisor::AuthSupervisor::default();
+        let result = supervisor.run(
+            &store,
+            CloudProvider::Xunlei,
+            SessionWorkKind::Read,
+            |snapshot| {
+                provider_share_adapter(CloudProvider::Xunlei, snapshot, &http)?
+                    .inspect(&candidate())
+            },
+            |_| panic!("a local share compatibility error must not trigger account recovery"),
+        );
+        assert!(matches!(
+            result,
+            Err(QuarkError::XunleiVerificationUnavailable("xunlei_share_profile_unsupported"))
+        ));
+        assert!(http.requests.lock().unwrap().is_empty());
+        assert_eq!(store.load("xunlei").unwrap().unwrap(), original);
+        let client = XunleiClient::new(session, &http).supervised();
+        client.directory("0").unwrap();
+    }
+
     #[test]
     fn xunlei_share_direct_reuses_the_inspected_pass_token() {
         let credentials = credentials();
@@ -724,9 +855,7 @@ mod tests {
             json!({"error_code":401}),
         ]);
         let adapter = provider_share_adapter(CloudProvider::Xunlei, &credentials, &http).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let store =
-            CloudSharePlanStore::new(SystemCredentialStore::new(dir.path().into()).unwrap());
+        let (store, _) = crate::cloud::share::test_support::counted_plan_store();
         let entry = selected();
         store.upsert(&entry.plan).unwrap();
         let source = entry.plan.source_for("f1");
@@ -768,9 +897,7 @@ mod tests {
             }),
         ]);
         let adapter = provider_share_adapter(CloudProvider::Xunlei, &credentials, &http).unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let store =
-            CloudSharePlanStore::new(SystemCredentialStore::new(dir.path().into()).unwrap());
+        let (store, _) = crate::cloud::share::test_support::counted_plan_store();
         let entry = selected();
         store.upsert(&entry.plan).unwrap();
         let source = entry.plan.source_for("f1");
@@ -808,9 +935,7 @@ mod tests {
             adapter.resolve(&entry),
             Ok(ShareResolution::TransferRequired(_))
         ));
-        let dir = tempfile::tempdir().unwrap();
-        let store =
-            CloudSharePlanStore::new(SystemCredentialStore::new(dir.path().into()).unwrap());
+        let (store, _) = crate::cloud::share::test_support::counted_plan_store();
         store.upsert(&entry.plan).unwrap();
         credentials.remove("xunlei").unwrap();
         assert!(matches!(
@@ -916,9 +1041,6 @@ impl XunleiShareAdapter<'_> {
         if session.access_token.is_empty() {
             return Err(QuarkError::NotAuthorized);
         }
-        if session.expires_at <= now() {
-            return Err(QuarkError::AuthorizationExpired);
-        }
         if session.profile.device_id.is_empty()
             || session.profile.user_agent.is_empty()
             || session.user_id.is_empty()
@@ -933,7 +1055,12 @@ impl XunleiShareAdapter<'_> {
         let signature = session
             .profile
             .web_captcha_signature(&timestamp)
-            .ok_or(QuarkError::WebAuthorizationRequired)?;
+            .ok_or(QuarkError::XunleiVerificationUnavailable(
+                "xunlei_share_profile_unsupported",
+            ))?;
+        if session.expires_at <= now() {
+            return Err(QuarkError::AuthorizationExpired);
+        }
         let mut client = XunleiShareSession {
             http: self.http,
             headers: BTreeMap::from([
@@ -1536,6 +1663,22 @@ const WEB_SIGNATURE_SALTS_1936: [&str; 10] = [
     "/icv8Er",
     "ydvTBcED6CZWZ/JvIA0txHGGqplHXpDKf2Oy95",
 ];
+// Official pan.xunlei.com 1.93.22, verified 2026-11-03 against
+// utils-initial.f23af17a7de85831b2fa.js, module 47's
+// pubcDq1NhpQpJdHLOWFKjCkWqT5G22jzTPW. These are its eleven MD5 rounds.
+const WEB_SIGNATURE_SALTS_19322: [&str; 11] = [
+    "MPU73ZbElcZF7JedNMcGuyTMntNnS/mU2",
+    "lhQAQ0OOC24YAVLh1gypuQMq/L/Ptfpxl8",
+    "JC",
+    "Ec4WmtmExQdeUHcmad1IVqc",
+    "WDvgJcYwX8bX2/IMstopPNhLR2dN7F",
+    "kK5LVVja3fq1roF9NVBSu/Bh4dkr1wXfd2fzQ",
+    "quG9",
+    "IAIbdVy/QfeYL1jRWtH",
+    "+0chaj/F3RkLKJQoo0Ntpc8EWx6",
+    "MO4U9wvvDmigDsj3nl",
+    "jmN3FbGRU9AuQbk33mAdimq",
+];
 /// Non-secret identity values captured from the official browser/QR flow.
 /// They are retained because Xunlei binds refresh and drive calls to that
 /// profile; callers must never fabricate a replacement profile.
@@ -1620,10 +1763,10 @@ impl XunleiClientProfile {
             "{}{}{}{}{}",
             self.client_id, self.client_version, WEB_PACKAGE, self.device_id, timestamp
         );
-        let salts: &[&str] = if self.client_version == "1.93.6" {
-            &WEB_SIGNATURE_SALTS_1936
-        } else {
-            &WEB_SIGNATURE_SALTS
+        let salts: &[&str] = match self.client_version.as_str() {
+            "1.93.22" => &WEB_SIGNATURE_SALTS_19322,
+            "1.93.6" => &WEB_SIGNATURE_SALTS_1936,
+            _ => &WEB_SIGNATURE_SALTS,
         };
         for salt in salts {
             current.push_str(salt);
@@ -1645,7 +1788,7 @@ impl XunleiClientProfile {
 
     fn supports_web_signature(&self) -> bool {
         self.is_modern_web()
-            && matches!(self.client_version.as_str(), WEB_VERSION_CODE | "1.93.6")
+            && matches!(self.client_version.as_str(), WEB_VERSION_CODE | "1.93.6" | "1.93.22")
             && !self.device_id.is_empty()
     }
     /// Headers accepted by the drive APIs.  The official browser does not
@@ -1711,6 +1854,12 @@ impl fmt::Debug for XunleiWebSecurity {
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
+struct XunleiActionTicket {
+    token: String,
+    expires_at: u64,
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct XunleiSession {
     pub access_token: String,
     pub refresh_token: String,
@@ -1729,6 +1878,8 @@ pub struct XunleiSession {
     pub web_context: XunleiWebContext,
     #[serde(default)]
     pub web_security: XunleiWebSecurity,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    action_tickets: BTreeMap<String, XunleiActionTicket>,
     #[serde(default)]
     pub auth_method: CloudAuthMethod,
 }
@@ -1750,6 +1901,31 @@ impl fmt::Debug for XunleiSession {
 }
 
 impl XunleiSession {
+    pub(crate) fn can_prepare_operation_verification(&self) -> bool {
+        let at = now();
+        let security = &self.web_security;
+        self.profile.supports_web_signature()
+            || (!security.captcha_sign.is_empty()
+                && !security.client_version.is_empty()
+                && security.package_name == self.profile.package_name
+                && security.timestamp.parse::<u64>().is_ok_and(|millis| {
+                    let signed_at = millis / 1000;
+                    signed_at <= at.saturating_add(30)
+                        && at.saturating_sub(signed_at) <= 300
+                }))
+    }
+
+    /// Background validation only probes the root directory. Keep an
+    /// unexpired session with operation verification when that probe yields
+    /// a weaker candidate for the same account.
+    pub(crate) fn would_downgrade_operation_verification(&self, candidate: &Self) -> bool {
+        !self.user_id.is_empty()
+            && self.user_id == candidate.user_id
+            && self.expires_at > now()
+            && self.can_prepare_operation_verification()
+            && !candidate.can_prepare_operation_verification()
+    }
+
     pub fn refresh(refresh_token: impl Into<String>, profile: XunleiClientProfile) -> Self {
         Self {
             access_token: String::new(),
@@ -1760,6 +1936,7 @@ impl XunleiSession {
             security_token: String::new(),
             web_context: XunleiWebContext::default(),
             web_security: XunleiWebSecurity::default(),
+            action_tickets: BTreeMap::new(),
             auth_method: CloudAuthMethod::Web,
         }
     }
@@ -1778,6 +1955,7 @@ impl XunleiSession {
             security_token: String::new(),
             web_context: XunleiWebContext::default(),
             web_security: XunleiWebSecurity::default(),
+            action_tickets: BTreeMap::new(),
             auth_method: CloudAuthMethod::Web,
         }
     }
@@ -1800,6 +1978,7 @@ impl XunleiSession {
             security_token: security_token.into(),
             web_context: XunleiWebContext::default(),
             web_security: XunleiWebSecurity::default(),
+            action_tickets: BTreeMap::new(),
             auth_method: CloudAuthMethod::Web,
         };
         if session.access_token.is_empty() || session.user_id.is_empty() {
@@ -1869,6 +2048,33 @@ pub struct XunleiClient<'a, T: CloudHttpTransport> {
 }
 
 impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
+    fn trace_response(method: &str, path: &str, session: &XunleiSession, response: &CloudHttpResponse) {
+        if !cfg!(debug_assertions) || std::env::var("VERSADOWN_XUNLEI_DIAGNOSTICS").as_deref() != Ok("1") {
+            return;
+        }
+        let route = match path {
+            "/drive/v1/files" => "files",
+            "/drive/v1/share/list" => "shares",
+            "/drive/v1/about" => "capacity",
+            "/v1/shield/captcha/init" => "captcha_init",
+            "/v1/auth/token" => "oauth_refresh",
+            _ => "other",
+        };
+        let body: Value = serde_json::from_str(&response.body).unwrap_or(Value::Null);
+        let ticket = format!("{:x}", Sha256::digest(session.web_security.captcha_token.as_bytes()));
+        eprintln!("[xunlei-diagnostic] {}", json!({
+            "method": method, "route": route, "status": response.status,
+            "code": body["error_code"].as_i64().or_else(|| body["code"].as_i64()),
+            "captcha_rejected": matches!(body["error"].as_str(), Some("captcha_required" | "captcha_invalid")),
+            "challenge_url_present": body["url"].as_str().is_some_and(|value| !value.is_empty()),
+            "ticket_id": &ticket[..12],
+            "ticket_seconds_left": session.web_security.expires_at.saturating_sub(now()),
+            "root_ticket": session.web_security.action == "GET:/drive/v1/files",
+            "signer_available": session.can_prepare_operation_verification(),
+            "local_signer_supported": session.profile.supports_web_signature(),
+        }));
+    }
+
     pub fn new(mut session: XunleiSession, http: &'a T) -> Self {
         let access_token = session.access_token.clone();
         if !session.profile.is_modern_web() {
@@ -2091,6 +2297,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             headers,
             body: Some(body.to_string()),
         })?;
+        Self::trace_response("POST", "/v1/auth/token", &previous, &response);
         let value = self.value(response)?;
         let mut refreshed = previous;
         refreshed.access_token = required(&value, "access_token")?;
@@ -2148,6 +2355,44 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         body: Option<Value>,
         session: &XunleiSession,
     ) -> Result<Value, QuarkError> {
+        self.value(self.send_raw(method, url, body, session)?)
+    }
+
+    /// Retry only the request explicitly rejected by the captcha service.
+    /// Never replay a composite upload/batch operation or an ambiguous failure.
+    fn raw_retry_rejected_captcha(
+        &self,
+        method: &'static str,
+        url: String,
+        body: Option<Value>,
+        session: &XunleiSession,
+        allow_renewal: bool,
+    ) -> Result<Value, QuarkError> {
+        let response = self.send_raw(method, url.clone(), body.clone(), session)?;
+        let parsed: Value = serde_json::from_str(&response.body).unwrap_or(Value::Null);
+        let explicitly_rejected = matches!(response.status, 400 | 403 | 412)
+            && matches!(parsed["error"].as_str(), Some("captcha_invalid" | "captcha_required"))
+            && !["url", "captcha_url", "verification_url"].iter().any(|key| {
+                parsed[*key].as_str().is_some_and(|url| !url.is_empty())
+            });
+        if allow_renewal && explicitly_rejected && session.can_prepare_operation_verification() {
+            let path = url::Url::parse(&url).map_err(|_| QuarkError::InvalidResponse)?;
+            let renewed = self.refresh_web_captcha(&format!("{method}:{}", path.path()))?;
+            if renewed.web_security.captcha_token == session.web_security.captcha_token {
+                return Err(QuarkError::WebAuthorizationRequired);
+            }
+            return self.raw(method, url, body, &renewed);
+        }
+        self.value(response)
+    }
+
+    fn send_raw(
+        &self,
+        method: &'static str,
+        url: String,
+        body: Option<Value>,
+        session: &XunleiSession,
+    ) -> Result<CloudHttpResponse, QuarkError> {
         if session.access_token.is_empty()
             || (!session.profile.is_drive_complete() && !Self::is_browser_bearer_session(session))
         {
@@ -2190,12 +2435,15 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                 headers.insert("User-Agent".into(), session.profile.user_agent.clone());
             }
         }
-        self.value(self.http.send(CloudHttpRequest {
+        let path = url::Url::parse(&url).map(|url| url.path().to_owned()).unwrap_or_default();
+        let response = self.http.send(CloudHttpRequest {
             method,
             url,
             headers,
             body: body.map(|value| value.to_string()),
-        })?)
+        })?;
+        Self::trace_response(method, &path, session, &response);
+        Ok(response)
     }
 
     fn request(
@@ -2212,7 +2460,46 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         if session.profile.is_modern_web() {
             let parsed = url::Url::parse(&url).map_err(|_| QuarkError::InvalidResponse)?;
             let action = format!("{method}:{}", parsed.path());
+            // Use a previously issued ticket only for the exact action it
+            // was issued for. Keep the current signing metadata independent.
+            if session.web_security.action != action {
+                if let Some(ticket) = session.action_tickets.get(&action).filter(|ticket| {
+                    !ticket.token.is_empty() && ticket.expires_at > now().saturating_add(30)
+                }) {
+                    session.web_security.captcha_token = ticket.token.clone();
+                    session.web_security.expires_at = ticket.expires_at;
+                    session.web_security.action = action.clone();
+                    let mut result = if self.automatic_session_recovery {
+                        self.raw(method, url.clone(), body.clone(), &session)
+                    } else {
+                        self.raw_retry_rejected_captcha(method, url.clone(), body.clone(), &session, true)
+                    };
+                    if matches!(result, Err(QuarkError::AuthorizationExpired))
+                        && self.automatic_session_recovery
+                        && session.profile.can_refresh()
+                    {
+                        let mut refreshed = self.refresh(self.session())?;
+                        refreshed.web_security = session.web_security;
+                        result = self.raw(method, url.clone(), body.clone(), &refreshed);
+                    }
+                    if matches!(result, Err(QuarkError::WebAuthorizationRequired)) {
+                        self.session.borrow_mut().action_tickets.remove(&action);
+                        if self.automatic_session_recovery {
+                            let renewed = self.refresh_web_captcha(&action)?;
+                            return self.raw(method, url, body, &renewed);
+                        }
+                    }
+                    return result;
+                }
+            }
             let security = &session.web_security;
+            // Observed official web requests reuse the root ticket for share
+            // listing, folder creation and upload initialization. Renew on
+            // expiry or a server challenge, rather than changing it per action.
+            let reuse_root_ticket = security.action == "GET:/drive/v1/files"
+                && !security.captcha_token.is_empty()
+                && parsed.origin().ascii_serialization() == "https://api-pan.xunlei.com"
+                && matches!(action.as_str(), "GET:/drive/v1/share/list" | "POST:/drive/v1/files");
             let mut renewed = false;
             if (session.profile.supports_web_signature()
                 || !security.captcha_token.is_empty()
@@ -2224,15 +2511,17 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                     || (!security.action.is_empty()
                         && security.action != action
                         && action != "GET:/drive/v1/about"
+                        && !reuse_root_ticket
                         && !(method == "GET" && parsed.path().starts_with("/drive/v1/files/"))))
             {
                 session = self.refresh_web_captcha(&action)?;
                 renewed = true;
             }
-            // A request-scoped action ticket is a precondition, not permission
-            // to replay an operation. Long-lived token renewal stays supervised.
-            if !self.automatic_session_recovery {
-                return self.raw(method, url, body, &session);
+            // Long-lived account renewal stays supervised. An explicit captcha
+            // rejection can renew and retry this exact request once, without
+            // restarting a mutation that may have already completed other steps.
+            if !self.automatic_session_recovery || (reuse_root_ticket && method == "POST") {
+                return self.raw_retry_rejected_captcha(method, url, body, &session, !renewed);
             }
             let mut refreshed = false;
             loop {
@@ -2282,7 +2571,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             || security.client_version.is_empty()
             || security.package_name != session.profile.package_name
         {
-            return Err(QuarkError::WebAuthorizationRequired);
+            return Err(QuarkError::XunleiVerificationUnavailable("metadata_missing"));
         }
         // A local conservative reuse bound for unknown versions, not a claim
         // about the provider's TTL. Supported profiles just generated a fresh
@@ -2291,9 +2580,12 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             .timestamp
             .parse::<u64>()
             .map(|millis| millis / 1000)
-            .map_err(|_| QuarkError::WebAuthorizationRequired)?;
-        if signed_at > now().saturating_add(30) || now().saturating_sub(signed_at) > 300 {
-            return Err(QuarkError::WebAuthorizationRequired);
+            .map_err(|_| QuarkError::XunleiVerificationUnavailable("timestamp_invalid"))?;
+        if signed_at > now().saturating_add(30) {
+            return Err(QuarkError::XunleiVerificationUnavailable("timestamp_invalid"));
+        }
+        if now().saturating_sub(signed_at) > 300 {
+            return Err(QuarkError::XunleiVerificationUnavailable("metadata_expired"));
         }
         let response = self.http.send(CloudHttpRequest {
             method: "POST",
@@ -2321,6 +2613,7 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
                 .to_string(),
             ),
         })?;
+        Self::trace_response("POST", "/v1/shield/captcha/init", &session, &response);
         let parsed: Value = serde_json::from_str(&response.body).unwrap_or(Value::Null);
         if let Some(url) = parsed["url"].as_str().filter(|url| !url.is_empty()) {
             session.web_security.verification_url = url.into();
@@ -2328,12 +2621,38 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
             return Err(QuarkError::WebAuthorizationRequired);
         }
         let value = self.value(response)?;
-        session.web_security.captcha_token = required(&value, "captcha_token")?;
+        let token = required(&value, "captcha_token")?;
         let expires_in = value["expires_in"]
             .as_u64()
             .filter(|value| *value > 30)
             .ok_or(QuarkError::InvalidResponse)?;
-        session.web_security.expires_at = now().saturating_add(expires_in);
+        let at = now();
+        let previous = &session.web_security;
+        session.action_tickets.retain(|_, ticket| ticket.expires_at > at);
+        session.action_tickets.remove(action);
+        if !previous.action.is_empty()
+            && previous.action != action
+            && !previous.captcha_token.is_empty()
+            && previous.expires_at > at
+        {
+            session.action_tickets.insert(
+                previous.action.clone(),
+                XunleiActionTicket {
+                    token: previous.captcha_token.clone(),
+                    expires_at: previous.expires_at,
+                },
+            );
+        }
+        if session.action_tickets.len() > 8 {
+            if let Some(oldest) = session.action_tickets.iter()
+                .min_by_key(|(_, ticket)| ticket.expires_at)
+                .map(|(action, _)| action.clone())
+            {
+                session.action_tickets.remove(&oldest);
+            }
+        }
+        session.web_security.captcha_token = token;
+        session.web_security.expires_at = at.saturating_add(expires_in);
         session.web_security.action = action.into();
         session.web_security.verification_url.clear();
         *self.session.borrow_mut() = session.clone();
@@ -2495,15 +2814,21 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         let mut shares = Vec::new();
         let mut page_token = String::new();
         let mut seen_tokens = HashSet::new();
+        let modern_web = self.session.borrow().profile.is_modern_web();
         for _ in 0..10_000 {
-            let value = self.request(
-                "GET",
-                self.drive_url(&format!(
+            let path = if modern_web {
+                let mut path = "/drive/v1/share/list?space=&limit=100&withCaptcha=true&withCredentials=true".to_owned();
+                if !page_token.is_empty() {
+                    path.push_str(&format!("&page_token={}", encoded(&page_token)));
+                }
+                path
+            } else {
+                format!(
                     "/drive/v1/share/list?limit=100&thumbnail_size=SIZE_SMALL&page_token={}",
                     encoded(&page_token)
-                )),
-                None,
-            )?;
+                )
+            };
+            let value = self.request("GET", self.drive_url(&path), None)?;
             let list = value
                 .get("data")
                 .and_then(Value::as_array)

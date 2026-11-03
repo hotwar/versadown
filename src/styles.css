@@ -327,3 +327,5 @@ body *{font-weight:400!important}
 }
 
 .local-upload-hidden-toggle{display:flex;align-items:center;gap:6px;white-space:nowrap}
+
+.cloud-file-manager>.cloud-state.cloud-error{flex:0 0 auto;overflow-wrap:anywhere}

@@ -71,9 +71,18 @@ jobs:
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::baidu::tests::share_transfer_
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::xunlei::tests::xunlei_personal_share_uses_the_drive_share_management_protocol
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::xunlei::tests::xunlei_cancels_shares_with_the_web_management_contract
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::xunlei::tests::idle_directory_with_missing_signer_recovers_from_a_new_root_ticket
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::xunlei::diagnostics_tests::
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --test cloud_xunlei --test cloud_auth_supervisor --test cloud_sessions
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib unavailable_credential_storage_does_not_reset_or_delete_saved_accounts
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib macos_cookie_scope_tests
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib private_history_reset
+      - name: Upload session regression (isolated credentials)
+        env:
+          VERSADOWN_NATIVE_SMOKE: '1'
+          VERSADOWN_BACKGROUND_UI_TEST: '1'
+          VERSADOWN_TEST_DATA_DIR: ${{ runner.temp }}/versadown-upload-regression
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --features native-smoke --test cloud_upload
       - name: Check macOS encrypted credentials without accessing Keychain
         if: runner.os == 'macOS'
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::credentials::macos::tests

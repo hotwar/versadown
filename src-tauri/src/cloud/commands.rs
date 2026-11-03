@@ -16,7 +16,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet},
     future::Future,
     path::{Component, Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
 };
 use tauri::{
     webview::{NewWindowResponse, PageLoadEvent},
@@ -54,10 +54,15 @@ pub struct CloudState {
     authorization_completion: CloudDownloadSourceGate,
     authorization_results: Mutex<HashMap<CloudProvider, CloudAccount>>,
     pub auth_supervisor: auth_supervisor::AuthSupervisor,
+    application: OnceLock<AppHandle>,
     http: ReqwestTransport,
 }
 
 impl CloudState {
+    pub(crate) fn bind_application(&self, app: AppHandle) {
+        let _ = self.application.set(app);
+    }
+
     pub fn remember_authorization_completion(
         &self,
         account: &CloudAccount,
@@ -157,6 +162,7 @@ impl CloudState {
             authorization_completion: Default::default(),
             authorization_results: Default::default(),
             auth_supervisor: Default::default(),
+            application: OnceLock::new(),
             store: SystemCredentialStore::new(root)?,
             http: ReqwestTransport::new()?,
         };

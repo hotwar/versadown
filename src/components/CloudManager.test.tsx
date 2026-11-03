@@ -2655,3 +2655,47 @@ it.each([
   await waitFor(() => expect(writeText).toHaveBeenCalledWith(expected));
   expect(new URL(writeText.mock.calls[0][0]).href).toBe(expected);
 });
+
+
+it.each(['shares', 'mkdir', 'upload'] as const)('reports Xunlei local verification failure without login loops: %s', async (operation) => {
+  const user = userEvent.setup();
+  const failure = { code: 'xunlei_verification_unavailable', message: 'metadata_missing' };
+  const client = createCloudFake({
+    listCloudShares: vi.fn().mockRejectedValue(failure),
+    createCloudDirectory: vi.fn().mockRejectedValue(failure),
+    uploadCloudFiles: vi.fn().mockResolvedValue({ uploaded: [], failures: [{ ...failure, itemName: 'a.txt' }] }),
+  });
+  render(<CloudManager provider="xunlei" client={client} initialAccount={{ id: 'x-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} />);
+  await screen.findByRole('tree');
+  if (operation === 'shares') {
+    await user.dblClick(await screen.findByText('我的分享'));
+  } else if (operation === 'mkdir') {
+    await user.click(screen.getByRole('button', { name: '新建目录' }));
+    await user.type(screen.getByLabelText('目录名称'), 'diagnostic');
+    await user.click(screen.getByRole('button', { name: '确认新建目录' }));
+  } else {
+    await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+    await confirmAllLocalUploads(user);
+  }
+  expect((await screen.findAllByText(/XL-LOCAL-MISSING/)).length).toBeGreaterThan(0);
+  expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
+  expect(client.logoutCloud).not.toHaveBeenCalled();
+});
+
+it('keeps the Xunlei file list and offers explicit authorization when operation verification expires', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake({
+    listCloudShares: vi.fn().mockRejectedValue({
+      code: 'xunlei_verification_unavailable',
+      message: 'metadata_expired',
+    }),
+  });
+  render(<CloudManager provider="xunlei" client={client} initialAccount={{ id: 'x-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} />);
+  await user.dblClick(await screen.findByText('我的分享'));
+  expect(await screen.findByText(/XL-LOCAL-EXPIRED/)).toBeVisible();
+  expect(screen.getByText('报告.pdf')).toBeVisible();
+  expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('button', { name: '重新网页授权' }));
+  expect(client.beginCloudAuthorization).toHaveBeenCalledWith('xunlei');
+  expect(client.logoutCloud).not.toHaveBeenCalled();
+});

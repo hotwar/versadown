@@ -1,4 +1,9 @@
 const messages = {
+  'cloud.verification.xunlei.shareProfileUnsupported': 'This Xunlei web profile is unsupported for share links. Open the share on the official website. [XL-SHARE-PROFILE]',
+  'cloud.verification.xunlei.metadataMissing': 'Xunlei operation verification is unavailable. [XL-LOCAL-MISSING]',
+  'cloud.verification.xunlei.metadataExpired': 'The Xunlei verification data saved by VersaDown exceeded its local reuse limit. Reauthorize in the browser, then retry this operation. [XL-LOCAL-EXPIRED]',
+  'cloud.verification.xunlei.timestampInvalid': 'The Xunlei verification timestamp is invalid or ahead of the system clock. The current request was not sent. Check the system time. [XL-LOCAL-TIME]',
+  'cloud.verification.xunlei.unavailable': 'VersaDown cannot prepare verification for this Xunlei operation. Use the official website for now. [XL-LOCAL]',
   'macos.links.registrationFailed': 'Unable to update macOS download link associations. Please try again.',
   'macos.links.storageFailed': 'Unable to save download link associations. Check access to the application data directory.',
   'macos.links.bundleRequired': 'Install and open VersaDown.app before changing link associations.',

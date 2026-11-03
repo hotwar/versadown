@@ -220,14 +220,18 @@ pub(crate) fn recover_authorization(
     http: &impl CloudHttpTransport,
     genuine_auth_error: impl Into<auth_supervisor::RecoveryPhase>,
 ) -> Result<(), QuarkError> {
+    let phase = genuine_auth_error.into();
     auth_supervisor::recover_in_order(
         provider,
         &state.store,
         ProviderRegistry::global()
             .driver(provider, &state.store, http)
             .auth(),
-        genuine_auth_error,
-        || capture_persistent_authorization(app, state, provider, http),
+        phase,
+        || capture_persistent_authorization(
+            app, state, provider, http,
+            phase == auth_supervisor::RecoveryPhase::OperationVerification,
+        ),
     )
 }
 
@@ -259,6 +263,7 @@ fn capture_persistent_authorization(
     state: &CloudState,
     provider: CloudProvider,
     http: &impl CloudHttpTransport,
+    require_operation_verification: bool,
 ) -> Result<bool, CloudError> {
     if auth_supervisor::is_manually_disconnected(&state.store, provider)? {
         return Err(CloudError::NotAuthorized);
@@ -374,6 +379,22 @@ fn capture_persistent_authorization(
             {
                 candidate.retain_app_transport(&existing);
                 verified = serde_json::to_vec(&candidate).map_err(|_| CloudError::Storage)?;
+            }
+        }
+        if provider == CloudProvider::Xunlei {
+            let candidate: xunlei::XunleiSession =
+                serde_json::from_slice(&verified).map_err(|_| CloudError::Storage)?;
+            if require_operation_verification && !candidate.can_prepare_operation_verification() {
+                return Ok(false);
+            }
+            if let Some(existing) = state
+                .store
+                .load(provider.key())?
+                .and_then(|bytes| serde_json::from_slice::<xunlei::XunleiSession>(&bytes).ok())
+            {
+                if existing.would_downgrade_operation_verification(&candidate) {
+                    return Ok(false);
+                }
             }
         }
         state.store.save(provider.key(), &verified)?;

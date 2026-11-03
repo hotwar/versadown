@@ -500,6 +500,7 @@ fn upload_error_code(error: &QuarkError) -> &'static str {
         return "upload_cancelled";
     }
     match error {
+        QuarkError::XunleiVerificationUnavailable(_) => "xunlei_verification_unavailable",
         QuarkError::NotAuthorized => "not_authorized",
         QuarkError::AccountMismatch => "account_mismatch",
         QuarkError::AuthorizationExpired => "credentials_expired",
@@ -783,6 +784,9 @@ impl CloudState {
             SessionWorkKind::Mutation,
             |snapshot| work(&crate::cloud::driver::StoreRef(snapshot)),
             |genuine| {
+                if let Some(app) = self.application.get() {
+                    return recover_authorization(app, self, provider, http, genuine);
+                }
                 auth_supervisor::recover_in_order(
                     provider,
                     &self.store,

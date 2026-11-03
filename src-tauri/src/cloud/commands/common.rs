@@ -42,6 +42,7 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
         QuarkError::WebAuthorizationRequired => {
             "此登录方式需要网页验证，请点击网页授权完成登录".into()
         }
+        QuarkError::XunleiVerificationUnavailable(reason) => (*reason).into(),
         QuarkError::CaptchaRequired => "网盘要求完成官方操作验证后重试".into(),
         QuarkError::PikpakOperationVerificationRequired(_) => {
             "PikPak 需要官方操作验证，请在我的网盘中完成验证后重试".into()
@@ -85,6 +86,7 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
 /// never a localized provider message.
 pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
     match error {
+        QuarkError::XunleiVerificationUnavailable(_) => "xunlei_verification_unavailable",
         QuarkError::NotAuthorized => "not_authorized",
         QuarkError::AccountMismatch => "account_mismatch",
         QuarkError::AuthorizationExpired => "credentials_expired",

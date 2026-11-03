@@ -284,6 +284,7 @@ pub fn run() {
             let cloud = std::sync::Arc::new(cloud::commands::CloudState::new(
                 data_dir.join("cloud-sessions"),
             )?);
+            cloud.bind_application(app.handle().clone());
             let mut startup_health = startup::StartupHealth {
                 credentials_unavailable: cloud.credential_restore_failed,
             };
