@@ -26,6 +26,154 @@ use uuid::Uuid;
 
 const CHUNK: usize = 4 * 1024 * 1024;
 
+// The bundled engine declares a connected peer stalled after eight seconds.
+// A healthy 320 KiB/s origin takes over twelve seconds to fill a 4 MiB range.
+async fn serve_slow_origin(State(origin): State<Origin>, headers: HeaderMap) -> Response {
+    let range = headers[header::RANGE]
+        .to_str()
+        .unwrap()
+        .strip_prefix("bytes=")
+        .unwrap()
+        .split_once('-')
+        .unwrap();
+    let start = range.0.parse::<usize>().unwrap();
+    let end = range
+        .1
+        .parse::<usize>()
+        .unwrap()
+        .min(origin.payload.len() - 1);
+    assert!(end - start < CHUNK);
+    origin.ranges.lock().unwrap().push((start, end));
+    let total = origin.payload.len();
+    let chunks = futures_util::stream::unfold(
+        (origin.payload, start),
+        move |(payload, offset)| async move {
+            if offset > end {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let next = (offset + 32 * 1024).min(end + 1);
+            Some((
+                Ok::<_, std::io::Error>(Bytes::copy_from_slice(&payload[offset..next])),
+                (payload, next),
+            ))
+        },
+    );
+    Response::builder()
+        .status(StatusCode::PARTIAL_CONTENT)
+        .header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{total}"),
+        )
+        .header(header::CONTENT_LENGTH, end - start + 1)
+        .body(Body::from_stream(chunks))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn bundled_engine_downloads_slow_continuous_ranges_without_false_stalls() {
+    let payload = Arc::new(
+        (0..2 * CHUNK + 37)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<_>>(),
+    );
+    let origin = Origin {
+        payload: Arc::clone(&payload),
+        ranges: Arc::new(Mutex::new(Vec::new())),
+        delay: Duration::ZERO,
+    };
+    let ranges = Arc::clone(&origin.ranges);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = format!("http://{}/slow", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/slow", get(serve_slow_origin))
+                .with_state(origin),
+        )
+        .await
+        .unwrap();
+    });
+    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store.create(NewTask::direct(&upstream)).unwrap();
+    let registration = gateway.register(task.id, upstream, vec![], None).unwrap();
+    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut aria2 = versadown_lib::Aria2Settings::default();
+    aria2.rpc_port = reserved.local_addr().unwrap().port();
+    aria2.rpc_token = format!("slow-range-{}", aria2.rpc_port);
+    drop(reserved);
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let binary = versadown_lib::engine_binary::EngineBinary::for_current_target()
+        .unwrap()
+        .resolve(&manifest, &manifest)
+        .unwrap();
+    let output = root.path().join("downloads");
+    let (mut process, client) = Aria2Process::start(Aria2LaunchConfig {
+        binary,
+        data_dir: root.path().join("engine"),
+        download_dir: output.clone(),
+        parent_pid: std::process::id(),
+        peer_discovery: false,
+        aria2,
+    })
+    .await
+    .unwrap();
+    let service = DownloadService::new(Arc::new(client.clone()), store);
+    let submitted = service
+        .submit_uri_with_options(
+            task.id,
+            vec![registration.url().into()],
+            UriSubmissionOptions {
+                directory: Some(output.clone()),
+                output_name: Some("slow.bin".into()),
+                max_connections_per_server: Some(1),
+                max_tries: Some(1),
+                direct_loopback: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let started = tokio::time::Instant::now();
+    let mut observed_progress = false;
+    let result = loop {
+        let status = client
+            .tell_status(submitted.aria_gid.as_deref().unwrap())
+            .await
+            .unwrap();
+        observed_progress |= status.completed_length.parse::<u64>().unwrap_or_default() > 0;
+        if status.status == "error" {
+            break Err(format!(
+                "{:?}: {:?}",
+                status.error_code, status.error_message
+            ));
+        }
+        if status.status == "complete" {
+            break Ok(());
+        }
+        if started.elapsed() > Duration::from_secs(45) {
+            break Err("slow transfer exceeded deadline".into());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    process.terminate_fallback().unwrap();
+    server.abort();
+    assert!(
+        result.is_ok(),
+        "healthy continuous source failed: {result:?}"
+    );
+    assert!(observed_progress);
+    assert_eq!(std::fs::read(output.join("slow.bin")).unwrap(), *payload);
+    assert!(ranges
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(start, end)| end - start < CHUNK));
+}
+
 #[derive(Clone)]
 struct Origin {
     payload: Arc<Vec<u8>>,
@@ -124,6 +272,65 @@ async fn origin_returns_short_body() -> Response {
         .header(header::CONTENT_RANGE, "bytes 0-3/8")
         .body(Body::from("abc"))
         .unwrap()
+}
+
+fn chunked_range_with_wrong_length(expected: usize, error_at_eof: bool) -> Response {
+    let chunks = futures_util::stream::unfold(0, move |index| async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        match index {
+            0 => Some((Ok::<_, std::io::Error>(Bytes::from_static(b"abc")), 1)),
+            1 => Some((Ok(Bytes::from_static(b"def")), 2)),
+            2 if error_at_eof => Some((Err(std::io::Error::other("truncated origin")), 3)),
+            _ => None,
+        }
+    });
+    Response::builder()
+        .status(StatusCode::PARTIAL_CONTENT)
+        .header(header::CONTENT_RANGE, format!("bytes 0-{}/8", expected - 1))
+        .body(Body::from_stream(chunks))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn invalid_chunked_body_never_completes_the_advertised_range() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route(
+                    "/truncated",
+                    get(|| async { chunked_range_with_wrong_length(8, false) }),
+                )
+                .route(
+                    "/overlong",
+                    get(|| async { chunked_range_with_wrong_length(5, false) }),
+                )
+                .route(
+                    "/broken-eof",
+                    get(|| async { chunked_range_with_wrong_length(6, true) }),
+                ),
+        )
+        .await
+        .unwrap();
+    });
+    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    for path in ["truncated", "overlong", "broken-eof"] {
+        let registration = gateway
+            .register(Uuid::new_v4(), format!("{upstream}/{path}"), vec![], None)
+            .unwrap();
+        let response = client
+            .get(registration.url())
+            .header(header::RANGE, "bytes=0-7")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT, "{path}");
+        assert!(response.bytes().await.is_err(), "{path} must not complete");
+    }
+    server.abort();
 }
 
 async fn origin_returns_valid_short_ranges(

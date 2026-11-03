@@ -20,6 +20,103 @@ pub(crate) fn has_legacy_control(store: &TaskStore, task: &DownloadTask) -> bool
     })
 }
 
+/// A connection can fail before aria2 creates a payload or any byte ranges.
+/// Its GID alone is not a checkpoint. Permit a new submission only when both
+/// the durable task and its reserved output confirm that no data can be lost.
+pub(crate) fn can_restart_unwritten(store: &TaskStore, task: &DownloadTask, gid: &str) -> bool {
+    unwritten_download(store, task, gid).unwrap_or(false)
+}
+
+fn unwritten_download(store: &TaskStore, task: &DownloadTask, gid: &str) -> Option<bool> {
+    if task.completed_length != 0
+        || gid.len() != 16
+        || !gid.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Some(false);
+    }
+    let files = store.files(task.id).ok()?;
+    if files.len() > 1 || files.iter().any(|file| file.completed_length != 0) {
+        return Some(false);
+    }
+    let mut paths = files
+        .iter()
+        .map(|file| std::path::PathBuf::from(&file.path))
+        .collect::<Vec<_>>();
+    paths.extend(store.reserved_output_path(task.id).ok()?);
+    paths.sort();
+    paths.dedup();
+    if paths.is_empty() {
+        return Some(false);
+    }
+    for path in &paths {
+        if !path.is_absolute() {
+            return Some(false);
+        }
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_file() && metadata.len() == 0 => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Some(false),
+        }
+        for suffix in [".aria2", ".xltd", ".xltd.cfg"] {
+            let mut control = path.as_os_str().to_os_string();
+            control.push(suffix);
+            match std::fs::symlink_metadata(control) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                _ => return Some(false),
+            }
+        }
+    }
+    let database = store.native_stream_state_path()?;
+    match std::fs::symlink_metadata(&database) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(true),
+        Ok(metadata) if metadata.is_file() => {}
+        _ => return Some(false),
+    }
+    let connection =
+        Connection::open_with_flags(database, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    // Also inspect the output identity: a stale GID must not hide ranges that
+    // the engine has already transferred to another GID.
+    let mut statement = connection
+        .prepare("SELECT gid,uri,path,total_length,completed_length,completed_ranges FROM downloads WHERE gid=?1 OR path=?2 OR path=?3")
+        .ok()?;
+    let mut rows = statement
+        .query(rusqlite::params![
+            gid,
+            paths[0].to_string_lossy(),
+            paths.last()?.to_string_lossy(),
+        ])
+        .ok()?;
+    while let Some(row) = rows.next().ok()? {
+        let (record_gid, uri, path, total, completed, ranges): (
+            String,
+            String,
+            String,
+            u64,
+            u64,
+            String,
+        ) = (
+            row.get(0).ok()?,
+            row.get(1).ok()?,
+            row.get(2).ok()?,
+            row.get(3).ok()?,
+            row.get(4).ok()?,
+            row.get(5).ok()?,
+        );
+        let uri = url::Url::parse(&uri).ok()?;
+        if record_gid != gid
+            || !matches!(uri.scheme(), "http" | "https")
+            || uri.host_str().is_none()
+            || !paths.iter().any(|output| output == Path::new(&path))
+            || (total != 0 && task.total_length.is_some_and(|known| known != total))
+            || completed != 0
+            || !ranges.is_empty()
+        {
+            return Some(false);
+        }
+    }
+    Some(true)
+}
+
 pub(crate) fn checkpoint(
     store: &TaskStore,
     task: &DownloadTask,

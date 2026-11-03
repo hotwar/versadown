@@ -555,7 +555,25 @@ impl DownloadService {
         uris: &mut Vec<String>,
         mut options: UriSubmissionOptions,
     ) -> Result<Aria2Options, DownloadServiceError> {
-        let checkpoint = resume_checkpoint(&self.store, task, &options)?;
+        let mut restart_unwritten = false;
+        let checkpoint = match resume_checkpoint(&self.store, task, &options) {
+            Err(DownloadServiceError::InvalidNativeCheckpoint)
+                if crate::cloud::download_dispatch::is_cloud_download_source(&task.source)
+                    && options
+                        .native_resume_gid
+                        .as_deref()
+                        .or(task.aria_gid.as_deref())
+                        .is_some_and(|gid| {
+                            super::native_resume::can_restart_unwritten(&self.store, task, gid)
+                        }) =>
+            {
+                restart_unwritten = true;
+                options.continue_download = false;
+                options.native_resume_gid = None;
+                None
+            }
+            result => result?,
+        };
         if let Some(checkpoint) = &checkpoint {
             options.directory = checkpoint.path.parent().map(Path::to_path_buf);
             options.output_name = checkpoint
@@ -575,7 +593,7 @@ impl DownloadService {
         // aria2's implicit renaming. This keeps the durable task name and the
         // actual file path aligned across HTTP and cloud submissions.
         result.insert("auto-file-renaming".into(), "false".into());
-        if checkpoint.is_some() {
+        if checkpoint.is_some() || restart_unwritten {
             // Native checkpoints restore independently of `continue`. Never
             // fall back to treating a preallocated file's length as progress.
             result.insert("continue".into(), "false".into());
