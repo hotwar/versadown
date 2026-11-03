@@ -118,8 +118,8 @@ impl BaiduRangeGateway {
         self.register_inner(task_id, upstream, headers, proxy, false)
     }
 
-    /// Refresh the upstream without changing the local URI that identifies
-    /// aria2-next's persisted byte ranges for a paused task.
+    /// Refresh the upstream while retaining the paused task's local endpoint,
+    /// avoiding unnecessary engine URI rotation.
     pub fn register_refreshing(
         &self,
         task_id: Uuid,

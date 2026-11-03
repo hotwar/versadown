@@ -66,6 +66,8 @@ jobs:
       - name: Check cloud range streaming and retry recovery
         run: |
           cargo test --locked --manifest-path src-tauri/Cargo.toml --test baidu_range_gateway --test cloud_gateway_proxy --test downloader
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib aria2::native_resume::tests
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib aria2::service::tests
       - name: Check parser and startup failure handling
         run: |
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib parser::

@@ -96,7 +96,7 @@ fn prepared_cloud_share_task(store: &TaskStore, source: &str, name: &str) -> Dow
 }
 
 #[tokio::test]
-async fn failed_cloud_url_refresh_rebinds_native_checkpoint_to_a_stable_gateway_uri() {
+async fn failed_cloud_url_refresh_claims_native_checkpoint_without_rewriting_its_uri() {
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(TaskStore::open_path(&directory.path().join("tasks.sqlite")).unwrap());
     let task = store
@@ -179,6 +179,14 @@ async fn failed_cloud_url_refresh_rebinds_native_checkpoint_to_a_stable_gateway_
         api.uris.lock().unwrap()[0],
         vec!["http://127.0.0.1:49152/stable-token"],
         "the expired CDN URI must not be submitted as an alternate mirror"
+    );
+    assert_eq!(api.added_options()[0]["continue"], "true");
+    assert_eq!(
+        checkpoint
+            .query_row("SELECT uri FROM downloads", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "https://expired.example.test/file",
+        "only the engine may transfer the checkpoint to its replacement GID"
     );
 }
 
@@ -577,7 +585,7 @@ fn native_resume_fixture() -> (tempfile::TempDir, Arc<TaskStore>, DownloadTask) 
 }
 
 #[tokio::test]
-async fn native_resume_preserves_checkpoint_identity_and_disables_length_fallback() {
+async fn native_resume_claims_verified_ranges_by_output_path() {
     let (root, store, task) = native_resume_fixture();
     let api = RecordingAria2::successful();
     let service = DownloadService::new(api.clone(), store);
@@ -595,7 +603,7 @@ async fn native_resume_preserves_checkpoint_identity_and_disables_length_fallbac
     let options = api.added_options();
     assert_eq!(
         options[0].get("continue").map(String::as_str),
-        Some("false")
+        Some("true")
     );
     assert_eq!(
         options[0].get("allow-overwrite").map(String::as_str),
@@ -615,7 +623,7 @@ async fn native_resume_preserves_checkpoint_identity_and_disables_length_fallbac
     );
     assert_eq!(
         api.uris.lock().unwrap()[0],
-        vec!["https://example.test/fresh", "https://example.test/old"]
+        vec!["https://example.test/fresh"]
     );
 }
 
@@ -724,7 +732,7 @@ async fn failed_cloud_snapshot_without_lengths_keeps_verified_download_progress(
 }
 
 #[tokio::test]
-async fn baidu_gateway_resume_places_fresh_local_uri_before_checkpoint_mirror() {
+async fn baidu_gateway_resume_uses_only_the_fresh_local_uri() {
     let (_root, store, task) = native_resume_fixture();
     let api = RecordingAria2::successful();
     let service = DownloadService::new(api.clone(), store);
@@ -743,7 +751,7 @@ async fn baidu_gateway_resume_places_fresh_local_uri_before_checkpoint_mirror() 
         .unwrap();
     assert_eq!(
         api.uris.lock().unwrap()[0],
-        vec![loopback, "https://example.test/old"]
+        vec![loopback]
     );
     assert!(api.changed_uris().is_empty());
     assert_eq!(

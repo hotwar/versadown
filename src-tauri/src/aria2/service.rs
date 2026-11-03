@@ -204,7 +204,6 @@ mod tests {
         .expect("detached task should reuse its native checkpoint");
 
         assert_eq!(recovered.path, payload);
-        assert_eq!(recovered.uri, "https://previous.example.test/archive.zip");
     }
 
     #[test]
@@ -541,18 +540,17 @@ impl DownloadService {
     pub async fn submit_uri_with_options(
         &self,
         task_id: Uuid,
-        mut uris: Vec<String>,
+        uris: Vec<String>,
         options: UriSubmissionOptions,
     ) -> Result<DownloadTask, DownloadServiceError> {
         let mut task = self.store.find(task_id)?;
-        let options = self.prepare_uri_options(&mut task, &mut uris, options)?;
+        let options = self.prepare_uri_options(&mut task, options)?;
         self.submit_uri(task_id, uris, options).await
     }
 
     fn prepare_uri_options(
         &self,
         task: &mut DownloadTask,
-        uris: &mut Vec<String>,
         mut options: UriSubmissionOptions,
     ) -> Result<Aria2Options, DownloadServiceError> {
         let mut restart_unwritten = false;
@@ -581,11 +579,6 @@ impl DownloadService {
                 .file_name()
                 .and_then(|name| name.to_str())
                 .map(str::to_owned);
-            if !uris.contains(&checkpoint.uri) {
-                // Next matches its stored URI before restoring ranges. It may
-                // start with this old URI, then rotate to the refreshed mirror.
-                uris.push(checkpoint.uri.clone());
-            }
         }
         self.reserve_uri_output(task, &mut options)?;
         let mut result = options.into_aria2_options()?;
@@ -594,9 +587,10 @@ impl DownloadService {
         // actual file path aligned across HTTP and cloud submissions.
         result.insert("auto-file-renaming".into(), "false".into());
         if checkpoint.is_some() || restart_unwritten {
-            // Native checkpoints restore independently of `continue`. Never
-            // fall back to treating a preallocated file's length as progress.
-            result.insert("continue".into(), "false".into());
+            // Next claims a stopped task's ranges by output path only when
+            // continuation is enabled. This is safe only after validating the
+            // native record above; a preallocated file alone is never enough.
+            result.insert("continue".into(), checkpoint.is_some().to_string());
             result.insert("allow-overwrite".into(), "false".into());
             result.insert("auto-file-renaming".into(), "false".into());
         }
@@ -656,13 +650,13 @@ impl DownloadService {
     pub async fn resubmit_uri_with_options(
         &self,
         task_id: Uuid,
-        mut uris: Vec<String>,
+        uris: Vec<String>,
         options: UriSubmissionOptions,
     ) -> Result<DownloadTask, DownloadServiceError> {
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
         let mut task = self.task_for_uri_submission(task_id)?;
-        let mut options = self.prepare_uri_options(&mut task, &mut uris, options)?;
+        let mut options = self.prepare_uri_options(&mut task, options)?;
         // Restored sessions are globally paused. A re-submitted cloud URL is
         // an explicit retry and must begin once its replacement GID is bound.
         options.insert("pause".into(), "false".into());
@@ -684,7 +678,7 @@ impl DownloadService {
         &self,
         task_id: Uuid,
         expected_gid: &str,
-        mut uris: Vec<String>,
+        uris: Vec<String>,
         options: UriSubmissionOptions,
     ) -> Result<DownloadTask, DownloadServiceError> {
         let _guard = self.operation.lock().await;
@@ -699,7 +693,6 @@ impl DownloadService {
         }
         let status = self.tell_status_for_task(task_id, expected_gid).await?;
         if matches!(status.status.as_str(), "active" | "waiting" | "paused") {
-            let checkpoint = super::native_resume::checkpoint(&self.store, &task, expected_gid);
             let mut mutable_options = options.clone().into_aria2_options()?;
             for immutable in [
                 "dir",
@@ -716,7 +709,6 @@ impl DownloadService {
                     .change_option(expected_gid, mutable_options)
                     .await?;
             }
-            let checkpoint_uri = checkpoint.map(|checkpoint| checkpoint.uri);
             let mut previous_uris = status
                 .files
                 .iter()
@@ -725,25 +717,11 @@ impl DownloadService {
                 .filter(|uri| !uri.is_empty())
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
-            if let Some(checkpoint_uri) = checkpoint_uri.as_ref() {
-                if !previous_uris.contains(checkpoint_uri) {
-                    previous_uris.push(checkpoint_uri.clone());
-                }
-            }
             previous_uris.sort_unstable();
             previous_uris.dedup();
-            if let Some(checkpoint_uri) = checkpoint_uri.as_ref() {
-                if !uris.contains(checkpoint_uri) {
-                    // Aria2 Next matches this URI before restoring the native
-                    // ranges. Rotate it atomically with the fresh mirror so the
-                    // preallocated payload is never mistaken for an unrelated
-                    // existing file when the paused GID is resumed.
-                    uris.push(checkpoint_uri.clone());
-                }
-            }
             // A refreshed Baidu gateway can keep the same local URI while
-            // replacing its signed upstream. Do not remove/reinsert that URI:
-            // aria2-next uses it to identify the persisted byte ranges.
+            // replacing its signed upstream. Avoid disturbing an active
+            // request when its local URI has not changed.
             if uris.len() != 1 || !previous_uris.contains(&uris[0]) {
                 self.change_uri_for_task(task_id, expected_gid, previous_uris, uris)
                     .await?;
@@ -765,33 +743,10 @@ impl DownloadService {
                 self.reconcile_task_unlocked(task_id).await
             };
         }
-        let rebound_checkpoint_uri = if options.direct_loopback && uris.len() == 1 {
-            super::native_resume::rebind_verified_checkpoint_uri(
-                &self.store,
-                &task,
-                expected_gid,
-                &uris[0],
-            )
-        } else {
-            None
-        };
-        let mut options = self.prepare_uri_options(&mut task, &mut uris, options)?;
+        let mut options = self.prepare_uri_options(&mut task, options)?;
         options.insert("pause".into(), "false".into());
         let directory = self.prepare_directory_uri(task_id, &mut options)?;
-        let gid = match self.add_uri_for_task(task_id, uris, options).await {
-            Ok(gid) => gid,
-            Err(error) => {
-                if let Some(previous_uri) = rebound_checkpoint_uri {
-                    let _ = super::native_resume::rebind_verified_checkpoint_uri(
-                        &self.store,
-                        &task,
-                        expected_gid,
-                        &previous_uri,
-                    );
-                }
-                return Err(error.into());
-            }
-        };
+        let gid = self.add_uri_for_task(task_id, uris, options).await?;
         if let Err(error) = self
             .store
             .replace_cloud_url_gid(task_id, expected_gid, &gid)
@@ -843,7 +798,7 @@ impl DownloadService {
     pub async fn compare_and_resubmit_uri_with_options(
         &self,
         expected: &DownloadTask,
-        mut uris: Vec<String>,
+        uris: Vec<String>,
         options: UriSubmissionOptions,
     ) -> Result<Option<DownloadTask>, DownloadServiceError> {
         let _guard = self.operation.lock().await;
@@ -862,7 +817,7 @@ impl DownloadService {
             return Ok(None);
         }
         validate_task_source(&current.kind, &current.source)?;
-        let mut options = self.prepare_uri_options(&mut current, &mut uris, options)?;
+        let mut options = self.prepare_uri_options(&mut current, options)?;
         // See `submit_uri`: restored sessions start paused, while this is an
         // explicit retry and should preserve normal immediate submission.
         options.insert("pause".into(), "false".into());
