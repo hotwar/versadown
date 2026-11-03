@@ -638,6 +638,8 @@ const messages = {
   'about.legal.9': '为了改进软件并提供更好服务，我们会收集所需的最少运行信息。',
   'about.legal.10': '我们鼓励用户开通官方 VIP/SVIP，以获得更好的下载与加速体验。',
   'about.legal.acceptance': '下载或使用本项目，即视为您已阅读并接受上述全部条款。',
+  'cloud.session.saveFailedAfterSuccess': '{name}：网盘操作已完成，但登录状态未能保存。请勿重复提交已完成的操作；后续操作可能需要重新登录。',
+  'cloud.session.saveFailed': '{name}：登录状态未能保存，操作结果请查看原提示；后续操作可能需要重新登录。',
 } as const;
 
 export default messages;

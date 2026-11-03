@@ -26,7 +26,8 @@ import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNaviga
 import darkMintIcon from './assets/launcher/dark_mint.svg';
 import mintWhiteIcon from './assets/launcher/mint_white.svg';
 import { getResolvedTheme, getResolvedThemeId, subscribeTheme } from './lib/theme';
-import type { CloudAuthorization, ProviderDescriptor } from './lib/cloudTypes';
+import type { CloudAuthorization, CloudSessionPersistenceWarning, ProviderDescriptor } from './lib/cloudTypes';
+import { cloudProviderLabel } from './i18n/cloudProviderLabel';
 import { installWindowResizePerformanceMode } from './lib/windowResizePerformance';
 import { connectWindowInteraction, createWindowInteraction, supportsNativeWindowDrag, type WindowInteractionSnapshot } from './lib/windowInteraction';
 import { applyStoredTaskOrder, mergeVisibleTaskOrder } from './lib/taskOrder';
@@ -362,6 +363,7 @@ export function App() {
   const [detailsTaskId, setDetailsTaskId] = useState<string | null>(null);
   const [pendingPurgeTaskIds, setPendingPurgeTaskIds] = useState<string[] | null>(null);
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
+  const [sessionPersistenceWarning, setSessionPersistenceWarning] = useState<CloudSessionPersistenceWarning | null>(null);
   const [taskReauthorization, setTaskReauthorization] = useState<CloudAuthorization | null>(null);
   const taskAuthorizationActive = useRef(false);
   const taskAuthorizationGeneration = useRef(0);
@@ -612,6 +614,16 @@ export function App() {
     const timer = window.setTimeout(() => setNotice(null), 2600);
     return () => window.clearTimeout(timer);
   }, [notice]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<CloudSessionPersistenceWarning>('cloud-session-persistence-warning', ({ payload }) => {
+      if (!disposed) setSessionPersistenceWarning(current => current ?? payload);
+    }).then(stop => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
 
   useEffect(() => {
     if (!taskReauthorization) return;
@@ -1776,6 +1788,10 @@ export function App() {
       {detailsTask && <TaskDetailsDialog task={detailsTask} onClose={() => setDetailsTaskId(null)} />}
       {pendingPurgeTasks.length > 0 && <RemoveTaskDialog taskNames={pendingPurgeTasks.map(displayTaskName)} onConfirm={(deleteFiles) => void confirmTaskRemoval(deleteFiles)} onClose={() => setPendingPurgeTaskIds(null)} />}
       {notice && <div className={`task-toast ${notice.kind}`} role="status">{notice.message}</div>}
+      {sessionPersistenceWarning && <div className="cloud-session-warning" role="alert">
+        <span>{t(sessionPersistenceWarning.operationSucceeded ? 'cloud.session.saveFailedAfterSuccess' : 'cloud.session.saveFailed', { name: cloudProviderLabel(sessionPersistenceWarning.provider, t) })}</span>
+        <button type="button" onClick={() => setSessionPersistenceWarning(null)}>{t('dialog.close')}</button>
+      </div>}
     </main>
   );
 }

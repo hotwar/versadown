@@ -57,6 +57,7 @@ export interface CloudCapacityInvalidated {
   reason: CloudCapacityChangeReason;
 }
 export interface CloudAuthorizationStateEvent { provider: CloudProvider; state: 'Disconnected' | 'Restoring' | 'Ready' | 'Refreshing' | 'NeedsSilentRelogin' | 'NeedsInteractiveAuth' | 'RiskBlocked'; account: CloudAccount | null; }
+export interface CloudSessionPersistenceWarning { provider: CloudProvider; operationSucceeded: boolean; }
 export interface CloudFile { id: string; parentId: string; name: string; kind: 'file' | 'folder'; size?: number; modifiedAt?: string; shareId?: string; shareUrl?: string; sharePassCode?: string; }
 export interface CloudDirectory { id: string; items: CloudFile[]; }
 export interface CloudShareOptions { name: string; passCode?: string; generatePassCode?: boolean; expiresInDays?: number; }

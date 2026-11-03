@@ -60,6 +60,10 @@ pub struct CloudState {
 
 impl CloudState {
     pub(crate) fn bind_application(&self, app: AppHandle) {
+        let warning_app = app.clone();
+        self.auth_supervisor.on_persistence_warning(move |warning| {
+            let _ = warning_app.emit("cloud-session-persistence-warning", warning);
+        });
         let _ = self.application.set(app);
     }
 

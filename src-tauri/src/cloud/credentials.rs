@@ -17,6 +17,10 @@ use zeroize::Zeroize;
 #[path = "credentials_macos.rs"]
 mod macos;
 
+#[cfg(any(windows, test))]
+#[path = "credentials_windows.rs"]
+mod windows;
+
 const SYSTEM_CREDENTIAL_SERVICE_PREFIX: &str = "com.versadown.desktop";
 const SHARE_PROTECTOR_SERVICE: &str = "com.versadown.desktop.share-storage";
 const SHARE_PROTECTOR_KEY: &str = "share-storage-key-v1";
@@ -78,8 +82,55 @@ fn native_smoke_credentials() -> Option<&'static MemoryCredentialStore> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn credential_error(_operation: &str, _key: &str, _error: KeyringError) -> QuarkError {
+fn credential_error(
+    _operation: &str,
+    _key: &str,
+    _error: KeyringError,
+    _len: Option<usize>,
+) -> QuarkError {
+    #[cfg(windows)]
+    eprintln!(
+        "{}",
+        credential_error_diagnostic(_operation, _key, &_error, _len)
+    );
     QuarkError::Storage
+}
+
+#[cfg(any(windows, test))]
+fn credential_error_diagnostic(
+    operation: &str,
+    key: &str,
+    error: &KeyringError,
+    len: Option<usize>,
+) -> String {
+    let operation = match operation {
+        "open" | "save" | "read" | "remove" => operation,
+        _ => "unknown",
+    };
+    let key = if credential_key_is_supported(key) || key == windows::MASTER_KEY_NAME {
+        key
+    } else {
+        "unknown"
+    };
+    // Several keyring errors carry raw secret bytes. Never format the error itself.
+    let kind = match error {
+        KeyringError::TooLong(..) => "too_long",
+        KeyringError::NoEntry => "missing",
+        KeyringError::NoStorageAccess(..) => "access",
+        KeyringError::PlatformFailure(..) => "platform",
+        KeyringError::BadEncoding(..) | KeyringError::BadDataFormat(..) => "encoding",
+        KeyringError::Invalid(..) => "invalid",
+        _ => "other",
+    };
+    let limit = match error {
+        KeyringError::TooLong(_, limit) => Some(*limit),
+        _ => None,
+    };
+    format!(
+        "[credentials] operation={operation} key={key} error_kind={kind} len={} limit={}",
+        len.map_or_else(|| "unknown".into(), |value| value.to_string()),
+        limit.map_or_else(|| "unknown".into(), |value| value.to_string()),
+    )
 }
 
 pub(crate) const BAIDU_BROWSER_PASSWORD_PREFERENCE_KEY: &str =
@@ -165,7 +216,7 @@ impl SystemCredentialStore {
         if !credential_key_is_supported(key) {
             return Err(QuarkError::Storage);
         }
-        Entry::new(&self.service, key).map_err(|error| credential_error("open", key, error))
+        Entry::new(&self.service, key).map_err(|error| credential_error("open", key, error, None))
     }
 }
 impl CredentialStore for SystemCredentialStore {
@@ -173,6 +224,16 @@ impl CredentialStore for SystemCredentialStore {
         #[cfg(feature = "native-smoke")]
         if let Some(store) = native_smoke_credentials() {
             return store.save(&format!("{}:{k}", self.service), v);
+        }
+        #[cfg(windows)]
+        if windows::handles(k) {
+            return windows::save(
+                &self.root,
+                &self.service,
+                k,
+                v,
+                &windows::SystemMasterKey(&self.service),
+            );
         }
         #[cfg(target_os = "macos")]
         {
@@ -184,12 +245,21 @@ impl CredentialStore for SystemCredentialStore {
         #[cfg(not(target_os = "macos"))]
         self.entry(k)?
             .set_secret(v)
-            .map_err(|error| credential_error("save", k, error))
+            .map_err(|error| credential_error("save", k, error, Some(v.len())))
     }
     fn load(&self, k: &str) -> Result<Option<Vec<u8>>, QuarkError> {
         #[cfg(feature = "native-smoke")]
         if let Some(store) = native_smoke_credentials() {
             return store.load(&format!("{}:{k}", self.service));
+        }
+        #[cfg(windows)]
+        if windows::handles(k) {
+            return windows::load(
+                &self.root,
+                &self.service,
+                k,
+                &windows::SystemMasterKey(&self.service),
+            );
         }
         #[cfg(target_os = "macos")]
         {
@@ -206,13 +276,17 @@ impl CredentialStore for SystemCredentialStore {
         match self.entry(k)?.get_secret() {
             Ok(value) => Ok(Some(value)),
             Err(KeyringError::NoEntry) => Ok(None),
-            Err(error) => Err(credential_error("read", k, error)),
+            Err(error) => Err(credential_error("read", k, error, None)),
         }
     }
     fn remove(&self, k: &str) -> Result<(), QuarkError> {
         #[cfg(feature = "native-smoke")]
         if let Some(store) = native_smoke_credentials() {
             return store.remove(&format!("{}:{k}", self.service));
+        }
+        #[cfg(windows)]
+        if windows::handles(k) {
+            return windows::remove(&self.root, k);
         }
         #[cfg(target_os = "macos")]
         {
@@ -225,7 +299,7 @@ impl CredentialStore for SystemCredentialStore {
         match self.entry(k)?.delete_credential() {
             Ok(()) => Ok(()),
             Err(KeyringError::NoEntry) => Ok(()),
-            Err(error) => Err(credential_error("remove", k, error)),
+            Err(error) => Err(credential_error("remove", k, error, None)),
         }
     }
 }

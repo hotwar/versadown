@@ -52,6 +52,16 @@ pub struct AuthSupervisor {
     // Only complete credential revisions are visible to ordinary operations.
     // This short lock is never held while contacting a provider.
     published: std::sync::Mutex<HashMap<CloudProvider, PublishedSession>>,
+    persistence_warning: std::sync::OnceLock<Box<dyn Fn(SessionPersistenceWarning) + Send + Sync>>,
+}
+
+/// A local persistence failure must not change the outcome of completed work.
+/// This event carries no credentials or raw storage error.
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionPersistenceWarning {
+    pub provider: CloudProvider,
+    pub operation_succeeded: bool,
 }
 
 #[derive(Clone)]
@@ -107,6 +117,7 @@ impl AuthSupervisor {
     ) -> Self {
         Self {
             published: Default::default(),
+            persistence_warning: Default::default(),
             clock: Box::new(clock),
             jitter: Box::new(jitter),
             locks: ProviderRegistry::global()
@@ -114,6 +125,22 @@ impl AuthSupervisor {
                 .iter()
                 .map(|d| (d.provider, tokio::sync::Mutex::new(())))
                 .collect(),
+        }
+    }
+    pub fn on_persistence_warning(
+        &self,
+        notify: impl Fn(SessionPersistenceWarning) + Send + Sync + 'static,
+    ) {
+        let _ = self.persistence_warning.set(Box::new(notify));
+    }
+
+    fn warn_persistence_failure(&self, provider: CloudProvider, operation_succeeded: bool) {
+        eprintln!(
+            "[cloud-session] persistence_failed provider={} operation_succeeded={operation_succeeded}",
+            provider.key()
+        );
+        if let Some(notify) = self.persistence_warning.get() {
+            notify(SessionPersistenceWarning { provider, operation_succeeded });
         }
     }
     pub fn with_provider<T>(
@@ -508,7 +535,17 @@ impl AuthSupervisor {
         check()?;
         let result = work(&snapshot);
         check()?;
-        let revision = self.persist_snapshot(store, provider, revision, &snapshot, &check)?;
+        let revision = match self.persist_snapshot(store, provider, revision, &snapshot, &check) {
+            Ok(revision) => revision,
+            Err(CloudError::Storage) => {
+                self.warn_persistence_failure(provider, result.is_ok());
+                // The provider may already have deleted/created/uploaded data.
+                // Report its actual result; never recover or replay this work
+                // because saving its rotated credentials failed locally.
+                return result;
+            }
+            Err(error) => return Err(error),
+        };
         if let Some(ticket) = continuation.as_mut() {
             // Only this operation's successful CAS may carry its ticket to a
             // new revision. This does not grant recovery: the original durable
@@ -653,7 +690,14 @@ impl AuthSupervisor {
                 check()?;
                 let result = work(&next);
                 check()?;
-                let revision = self.persist_snapshot(store, provider, revision, &next, &check)?;
+                let revision = match self.persist_snapshot(store, provider, revision, &next, &check) {
+                    Ok(revision) => revision,
+                    Err(CloudError::Storage) => {
+                        self.warn_persistence_failure(provider, result.is_ok());
+                        return result;
+                    }
+                    Err(error) => return Err(error),
+                };
                 if matches!(result, Err(CloudError::CaptchaRequired)) {
                     self.with_provider(provider, || {
                         let mut record = self.record(store, provider)?;

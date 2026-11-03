@@ -91,6 +91,8 @@ jobs:
       - name: Check macOS encrypted credentials without accessing Keychain
         if: runner.os == 'macOS'
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::credentials::macos::tests
+      - name: Check Windows encrypted cloud sessions with isolated credentials
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::credentials::windows::tests
       - name: Check macOS native launcher, cookies and graceful quit
         if: runner.os == 'macOS'
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --features native-smoke --test macos_native_smoke
