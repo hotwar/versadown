@@ -28,6 +28,7 @@ done
 # verification above keeps passing on the next run.
 engine_backup=""
 signing_keychain=""
+signing_dir=""
 cleanup_signing() {
   if [[ -n "$engine_backup" && -d "$engine_backup" ]]; then
     cp -p "$engine_backup"/aria2-next-*-apple-darwin src-tauri/binaries/
@@ -36,11 +37,16 @@ cleanup_signing() {
   if [[ -n "$signing_keychain" ]]; then
     security delete-keychain "$signing_keychain" >/dev/null 2>&1 || true
   fi
+  # The decoded .p12 must not outlive a failed import.
+  if [[ -n "$signing_dir" && -d "$signing_dir" ]]; then
+    rm -rf "$signing_dir"
+  fi
 }
 import_signing_certificate() {
   [[ -n "${APPLE_CERTIFICATE:-}" ]] || return 0
   local dir pass
   dir="$(mktemp -d)"
+  signing_dir="$dir"
   pass="$(uuidgen)"
   signing_keychain="$dir/versadown-sign.keychain-db"
   printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$dir/cert.p12"
