@@ -449,6 +449,67 @@ mod tests {
             .any(|(name, value)| name == "Cookie" && value.contains("__puus=rotated")));
     }
 
+    fn download_with(cookie: &str, set_cookies: &[&str]) -> QuarkDownloadResponse {
+        QuarkDownloadResponse {
+            response: CloudHttpResponse {
+                status: 200,
+                body: String::new(),
+                set_cookies: set_cookies.iter().map(|value| (*value).into()).collect(),
+            },
+            cookie: cookie.into(),
+        }
+    }
+
+    fn saved_pairs(credentials: &MemoryCredentialStore) -> BTreeMap<String, String> {
+        let saved = String::from_utf8(credentials.load("quark").unwrap().unwrap()).unwrap();
+        saved
+            .split(';')
+            .map(str::trim)
+            .filter_map(|pair| pair.split_once('='))
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect()
+    }
+
+    #[test]
+    fn persisting_download_cookies_merges_instead_of_overwriting_the_session() {
+        let credentials = MemoryCredentialStore::default();
+        let current = "__uid=account-7; __puus=old; sid=keep";
+        credentials.save("quark", current.as_bytes()).unwrap();
+        let response = download_with("__puus=rotated", &["__puus=rotated; Path=/"]);
+
+        persist_quark_download_cookies(&credentials, current, &response).unwrap();
+
+        assert_eq!(
+            saved_pairs(&credentials),
+            BTreeMap::from([
+                ("__uid".to_owned(), "account-7".to_owned()),
+                ("__puus".to_owned(), "rotated".to_owned()),
+                ("sid".to_owned(), "keep".to_owned()),
+            ])
+        );
+    }
+
+    #[test]
+    fn persisting_download_cookies_removes_cookies_the_response_expires() {
+        let credentials = MemoryCredentialStore::default();
+        let current = "__uid=account-7; stale=1; old=2";
+        credentials.save("quark", current.as_bytes()).unwrap();
+        let response = download_with(
+            "__uid=account-7",
+            &[
+                "stale=; Max-Age=0; Path=/",
+                "old=x; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/",
+            ],
+        );
+
+        persist_quark_download_cookies(&credentials, current, &response).unwrap();
+
+        assert_eq!(
+            saved_pairs(&credentials),
+            BTreeMap::from([("__uid".to_owned(), "account-7".to_owned())])
+        );
+    }
+
     #[test]
     fn quark_transfer_download_uses_and_persists_the_sent_cookie() {
         struct SnapshotHttp(Http);
@@ -1587,10 +1648,22 @@ pub(crate) fn persist_quark_download_cookies(
     current_cookie: &str,
     response: &QuarkDownloadResponse,
 ) -> Result<(), QuarkError> {
-    if response.cookie == current_cookie {
+    // Merge by cookie name instead of replacing the session: apply the raw
+    // Set-Cookie instructions (so expiry removes entries) to the stored
+    // cookie, then let the snapshot-bound cookie win for names it carries.
+    let applied =
+        super::common::cookie_for_download(current_cookie, &response.response.set_cookies);
+    let sent_pairs: Vec<String> = response
+        .cookie
+        .split(';')
+        .map(|pair| pair.trim().to_owned())
+        .filter(|pair| !pair.is_empty())
+        .collect();
+    let merged = super::common::cookie_for_download(&applied, &sent_pairs);
+    if merged == current_cookie {
         return Ok(());
     }
-    credentials.save("quark", response.cookie.as_bytes())
+    credentials.save("quark", merged.as_bytes())
 }
 
 fn validate_share_codes(value: &Value) -> Result<i64, QuarkError> {

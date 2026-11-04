@@ -133,3 +133,25 @@ fn tracked_signing_rejects_redirects_without_changing_ordinary_send() {
     );
     server.join().unwrap();
 }
+
+#[test]
+fn empty_cookie_jar_sends_no_cookie_header_and_no_snapshot() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (stream, headers) = receive(&listener);
+        assert!(
+            !headers
+                .lines()
+                .any(|line| line.to_ascii_lowercase().starts_with("cookie:")),
+            "an empty jar must not emit a Cookie header: {headers}",
+        );
+        reply(stream, "200 OK", "");
+    });
+    let http = ReqwestTransport::new().unwrap();
+    let (_, sent) = http
+        .send_with_cookie_snapshot(request(&base, "empty", " ; "))
+        .unwrap();
+    assert_eq!(sent, None);
+    server.join().unwrap();
+}
