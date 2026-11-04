@@ -1,4 +1,5 @@
 const messages = {
+  'startup.credentialsUnavailable': 'System credential storage is unavailable. Standard downloads remain available; cloud accounts and private tasks stay protected. Unlock your login keychain and restart VersaDown.',
   'app.title': 'VersaDown Universal Downloader',
   'app.brand': 'VersaDown',
   'common.automatic': 'Automatic (system language)',
@@ -626,6 +627,8 @@ const messages = {
   'about.legal.9': 'We collect the minimum operational information needed to improve the software and provide better service.',
   'about.legal.10': 'We encourage users to subscribe to official VIP/SVIP plans for a better download and acceleration experience.',
   'about.legal.acceptance': 'By downloading or using this project, you acknowledge that you have read and accepted all terms above.',
+  'cloud.session.saveFailedAfterSuccess': '{name}: the cloud operation completed, but the login session could not be saved. Do not resubmit completed work. Later operations may require you to log in again.',
+  'cloud.session.saveFailed': '{name}: the login session could not be saved. The operation result is shown separately. Later operations may require you to log in again.',
 } as const;
 
 export default messages;

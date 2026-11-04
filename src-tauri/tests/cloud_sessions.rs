@@ -172,21 +172,30 @@ fn legacy_pikpak_password_session_recovers_its_login_method() {
 
 #[cfg(windows)]
 #[test]
-fn dpapi_session_roundtrip_never_writes_plaintext() {
-    let root = std::env::temp_dir().join(format!("cloud-dpapi-{}", uuid::Uuid::new_v4()));
-    let store = SystemCredentialStore::new(root.clone()).unwrap();
-    store
-        .save("quark", b"cookie-secret-do-not-persist-in-cleartext")
-        .unwrap();
-    let bytes = std::fs::read(root.join("quark.bin")).unwrap();
-    assert!(!bytes.windows(13).any(|v| v == b"cookie-secret"));
-    assert_eq!(
-        store.load("quark").unwrap().unwrap(),
-        b"cookie-secret-do-not-persist-in-cleartext"
-    );
+fn windows_large_session_roundtrip_across_reopen_uses_encrypted_storage() {
+    let root = tempfile::tempdir().unwrap();
+    let secret_marker = b"cookie-secret-do-not-persist-in-cleartext";
+    let session = serde_json::to_vec(&serde_json::json!({
+        "cookie": String::from_utf8(secret_marker.repeat(200)).unwrap(),
+    }))
+    .unwrap();
+    assert!(session.len() > 2560);
+    {
+        let store = SystemCredentialStore::new(root.path().into()).unwrap();
+        store.save("quark", &session).unwrap();
+    }
+    let store = SystemCredentialStore::new(root.path().into()).unwrap();
+    assert_eq!(store.load("quark").unwrap().unwrap(), session);
+    assert!(root.path().join("cloud-sessions-v1.sqlite").is_file());
+    for entry in std::fs::read_dir(root.path()).unwrap() {
+        let bytes = std::fs::read(entry.unwrap().path()).unwrap();
+        assert!(
+            !bytes.windows(secret_marker.len()).any(|bytes| bytes == secret_marker),
+            "Cloud session files must not contain plaintext credentials"
+        );
+    }
     store.remove("quark").unwrap();
     assert!(store.load("quark").unwrap().is_none());
-    std::fs::remove_dir(root).unwrap();
 }
 
 struct Sequence(Mutex<(Vec<CloudHttpResponse>, Vec<CloudHttpRequest>)>);

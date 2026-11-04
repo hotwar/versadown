@@ -925,6 +925,29 @@ impl TaskStore {
         self.list_matching("")
     }
 
+    /// Discards private history during the macOS prerelease credential reset.
+    /// Runs before the engine starts; tombstones prevent session resurrection.
+    /// This transaction never opens or deletes downloaded payload files.
+    #[cfg(any(target_os = "macos", test))]
+    pub fn reset_private_task_history(&self) -> Result<(), StoreError> {
+        let mut connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.transaction()?;
+        let selection = "is_private = 1 OR id IN (SELECT i.task_id FROM cloud_directory_group_items i JOIN cloud_directory_groups g ON g.id=i.group_id WHERE g.is_private=1)";
+        let gids = {
+            let mut query = transaction.prepare(&format!("SELECT aria_gid, metadata_gid, followed_by_gid FROM tasks WHERE {selection}"))?;
+            let rows = query.query_map([], |row| Ok([row.get::<_, Option<String>>(0)?, row.get(1)?, row.get(2)?]))?;
+            let mut gids = Vec::new();
+            for row in rows { gids.extend(row?.into_iter().flatten()); }
+            gids
+        };
+        remember_deleted_engine_gids(&transaction, gids)?;
+        transaction.execute(&format!("DELETE FROM cloud_download_accounts WHERE id IN (SELECT id FROM tasks WHERE {selection}) OR id IN (SELECT id FROM cloud_directory_groups WHERE is_private=1)"), [])?;
+        transaction.execute(&format!("DELETE FROM tasks WHERE {selection}"), [])?;
+        transaction.execute("DELETE FROM cloud_directory_groups WHERE is_private=1", [])?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn has_private_tasks(&self) -> Result<bool, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         connection
@@ -2722,6 +2745,25 @@ mod tests {
 
         assert!(store.was_engine_gid_deleted("single-gid").unwrap());
         assert!(matches!(store.find(task.id), Err(StoreError::NotFound(_))));
+    }
+
+    #[test]
+    fn private_history_reset_preserves_public_tasks_and_payload_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let payload = directory.path().join("private.zip");
+        std::fs::write(&payload, b"downloaded content").unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let public = store.create(NewTask::direct("https://example.test/public")).unwrap();
+        let private = store.create(NewTask { source: "https://example.test/private".into(), name: payload.to_string_lossy().into(), kind: "file".into(), is_private: true }).unwrap();
+        store.bind_gid(private.id, "private-engine-gid").unwrap();
+        store.create_cloud_directory_group(NewCloudDirectoryGroup::new(CloudProvider::Quark, "private-root", "Private", directory.path()).with_private_download(true), &[]).unwrap();
+        store.reset_private_task_history().unwrap();
+        store.reset_private_task_history().unwrap();
+        assert!(!store.has_private_tasks().unwrap());
+        assert!(store.find(public.id).is_ok());
+        assert!(store.find(private.id).is_err());
+        assert!(store.was_engine_gid_deleted("private-engine-gid").unwrap());
+        assert_eq!(std::fs::read(&payload).unwrap(), b"downloaded content");
     }
 
     #[test]

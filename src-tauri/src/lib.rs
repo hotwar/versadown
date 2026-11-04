@@ -28,6 +28,7 @@ mod policy;
 mod privacy;
 mod processing;
 mod store;
+mod startup;
 mod update;
 mod webview_memory;
 mod window_icon;
@@ -279,7 +280,13 @@ pub fn run() {
             let cloud = std::sync::Arc::new(cloud::commands::CloudState::new(
                 data_dir.join("cloud-sessions"),
             )?);
-            commands::purge_tianyi_local_state(&store, &cloud).map_err(std::io::Error::other)?;
+            cloud.bind_application(app.handle().clone());
+            let mut startup_health = startup::StartupHealth {
+                credentials_unavailable: cloud.credential_restore_failed,
+            };
+            if !startup_health.credentials_unavailable {
+                commands::purge_tianyi_local_state(&store, &cloud).map_err(std::io::Error::other)?;
+            }
             store.recover_interrupted_cloud_directories()?;
             // aria2 persists the short-lived direct URL it received from a
             // cloud provider. Do this before the native session is loaded so
@@ -328,12 +335,39 @@ pub fn run() {
                 .ok()
                 .and_then(|json| serde_json::from_slice(&json).ok())
                 .unwrap_or_default();
-            settings.ai.api_key_configured = ai_secrets
-                .load(ai::API_KEY_SECRET_NAME)
-                .map_err(|_| "无法读取本机保存的 AI API Key")?
-                .is_some();
-            settings.privacy_password_configured =
-                privacy::password_is_configured(&ai_secrets).map_err(|_| "无法读取隐私模式密码")?;
+            #[cfg(target_os = "macos")]
+            {
+                match ai_secrets.contains_local(ai::API_KEY_SECRET_NAME) {
+                    Ok(configured) => settings.ai.api_key_configured = configured,
+                    Err(_) => startup_health.credentials_unavailable = true,
+                }
+                match ai_secrets.contains_local(privacy::PASSWORD_SECRET_NAME) {
+                    Ok(local) => {
+                        if !local && (settings.privacy_password_configured || store.has_private_tasks()?) {
+                            // The prerelease credential reset deliberately drops old
+                            // private history, retaining the downloaded payloads.
+                            store.reset_private_task_history()?;
+                            settings.privacy_download_enabled = false;
+                        }
+                        settings.privacy_password_configured = local;
+                    }
+                    Err(_) => startup_health.credentials_unavailable = true,
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                match ai_secrets.load(ai::API_KEY_SECRET_NAME) {
+                    Ok(key) => settings.ai.api_key_configured = key.is_some(),
+                    Err(_) => startup_health.credentials_unavailable = true,
+                }
+                match privacy::password_is_configured(&ai_secrets) {
+                    Ok(configured) => settings.privacy_password_configured = configured,
+                    Err(_) => startup_health.credentials_unavailable = true,
+                }
+            }
+            // A failed read must not reset saved configuration or unlock the
+            // privacy session. Credential-dependent commands still fail closed.
+            app.manage(startup_health);
             if settings.download_directory.trim().is_empty() {
                 settings.download_directory = default_destination.to_string_lossy().into_owned();
             }
@@ -503,6 +537,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            startup::startup_health,
             external_links::take_external_links,
             launcher_drag::drag_launcher_window,
             launcher_input::set_launcher_input_regions,

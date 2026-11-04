@@ -890,7 +890,7 @@ fn actual_security_challenge_blocks_background_attempts_until_explicit_authoriza
 
 #[cfg(windows)]
 #[test]
-fn encrypted_maintenance_backoff_survives_reopening_the_disk_store() {
+fn windows_maintenance_backoff_survives_reopening_the_credential_store() {
     let root = tempfile::tempdir().unwrap();
     {
         let store = SystemCredentialStore::new(root.path().to_path_buf()).unwrap();
@@ -917,6 +917,127 @@ fn encrypted_maintenance_backoff_survives_reopening_the_disk_store() {
         )),
         Err(CloudError::WebAuthorizationRequired)
     ));
-    let ciphertext = std::fs::read(root.path().join("cloud-auth-maintenance-tianyi.bin")).unwrap();
-    assert!(!String::from_utf8_lossy(&ciphertext).contains("next_allowed_attempt_at"));
+    assert!(
+        std::fs::read_dir(root.path()).unwrap().next().is_none(),
+        "Windows credentials must remain in Credential Manager, not local files"
+    );
+    store.remove("cloud-auth-maintenance-tianyi").unwrap();
+}
+
+struct FailingSessionPersistence {
+    inner: MemoryCredentialStore,
+    failing_key: std::sync::Mutex<Option<String>>,
+}
+impl CredentialStore for FailingSessionPersistence {
+    fn save(&self, key: &str, value: &[u8]) -> Result<(), CloudError> {
+        if self.failing_key.lock().unwrap().as_deref() == Some(key) {
+            return Err(CloudError::Storage);
+        }
+        self.inner.save(key, value)
+    }
+    fn load(&self, key: &str) -> Result<Option<Vec<u8>>, CloudError> {
+        self.inner.load(key)
+    }
+    fn remove(&self, key: &str) -> Result<(), CloudError> {
+        self.inner.remove(key)
+    }
+}
+
+#[test]
+fn completed_work_keeps_its_result_when_session_persistence_fails() {
+    for kind in [SessionWorkKind::Read, SessionWorkKind::Mutation] {
+        for key in ["xunlei", "cloud-auth-maintenance-xunlei"] {
+            let (supervisor, _, inner) = fixture(1000, 30);
+            let provider = CloudProvider::Xunlei;
+            let store = FailingSessionPersistence {
+                inner,
+                failing_key: Default::default(),
+            };
+            store.save(provider.key(), b"old-session").unwrap();
+            supervisor.ready(&store, provider, Some("A".into()), None, Some(10_000)).unwrap();
+            let warnings = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let observed = warnings.clone();
+            supervisor.on_persistence_warning(move |warning| observed.lock().unwrap().push(warning));
+            *store.failing_key.lock().unwrap() = Some(key.into());
+            let calls = AtomicUsize::new(0);
+            let result = supervisor.run(
+                &store, provider, kind,
+                |snapshot| {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    snapshot.save(provider.key(), b"rotated-session")?;
+                    Ok("remote-result")
+                },
+                |_| panic!("local storage failure must not trigger recovery or replay"),
+            );
+            assert_eq!(result.unwrap(), "remote-result");
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let warnings = warnings.lock().unwrap();
+            assert_eq!(warnings.len(), 1);
+            assert_eq!(warnings[0].provider, provider);
+            assert!(warnings[0].operation_succeeded);
+            assert_eq!(serde_json::to_value(warnings[0]).unwrap(), serde_json::json!({
+                "provider": "xunlei", "operationSucceeded": true,
+            }));
+        }
+    }
+}
+
+#[test]
+fn failed_work_keeps_its_error_without_recovery_when_session_persistence_fails() {
+    for kind in [SessionWorkKind::Read, SessionWorkKind::Mutation] {
+        let (supervisor, _, inner) = fixture(1000, 30);
+        let provider = CloudProvider::Xunlei;
+        let store = FailingSessionPersistence { inner, failing_key: Default::default() };
+        store.save(provider.key(), b"old-session").unwrap();
+        supervisor.ready(&store, provider, Some("A".into()), None, Some(10_000)).unwrap();
+        let warnings = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observed = warnings.clone();
+        supervisor.on_persistence_warning(move |warning| observed.lock().unwrap().push(warning));
+        *store.failing_key.lock().unwrap() = Some(provider.key().into());
+        let calls = AtomicUsize::new(0);
+        let result: Result<(), _> = supervisor.run(
+            &store, provider, kind,
+            |snapshot| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                snapshot.save(provider.key(), b"rotated-session")?;
+                Err(CloudError::AuthorizationExpired)
+            },
+            |_| panic!("failed credential persistence must not enter recovery"),
+        );
+        assert!(matches!(result, Err(CloudError::AuthorizationExpired)));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let warnings = warnings.lock().unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(!warnings[0].operation_succeeded);
+    }
+}
+
+#[test]
+fn recovered_read_keeps_its_result_when_final_session_persistence_fails() {
+    let (supervisor, _, inner) = fixture(1000, 30);
+    let provider = CloudProvider::Aliyun;
+    let store = FailingSessionPersistence { inner, failing_key: Default::default() };
+    store.save(provider.key(), b"old-session").unwrap();
+    supervisor.ready(&store, provider, Some("A".into()), None, Some(10_000)).unwrap();
+    let warnings = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = warnings.clone();
+    supervisor.on_persistence_warning(move |warning| observed.lock().unwrap().push(warning));
+    let calls = AtomicUsize::new(0);
+    let result = supervisor.run(
+        &store, provider, SessionWorkKind::Read,
+        |snapshot| {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Err(CloudError::AuthorizationExpired);
+            }
+            snapshot.save(provider.key(), b"rotated-session")?;
+            *store.failing_key.lock().unwrap() = Some(provider.key().into());
+            Ok("directory-result")
+        },
+        |_| store.save(provider.key(), b"renewed-session"),
+    );
+    assert_eq!(result.unwrap(), "directory-result");
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    let warnings = warnings.lock().unwrap();
+    assert_eq!(warnings.len(), 1);
+    assert!(warnings[0].operation_succeeded);
 }
