@@ -62,7 +62,8 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
         QuarkError::Storage => "安全凭据存储不可用".into(),
         QuarkError::DownloadCheckpointInvalid
         | QuarkError::DownloadEngineUnavailable
-        | QuarkError::DownloadSubmissionFailed => error.to_string(),
+        | QuarkError::DownloadSubmissionFailed
+        | QuarkError::BaiduTransferPending => error.to_string(),
         QuarkError::Transport(message)
             if matches!(
                 message.as_str(),
@@ -102,6 +103,7 @@ pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
         QuarkError::DownloadCheckpointInvalid => "download_checkpoint_invalid",
         QuarkError::DownloadEngineUnavailable => "download_engine_unavailable",
         QuarkError::DownloadSubmissionFailed => "download_submission_failed",
+        QuarkError::BaiduTransferPending => "baidu_transfer_pending",
         QuarkError::InvalidResponse => "invalid_response",
         QuarkError::Storage => "credential_storage_error",
         QuarkError::Transport(_) => "network_error",

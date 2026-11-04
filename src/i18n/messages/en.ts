@@ -400,6 +400,7 @@ const messages = {
   'cloud.operation.recoveredRetry': 'Sign-in was restored automatically. Retry {name}.',
   'cloud.operation.failed': '{name} failed: {detail}',
   'cloud.operation.listRefreshFailed': '{name} completed, but the list could not refresh. Refresh the list to verify the result.',
+  'cloud.error.baiduTransferPending': 'The Baidu transfer is still running or its result is unknown. Check your Baidu Netdisk before retrying to avoid duplicate copies.',
   'cloud.verification.baidu.required': 'Baidu Netdisk requires security verification. Open its official recycle bin, complete verification, then return and retry permanent deletion.',
   'cloud.verification.baidu.open': 'Open Baidu recycle bin for verification',
   'cloud.verification.baidu.opened': 'Complete verification on Baidu Netdisk, then return and select “I have verified”. Files will not be permanently deleted automatically.',

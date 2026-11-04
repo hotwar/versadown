@@ -26,6 +26,30 @@ pub(crate) fn can_restart_unwritten(store: &TaskStore, task: &DownloadTask, gid:
     unwritten_download(store, task, gid).unwrap_or(false)
 }
 
+/// aria2 refuses to open an existing payload when `continue=false` and
+/// overwriting is disallowed, so an empty leftover of a failed attempt must be
+/// removed before the restart. Only a regular, zero-length file without any
+/// control file is deleted; anything else is left untouched and rejected.
+pub(crate) fn remove_empty_unwritten_output(path: &Path) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let has_control = [".aria2", ".xltd", ".xltd.cfg"].iter().any(|suffix| {
+        let mut control = path.as_os_str().to_os_string();
+        control.push(suffix);
+        std::fs::symlink_metadata(control).is_ok()
+    });
+    if !metadata.is_file() || metadata.len() != 0 || has_control {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "output holds data or a control file",
+        ));
+    }
+    std::fs::remove_file(path)
+}
+
 fn unwritten_download(store: &TaskStore, task: &DownloadTask, gid: &str) -> Option<bool> {
     if task.completed_length != 0
         || gid.len() != 16
@@ -256,6 +280,27 @@ fn checkpoint_from_record(
 mod tests {
     use super::*;
     use crate::NewTask;
+
+    #[test]
+    fn empty_leftover_is_removed_but_data_or_control_files_are_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let empty = root.path().join("empty.bin");
+        std::fs::File::create(&empty).unwrap();
+        remove_empty_unwritten_output(&empty).unwrap();
+        assert!(!empty.exists());
+        remove_empty_unwritten_output(&empty).unwrap();
+
+        let data = root.path().join("data.bin");
+        std::fs::write(&data, b"x").unwrap();
+        assert!(remove_empty_unwritten_output(&data).is_err());
+        assert_eq!(std::fs::read(&data).unwrap(), b"x");
+
+        let controlled = root.path().join("ctl.bin");
+        std::fs::File::create(&controlled).unwrap();
+        std::fs::File::create(root.path().join("ctl.bin.aria2")).unwrap();
+        assert!(remove_empty_unwritten_output(&controlled).is_err());
+        assert!(controlled.exists());
+    }
 
     #[test]
     fn finds_a_native_checkpoint_for_a_detached_task_by_its_output_path() {
