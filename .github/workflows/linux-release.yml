@@ -1,8 +1,10 @@
-name: Windows and Linux release
+name: Desktop release
 
 on:
   workflow_dispatch:
   push:
+    branches:
+      - 'build/installers/**'
     tags:
       - 'v*'
 
@@ -11,6 +13,7 @@ permissions:
 
 jobs:
   linux:
+    name: Linux · x86_64 installers
     runs-on: ubuntu-22.04
     timeout-minutes: 90
     steps:
@@ -23,6 +26,9 @@ jobs:
           node-version: '24'
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> ../.tools/linux-release-target
       - name: Check release tag version
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -44,6 +50,7 @@ jobs:
           if-no-files-found: error
 
   windows:
+    name: Windows · x86_64 installer
     runs-on: windows-2022
     timeout-minutes: 120
     steps:
@@ -56,6 +63,9 @@ jobs:
           node-version: '24'
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> ../.tools/release-target
       - name: Check release tag version
         if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
@@ -89,9 +99,83 @@ jobs:
           path: artifacts/windows/*
           if-no-files-found: error
 
+  macos:
+    name: macOS · ${{ matrix.name }} installers
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            arch: arm64
+            name: Apple Silicon (ARM64)
+          - runner: macos-15-intel
+            arch: x86_64
+            name: Intel (x86_64)
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+      - name: Check release versions
+        shell: bash
+        run: |
+          node -e "const p=require('./package.json').version,t=require('./src-tauri/tauri.conf.json').version,fs=require('fs'),c=fs.readFileSync('src-tauri/Cargo.toml','utf8').match(/^version = \"([^\"]+)\"/m)[1]; if(p!==t||p!==c) process.exit(1)"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            test "${GITHUB_REF_NAME#v}" = "$(node -p "require('./package.json').version")"
+          fi
+      - run: pnpm install --frozen-lockfile
+      - name: Test the bundled download engine
+        env:
+          CARGO_PROFILE_DEV_DEBUG: '0'
+          CARGO_PROFILE_TEST_DEBUG: '0'
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --test engine_binary --test aria2_live --test parser_policy --test window_config --test window_lifecycle --test engine_runtime --test ftp_download --test cloud_provider_contract --test aria2_bt --test magnet_metadata
+      - name: Build macOS packages
+        # Tauri uses Developer ID and notarization credentials when supplied.
+        # Without them the artifacts are unsigned developer distributions.
+        env:
+          VERSADOWN_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          VERSADOWN_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          VERSADOWN_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          VERSADOWN_APPLE_ID: ${{ secrets.APPLE_ID }}
+          VERSADOWN_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          VERSADOWN_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        shell: bash
+        run: |
+          for name in APPLE_CERTIFICATE APPLE_CERTIFICATE_PASSWORD APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID; do
+            input="VERSADOWN_$name"
+            if [[ -n "${!input}" ]]; then
+              export "$name=${!input}"
+            else
+              unset "$name"
+            fi
+          done
+          pnpm run build:macos:release
+      - name: Check macOS native cookies and graceful quit
+        env:
+          CARGO_PROFILE_DEV_DEBUG: '0'
+          CARGO_PROFILE_TEST_DEBUG: '0'
+        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --features native-smoke --test macos_native_smoke
+      - name: Smoke test the packaged application
+        run: python3 scripts/smoke-macos.py src-tauri/target/release/bundle/macos/VersaDown.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}-release
+          path: artifacts/macos-${{ matrix.arch }}/*
+          if-no-files-found: error
+
   publish-release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, windows]
+    needs: [linux, windows, macos]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -104,7 +188,12 @@ jobs:
         with:
           name: windows-x86_64-release
           path: artifacts/windows
-      - name: Publish GitHub Release after both builds succeed
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: macos-*-release
+          path: artifacts/macos
+          merge-multiple: true
+      - name: Publish GitHub Release after all builds succeed
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -121,7 +210,12 @@ jobs:
             sed -i 's/\r$//' SHA256SUMS.windows
             sha256sum --check SHA256SUMS.windows
           )
-          assets=(artifacts/linux/*.deb artifacts/linux/*.rpm artifacts/linux/*.AppImage artifacts/linux/SHA256SUMS artifacts/windows/*.exe artifacts/windows/SHA256SUMS.windows)
+          (
+            cd artifacts/macos
+            sha256sum --check SHA256SUMS.macos-arm64
+            sha256sum --check SHA256SUMS.macos-x86_64
+          )
+          assets=(artifacts/macos/*.dmg artifacts/macos/*.app.zip artifacts/macos/SHA256SUMS.macos-* artifacts/linux/*.deb artifacts/linux/*.rpm artifacts/linux/*.AppImage artifacts/linux/SHA256SUMS artifacts/windows/*.exe artifacts/windows/SHA256SUMS.windows)
           for asset in "${assets[@]}"; do
             test -f "$asset"
           done

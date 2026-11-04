@@ -448,6 +448,88 @@ mod tests {
             .iter()
             .any(|(name, value)| name == "Cookie" && value.contains("__puus=rotated")));
     }
+
+    #[test]
+    fn quark_transfer_download_uses_and_persists_the_sent_cookie() {
+        struct SnapshotHttp(Http);
+        impl CloudHttpTransport for SnapshotHttp {
+            fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                self.0.send(request)
+            }
+
+            fn send_with_cookie_snapshot(
+                &self,
+                request: CloudHttpRequest,
+            ) -> Result<(CloudHttpResponse, Option<String>), QuarkError> {
+                assert!(request.url.contains("/file/download?"));
+                Ok((
+                    self.send(request)?,
+                    Some("__uid=account-7; sid=sent".into()),
+                ))
+            }
+        }
+        let credentials = MemoryCredentialStore::default();
+        credentials
+            .save("quark", b"__uid=account-7; sid=stored")
+            .unwrap();
+        let http = SnapshotHttp(Http::new(vec![
+            json!({"code":0,"data":{"task_id":"fixture-save"}}),
+            json!({"code":0,"data":{"status":2,"save_as":{"save_as_top_fids":["personal-11"]}}}),
+            json!({"code":0,"data":[{"fid":"personal-11","download_url":"https://download.quark.cn/personal?sign=fixture"}]}),
+        ]));
+        let plan = CloudSharePlan::new(
+            CloudProvider::Quark,
+            "share-fixture".into(),
+            None,
+            vec![CloudShareEntry::new(
+                "share-fixture",
+                "11".into(),
+                "file.bin".into(),
+                vec![],
+                Some(1),
+            )],
+            json!({"stoken":"fixture-share-token","files":{"11":{"token":"fixture-file-token","parent":"0"}}}),
+        );
+        let entry = CloudShareResolvedEntry {
+            provider: plan.provider,
+            entry: plan.entries[0].clone(),
+            plan: plan.clone(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            CloudSharePlanStore::new(SystemCredentialStore::new(dir.path().into()).unwrap());
+        store.upsert(&plan).unwrap();
+        let adapter = provider_share_adapter(CloudProvider::Quark, &credentials, &http).unwrap();
+
+        let download = adapter.transfer(&entry, &store).unwrap();
+
+        let expected = BTreeMap::from([("__uid", "account-7"), ("sid", "sent")]);
+        let sent_cookie = download
+            .headers
+            .iter()
+            .find_map(|(name, value)| name.eq_ignore_ascii_case("Cookie").then_some(value))
+            .unwrap();
+        let stored_cookie = String::from_utf8(credentials.load("quark").unwrap().unwrap()).unwrap();
+        for cookie in [sent_cookie.as_str(), stored_cookie.as_str()] {
+            let pairs = cookie
+                .split(';')
+                .map(str::trim)
+                .map(|pair| pair.split_once('=').unwrap())
+                .collect::<BTreeMap<_, _>>();
+            assert_eq!(pairs, expected);
+        }
+        assert_eq!(
+            store
+                .resolve_entry(&plan.source_for("11"))
+                .unwrap()
+                .plan
+                .transfers[0]
+                .created_file_id,
+            "personal-11"
+        );
+        assert_eq!(http.0.requests.lock().unwrap().len(), 3);
+    }
+
     #[test]
     fn quark_share_without_login_does_not_request_http() {
         let credentials = MemoryCredentialStore::default();
@@ -888,6 +970,12 @@ pub struct QuarkClient<'a, T: CloudHttpTransport + ?Sized> {
     cookie: String,
     http: &'a T,
 }
+
+pub(crate) struct QuarkDownloadResponse {
+    pub(crate) response: CloudHttpResponse,
+    pub(crate) cookie: String,
+}
+
 impl<'a, T: CloudHttpTransport + ?Sized> QuarkClient<'a, T> {
     pub fn new(cookie: String, http: &'a T) -> Self {
         Self { cookie, http }
@@ -1061,13 +1149,36 @@ impl<'a, T: CloudHttpTransport + ?Sized> QuarkClient<'a, T> {
         )
     }
     pub fn download_url(&self, id: &str) -> Result<CloudHttpResponse, QuarkError> {
-        self.request_url_with_profile(
-            "POST",
-            quark_desktop_download_url(),
-            Some(json!({"fids":[id]})),
-            true,
-        )
-        .map_err(download_source_missing_from_http_404)
+        self.download_url_with_cookie(id)
+            .map(|result| result.response)
+    }
+
+    pub(crate) fn download_url_with_cookie(
+        &self,
+        id: &str,
+    ) -> Result<QuarkDownloadResponse, QuarkError> {
+        let result = self
+            .download_request(json!({"fids":[id]}))
+            .map_err(download_source_missing_from_http_404)?;
+        response_json(&result.response).map_err(download_source_missing_from_http_404)?;
+        Ok(result)
+    }
+
+    fn download_request(&self, body: Value) -> Result<QuarkDownloadResponse, QuarkError> {
+        let (response, sent_cookie) = self.http.send_with_cookie_snapshot(CloudHttpRequest {
+            method: "POST",
+            url: quark_desktop_download_url(),
+            headers: quark_request_headers(&self.cookie, true),
+            body: Some(body.to_string()),
+        })?;
+        // The HTTP jar may have rotated cookies during an earlier directory
+        // request. Bind the CDN request to the cookie used to obtain this URL,
+        // then incorporate any rotation returned by this download response.
+        let cookie = super::common::cookie_for_download(
+            sent_cookie.as_deref().unwrap_or(&self.cookie),
+            &response.set_cookies,
+        );
+        Ok(QuarkDownloadResponse { response, cookie })
     }
 
     /// Uploads one regular local file using Quark's authenticated CloudDrive
@@ -1423,15 +1534,10 @@ impl<T: CloudHttpTransport + ?Sized> QuarkClient<'_, T> {
         path: &str,
         body: Option<Value>,
     ) -> Result<CloudHttpResponse, QuarkError> {
-        let desktop_file_transfer = path == "file/download";
         self.http.send(CloudHttpRequest {
             method,
-            url: if desktop_file_transfer {
-                quark_desktop_download_url()
-            } else {
-                quark_api_url(path)
-            },
-            headers: quark_request_headers(&self.cookie, desktop_file_transfer),
+            url: quark_api_url(path),
+            headers: quark_request_headers(&self.cookie, false),
             body: body.map(|value| value.to_string()),
         })
     }
@@ -1442,49 +1548,49 @@ impl<T: CloudHttpTransport + ?Sized> QuarkClient<'_, T> {
         body: Option<Value>,
     ) -> Result<CloudHttpResponse, QuarkError> {
         let response = self.share_raw(method, path, body)?;
+        Self::validate_share_response(&response)?;
+        Ok(response)
+    }
+    fn share_download_request(&self, body: Value) -> Result<QuarkDownloadResponse, QuarkError> {
+        let result = self.download_request(body)?;
+        Self::validate_share_response(&result.response)?;
+        Ok(result)
+    }
+    fn validate_share_response(response: &CloudHttpResponse) -> Result<(), QuarkError> {
         let value: Value =
             serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
         let code = validate_share_codes(&value)?;
-        response_json(&response).map_err(|error| match error {
+        response_json(response).map_err(|error| match error {
             QuarkError::Provider(_) => {
                 QuarkError::Provider(format!("{QUARK_SHARE_PROVIDER_CODE_PREFIX}{code}"))
             }
             error => error,
         })?;
-        Ok(response)
+        Ok(())
     }
     fn share_download(
         &self,
-        response: &CloudHttpResponse,
+        response: &QuarkDownloadResponse,
         name: &str,
     ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
-        let url = parse_quark_download_url(&response.body)?;
+        let url = parse_quark_download_url(&response.response.body)?;
         Ok(super::commands::ResolvedCloudDownload {
             url,
             name: name.into(),
-            headers: quark_download_headers(&self.cookie, &response.set_cookies),
+            headers: quark_download_headers(&response.cookie, &[]),
         })
     }
 }
 
-fn persist_quark_download_cookies(
+pub(crate) fn persist_quark_download_cookies(
     credentials: &dyn CredentialStore,
     current_cookie: &str,
-    response: &CloudHttpResponse,
+    response: &QuarkDownloadResponse,
 ) -> Result<(), QuarkError> {
-    if response.set_cookies.is_empty() {
+    if response.cookie == current_cookie {
         return Ok(());
     }
-    let merged_cookie = super::share::download_headers(
-        current_cookie,
-        &response.set_cookies,
-        QUARK_DESKTOP_USER_AGENT,
-        None,
-    )
-    .into_iter()
-    .find_map(|(name, value)| (name == "Cookie").then_some(value))
-    .ok_or(QuarkError::Storage)?;
-    credentials.save("quark", merged_cookie.as_bytes())
+    credentials.save("quark", response.cookie.as_bytes())
 }
 
 fn validate_share_codes(value: &Value) -> Result<i64, QuarkError> {
@@ -1715,7 +1821,7 @@ impl ShareTransfer for QuarkShareAdapter<'_> {
                         store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), id)?;
                     }
                     let response = client
-                        .share_request("POST", "file/download", Some(json!({"fids":[id]})))
+                        .share_download_request(json!({"fids":[id]}))
                         .map_err(|error| {
                             quark_share_failure(QuarkShareFailureStage::PersonalDownload, error)
                         })?;
@@ -1784,11 +1890,7 @@ impl RecordedTransferResolver for QuarkShareAdapter<'_> {
         }
         let client = self.client()?;
         let response = client
-            .share_request(
-                "POST",
-                "file/download",
-                Some(json!({"fids":[created_file_id]})),
-            )
+            .share_download_request(json!({"fids":[created_file_id]}))
             .map_err(|error| {
                 quark_share_failure(QuarkShareFailureStage::PersonalDownload, error)
             })?;
@@ -1871,13 +1973,11 @@ fn resolve_quark_share_direct(
         return Err(QuarkError::InvalidResponse);
     }
     let context = &entry.plan.provider_context;
-    let response = client.share_request(
-        "POST",
-        "file/download",
-        Some(json!({"pwd_id":entry.plan.canonical_share_id,"stoken":required(context,"stoken")?,"fids":[entry.entry.entry_id],"fids_token":[required(&context["files"][&entry.entry.entry_id],"token")?]})),
+    let response = client.share_download_request(
+        json!({"pwd_id":entry.plan.canonical_share_id,"stoken":required(context,"stoken")?,"fids":[entry.entry.entry_id],"fids_token":[required(&context["files"][&entry.entry.entry_id],"token")?]}),
     )?;
     persist_quark_download_cookies(credentials, &client.cookie, &response)?;
-    let value = response_json(&response)?;
+    let value = response_json(&response.response)?;
     let files = value["data"]
         .as_array()
         .ok_or(QuarkError::InvalidResponse)?;

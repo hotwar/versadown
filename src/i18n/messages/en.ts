@@ -1,4 +1,15 @@
 const messages = {
+  'cloud.verification.xunlei.shareProfileUnsupported': 'This Xunlei web profile is unsupported for share links. Open the share on the official website. [XL-SHARE-PROFILE]',
+  'cloud.verification.xunlei.metadataMissing': 'Xunlei operation verification is unavailable. [XL-LOCAL-MISSING]',
+  'cloud.verification.xunlei.metadataExpired': 'The Xunlei verification data saved by VersaDown exceeded its local reuse limit. Reauthorize in the browser, then retry this operation. [XL-LOCAL-EXPIRED]',
+  'cloud.verification.xunlei.timestampInvalid': 'The Xunlei verification timestamp is invalid or ahead of the system clock. The current request was not sent. Check the system time. [XL-LOCAL-TIME]',
+  'cloud.verification.xunlei.unavailable': 'VersaDown cannot prepare verification for this Xunlei operation. Use the official website for now. [XL-LOCAL]',
+  'macos.links.registrationFailed': 'Unable to update macOS download link associations. Please try again.',
+  'macos.links.storageFailed': 'Unable to save download link associations. Check access to the application data directory.',
+  'macos.links.bundleRequired': 'Install and open VersaDown.app before changing link associations.',
+  'macos.links.chooseAlternative': 'No alternative application can handle this link type. Choose another default application before disabling the association.',
+
+  'startup.credentialsUnavailable': 'System credential storage is unavailable. Standard downloads remain available; cloud accounts and private tasks stay protected. Unlock your login keychain and restart VersaDown.',
   'app.title': 'VersaDown Universal Downloader',
   'app.brand': 'VersaDown',
   'common.automatic': 'Automatic (system language)',
@@ -522,6 +533,7 @@ const messages = {
   'cloud.share.passCodeGeneratedByProvider': 'The provider generates the access code automatically',
   'cloud.share.autoGenerate': 'Generate automatically',
   'cloud.share.fixedCodeHint': 'The access code must contain {count} letters or numbers.',
+  'cloud.share.generatedOptions': 'The drive generates an access code automatically. You can set an expiration.',
   'cloud.share.requiredOptions': 'An access code is required; generate one automatically or enter your own. {hint}',
   'cloud.share.requiredPassCode': 'Access code (required)',
   'cloud.share.linkWithPassCode': '{url}\nAccess code: {passCode}',
@@ -626,6 +638,8 @@ const messages = {
   'about.legal.9': 'We collect the minimum operational information needed to improve the software and provide better service.',
   'about.legal.10': 'We encourage users to subscribe to official VIP/SVIP plans for a better download and acceleration experience.',
   'about.legal.acceptance': 'By downloading or using this project, you acknowledge that you have read and accepted all terms above.',
+  'cloud.session.saveFailedAfterSuccess': '{name}: the cloud operation completed, but the login session could not be saved. Do not resubmit completed work. Later operations may require you to log in again.',
+  'cloud.session.saveFailed': '{name}: the login session could not be saved. The operation result is shown separately. Later operations may require you to log in again.',
 } as const;
 
 export default messages;

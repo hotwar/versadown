@@ -180,7 +180,9 @@ impl ProviderAuth for BaiduDriver<'_> {
         let store = &self.store;
         let http = &self.http;
         {
-            let session = baidu::parse_baidu_web_session(&input.cookies)?;
+            // While the official login page is open, an absent login cookie
+            // means pending authorization, not an expired saved account.
+            let session = authorization_result(baidu::parse_baidu_web_session(&input.cookies))?;
             let account = finalize_baidu_web_authorization(
                 crate::cloud::ProviderRegistry::global().get(CloudProvider::Baidu),
                 session,

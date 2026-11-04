@@ -1,0 +1,13 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "macOSPrivateApi": true
+  },
+  "bundle": {
+    "resources": ["binaries/aria2-next-aarch64-apple-darwin", "binaries/aria2-next-x86_64-apple-darwin"],
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "infoPlist": "macos/Info.plist"
+    }
+  }
+}

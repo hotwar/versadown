@@ -2315,3 +2315,32 @@ it('cleans up launcher listeners that resolve after App unmounts', async () => {
   expect(stopNavigate).toHaveBeenCalledOnce();
   expect(stopParse).toHaveBeenCalledOnce();
 });
+
+it('keeps a completed cloud operation separate from a persistent session storage warning', async () => {
+  const user = userEvent.setup();
+  render(<App />);
+  await waitFor(() => expect(state.listeners.has('cloud-session-persistence-warning')).toBe(true));
+  act(() => state.listeners.get('cloud-session-persistence-warning')?.({
+    payload: { provider: 'xunlei', operationSucceeded: true },
+  }));
+  const warning = screen.getByRole('alert');
+  expect(warning).toHaveTextContent('网盘操作已完成');
+  expect(warning).toHaveTextContent('请勿重复提交已完成的操作');
+  // A follow-up refresh must not overwrite the already completed operation's warning.
+  act(() => state.listeners.get('cloud-session-persistence-warning')?.({
+    payload: { provider: 'xunlei', operationSucceeded: false },
+  }));
+  expect(warning).toHaveTextContent('网盘操作已完成');
+  await user.click(within(warning).getByRole('button', { name: '关闭' }));
+  expect(screen.queryByText(/登录状态未能保存/)).not.toBeInTheDocument();
+});
+
+it('does not label a failed cloud operation as completed when session storage also fails', async () => {
+  render(<App />);
+  await waitFor(() => expect(state.listeners.has('cloud-session-persistence-warning')).toBe(true));
+  act(() => state.listeners.get('cloud-session-persistence-warning')?.({
+    payload: { provider: 'xunlei', operationSucceeded: false },
+  }));
+  expect(screen.getByRole('alert')).toHaveTextContent('登录状态未能保存，操作结果请查看原提示');
+  expect(screen.getByRole('alert')).not.toHaveTextContent('操作已完成');
+});

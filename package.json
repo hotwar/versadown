@@ -1,7 +1,7 @@
 {
   "name": "versadown",
   "private": true,
-  "version": "0.2.8",
+  "version": "0.2.9",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -13,6 +13,8 @@
     "test:live:xunlei-auth": "node scripts/verify-xunlei-auth-live.cjs",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
+    "dev:macos": "tauri dev",
+    "build:macos:quick": "bash scripts/build-macos.sh quick",
     "build:linux:quick": "pnpm run build && VERSADOWN_FRONTEND_SIGNATURE=\"$(find dist -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d ' ' -f 1)\" cargo build --manifest-path src-tauri/Cargo.toml --features custom-protocol",
     "build:linux:release": "bash scripts/build-linux-release.sh",
     "build:windows:quick": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Mode Quick",
@@ -20,7 +22,9 @@
     "build:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Mode Release",
     "build:windows:installer": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1 -Mode Release -Installer",
     "tauri:binary": "pnpm run build:windows",
-    "tauri:build": "pnpm run build:windows:installer"
+    "tauri:build": "pnpm run build:windows:installer",
+    "build:macos:installer": "bash scripts/build-macos.sh installer",
+    "build:macos:release": "bash scripts/build-macos.sh release"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.0.0",

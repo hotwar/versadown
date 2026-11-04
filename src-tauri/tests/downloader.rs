@@ -96,7 +96,7 @@ fn prepared_cloud_share_task(store: &TaskStore, source: &str, name: &str) -> Dow
 }
 
 #[tokio::test]
-async fn failed_cloud_url_refresh_rebinds_native_checkpoint_to_a_stable_gateway_uri() {
+async fn failed_cloud_url_refresh_claims_native_checkpoint_without_rewriting_its_uri() {
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(TaskStore::open_path(&directory.path().join("tasks.sqlite")).unwrap());
     let task = store
@@ -180,6 +180,210 @@ async fn failed_cloud_url_refresh_rebinds_native_checkpoint_to_a_stable_gateway_
         vec!["http://127.0.0.1:49152/stable-token"],
         "the expired CDN URI must not be submitted as an alternate mirror"
     );
+    assert_eq!(api.added_options()[0]["continue"], "true");
+    assert_eq!(
+        checkpoint
+            .query_row("SELECT uri FROM downloads", [], |row| row.get::<_, String>(0))
+            .unwrap(),
+        "https://expired.example.test/file",
+        "only the engine may transfer the checkpoint to its replacement GID"
+    );
+}
+
+fn zero_byte_cloud_retry_fixture() -> (tempfile::TempDir, Arc<TaskStore>, DownloadTask, PathBuf) {
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(TaskStore::open_path(&root.path().join("tasks.sqlite")).unwrap());
+    let task = store
+        .create(NewTask {
+            source: "cloud://baidu/file-id".into(),
+            name: "file.bin".into(),
+            kind: "cloud".into(),
+            is_private: false,
+        })
+        .unwrap();
+    let task = store
+        .apply_transfer_snapshot(DownloadTask {
+            status: TaskStatus::Failed,
+            aria_gid: Some("0123456789abcdef".into()),
+            aria_error_code: Some("2".into()),
+            error: Some("Connection stalled".into()),
+            ..task
+        })
+        .unwrap();
+    let payload = root.path().join("file.bin");
+    assert!(store.reserve_output_path(task.id, &payload).unwrap());
+    (root, store, task, payload)
+}
+
+fn empty_native_state(root: &std::path::Path) -> rusqlite::Connection {
+    let directory = root.join("aria2-next-state/stream");
+    std::fs::create_dir_all(&directory).unwrap();
+    let db = rusqlite::Connection::open(directory.join("state.db")).unwrap();
+    db.execute_batch("CREATE TABLE downloads (gid TEXT PRIMARY KEY, uri TEXT, path TEXT, total_length INTEGER, completed_length INTEGER, completed_ranges TEXT);").unwrap();
+    db
+}
+
+#[tokio::test]
+async fn cloud_zero_byte_retry_submits_again_without_a_checkpoint() {
+    use versadown_lib::cloud::download_dispatch::CloudDownloadDispatch;
+
+    for state in [
+        "missing",
+        "empty-database",
+        "empty-record",
+        "empty-payload",
+        "unknown-total",
+    ] {
+        let (root, store, mut task, payload) = zero_byte_cloud_retry_fixture();
+        if state == "unknown-total" {
+            task.total_length = Some(1024);
+            task = store.apply_transfer_snapshot(task).unwrap();
+        }
+        if state != "missing" {
+            let db = empty_native_state(root.path());
+            if state != "empty-database" {
+                db.execute(
+                    "INSERT INTO downloads VALUES (?1, ?2, ?3, ?4, 0, '')",
+                    rusqlite::params![
+                        task.aria_gid,
+                        "http://127.0.0.1:49152/old-token",
+                        payload.to_string_lossy(),
+                        if state == "unknown-total" { 0 } else { 1024 },
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        if state == "empty-payload" {
+            std::fs::write(&payload, []).unwrap();
+            store
+                .upsert_files(
+                    task.id,
+                    &[(0, payload.to_string_lossy().into_owned(), 1024, 0, true)],
+                )
+                .unwrap();
+        }
+        let dispatch = CloudDownloadDispatch::default();
+        dispatch
+            .prepare_expected_with_retry_intent(&store, &task, false, true)
+            .await
+            .unwrap();
+        let options = dispatch.retry_submission_options(
+            task.id,
+            UriSubmissionOptions {
+                directory: Some(root.path().to_path_buf()),
+                output_name: Some("file.bin".into()),
+                direct_loopback: true,
+                ..Default::default()
+            },
+        );
+        let mut status = RecordingAria2::active(task.aria_gid.as_deref().unwrap());
+        status.status = "error".into();
+        status.total_length = "0".into();
+        status.completed_length = "0".into();
+        status.error_code = Some("2".into());
+        let api = Arc::new(RecordingAria2 {
+            status_override: Some(status),
+            ..Default::default()
+        });
+        let service = DownloadService::new(api.clone(), store.clone());
+        let submitted = service
+            .replace_cloud_uri_with_options(
+                task.id,
+                task.aria_gid.as_deref().unwrap(),
+                vec!["http://127.0.0.1:49152/new-token".into()],
+                options,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{state}: {error}"));
+        assert_eq!(submitted.aria_gid.as_deref(), Some("gid-1"), "{state}");
+        assert_eq!(
+            api.uris.lock().unwrap()[0],
+            vec!["http://127.0.0.1:49152/new-token"]
+        );
+        let options = &api.added_options()[0];
+        assert_eq!(options["continue"], "false", "{state}");
+        assert_eq!(options["allow-overwrite"], "false", "{state}");
+        assert!(!options.contains_key("remove-control-file"), "{state}");
+        assert_eq!(payload.exists(), state == "empty-payload", "{state}");
+    }
+}
+
+#[tokio::test]
+async fn cloud_zero_byte_retry_preserves_payloads_and_untrusted_checkpoints() {
+    for state in [
+        "nonempty-payload",
+        "control",
+        "corrupt-db",
+        "ranges",
+        "other-gid",
+        "saved-progress",
+    ] {
+        let (root, store, mut task, payload) = zero_byte_cloud_retry_fixture();
+        match state {
+            "nonempty-payload" => std::fs::write(&payload, b"keep me").unwrap(),
+            "control" => {
+                std::fs::write(payload.with_extension("bin.aria2"), b"keep control").unwrap()
+            }
+            "corrupt-db" => {
+                let directory = root.path().join("aria2-next-state/stream");
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::write(directory.join("state.db"), b"corrupt database").unwrap();
+            }
+            "saved-progress" => {
+                task.completed_length = 7;
+                task = store.apply_transfer_snapshot(task).unwrap();
+            }
+            _ => {
+                let db = empty_native_state(root.path());
+                db.execute(
+                    "INSERT INTO downloads VALUES (?1, ?2, ?3, 1024, 0, ?4)",
+                    rusqlite::params![
+                        if state == "other-gid" {
+                            "fedcba9876543210"
+                        } else {
+                            task.aria_gid.as_deref().unwrap()
+                        },
+                        "http://127.0.0.1:49152/old-token",
+                        payload.to_string_lossy(),
+                        if state == "ranges" { "0-7" } else { "" },
+                    ],
+                )
+                .unwrap();
+            }
+        }
+        let api = RecordingAria2::successful();
+        let service = DownloadService::new(api.clone(), store.clone());
+        let result = service
+            .resubmit_uri_with_options(
+                task.id,
+                vec!["http://127.0.0.1:49152/new-token".into()],
+                UriSubmissionOptions {
+                    directory: Some(root.path().to_path_buf()),
+                    output_name: Some("file.bin".into()),
+                    continue_download: true,
+                    native_resume_gid: task.aria_gid.clone(),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(
+            matches!(
+                result,
+                Err(versadown_lib::aria2::service::DownloadServiceError::InvalidNativeCheckpoint)
+            ),
+            "{state}"
+        );
+        assert!(api.calls().is_empty(), "{state}");
+        assert_eq!(
+            store.find(task.id).unwrap().aria_gid,
+            task.aria_gid,
+            "{state}"
+        );
+        if state == "nonempty-payload" {
+            assert_eq!(std::fs::read(payload).unwrap(), b"keep me");
+        }
+    }
 }
 
 #[tokio::test]
@@ -381,7 +585,7 @@ fn native_resume_fixture() -> (tempfile::TempDir, Arc<TaskStore>, DownloadTask) 
 }
 
 #[tokio::test]
-async fn native_resume_preserves_checkpoint_identity_and_disables_length_fallback() {
+async fn native_resume_claims_verified_ranges_by_output_path() {
     let (root, store, task) = native_resume_fixture();
     let api = RecordingAria2::successful();
     let service = DownloadService::new(api.clone(), store);
@@ -399,7 +603,7 @@ async fn native_resume_preserves_checkpoint_identity_and_disables_length_fallbac
     let options = api.added_options();
     assert_eq!(
         options[0].get("continue").map(String::as_str),
-        Some("false")
+        Some("true")
     );
     assert_eq!(
         options[0].get("allow-overwrite").map(String::as_str),
@@ -419,7 +623,7 @@ async fn native_resume_preserves_checkpoint_identity_and_disables_length_fallbac
     );
     assert_eq!(
         api.uris.lock().unwrap()[0],
-        vec!["https://example.test/fresh", "https://example.test/old"]
+        vec!["https://example.test/fresh"]
     );
 }
 
@@ -528,7 +732,7 @@ async fn failed_cloud_snapshot_without_lengths_keeps_verified_download_progress(
 }
 
 #[tokio::test]
-async fn baidu_gateway_resume_places_fresh_local_uri_before_checkpoint_mirror() {
+async fn baidu_gateway_resume_uses_only_the_fresh_local_uri() {
     let (_root, store, task) = native_resume_fixture();
     let api = RecordingAria2::successful();
     let service = DownloadService::new(api.clone(), store);
@@ -547,7 +751,7 @@ async fn baidu_gateway_resume_places_fresh_local_uri_before_checkpoint_mirror() 
         .unwrap();
     assert_eq!(
         api.uris.lock().unwrap()[0],
-        vec![loopback, "https://example.test/old"]
+        vec![loopback]
     );
     assert!(api.changed_uris().is_empty());
     assert_eq!(

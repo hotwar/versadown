@@ -120,7 +120,7 @@ fn baidu_download_rejects_a_reused_path_before_requesting_file_bytes() {
         .download(&opaque_reference("/movie.mkv"))
         .unwrap_err();
     assert!(
-        matches!(error, QuarkError::Provider(ref message) if message.contains("已移动") || message.contains("不一致"))
+        matches!(error, QuarkError::SourceFileMissing)
     );
     assert!(!http
         .requests()

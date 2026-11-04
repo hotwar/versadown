@@ -220,14 +220,18 @@ pub(crate) fn recover_authorization(
     http: &impl CloudHttpTransport,
     genuine_auth_error: impl Into<auth_supervisor::RecoveryPhase>,
 ) -> Result<(), QuarkError> {
+    let phase = genuine_auth_error.into();
     auth_supervisor::recover_in_order(
         provider,
         &state.store,
         ProviderRegistry::global()
             .driver(provider, &state.store, http)
             .auth(),
-        genuine_auth_error,
-        || capture_persistent_authorization(app, state, provider, http),
+        phase,
+        || capture_persistent_authorization(
+            app, state, provider, http,
+            phase == auth_supervisor::RecoveryPhase::OperationVerification,
+        ),
     )
 }
 
@@ -259,6 +263,7 @@ fn capture_persistent_authorization(
     state: &CloudState,
     provider: CloudProvider,
     http: &impl CloudHttpTransport,
+    require_operation_verification: bool,
 ) -> Result<bool, CloudError> {
     if auth_supervisor::is_manually_disconnected(&state.store, provider)? {
         return Err(CloudError::NotAuthorized);
@@ -374,6 +379,22 @@ fn capture_persistent_authorization(
             {
                 candidate.retain_app_transport(&existing);
                 verified = serde_json::to_vec(&candidate).map_err(|_| CloudError::Storage)?;
+            }
+        }
+        if provider == CloudProvider::Xunlei {
+            let candidate: xunlei::XunleiSession =
+                serde_json::from_slice(&verified).map_err(|_| CloudError::Storage)?;
+            if require_operation_verification && !candidate.can_prepare_operation_verification() {
+                return Ok(false);
+            }
+            if let Some(existing) = state
+                .store
+                .load(provider.key())?
+                .and_then(|bytes| serde_json::from_slice::<xunlei::XunleiSession>(&bytes).ok())
+            {
+                if existing.would_downgrade_operation_verification(&candidate) {
+                    return Ok(false);
+                }
             }
         }
         state.store.save(provider.key(), &verified)?;
@@ -703,12 +724,39 @@ pub(crate) fn browser_cookies(
     window: &tauri::WebviewWindow,
     urls: &[&str],
 ) -> Result<Vec<String>, QuarkError> {
+    if urls.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut values = std::collections::BTreeMap::new();
+    // Wry's WKWebView cookies_for_url compares domain strings literally,
+    // excluding valid parent-domain cookies such as .baidu.com/.quark.cn.
+    // Fetch native cookies once and scope them to our registered provider URLs.
+    #[cfg(target_os = "macos")]
+    let available = window
+        .cookies()
+        .map_err(|_| QuarkError::WebAuthorizationRequired)?;
     for url in urls {
-        for cookie in window
+        #[cfg(target_os = "macos")]
+        let cookies = {
+            let url = url::Url::parse(url).map_err(|_| QuarkError::InvalidResponse)?;
+            available
+                .iter()
+                .filter(|cookie| {
+                    cookie_matches_provider_url(
+                        cookie.domain(),
+                        cookie.path(),
+                        cookie.secure().unwrap_or(false),
+                        &url,
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        #[cfg(not(target_os = "macos"))]
+        let cookies = window
             .cookies_for_url(url.parse().map_err(|_| QuarkError::InvalidResponse)?)
-            .map_err(|_| QuarkError::WebAuthorizationRequired)?
-        {
+            .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+        for cookie in cookies {
             values.insert(cookie.name().to_owned(), cookie.value().to_owned());
         }
     }
@@ -716,6 +764,54 @@ pub(crate) fn browser_cookies(
         .into_iter()
         .map(|(name, value)| format!("{name}={value}"))
         .collect())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn cookie_matches_provider_url(
+    domain: Option<&str>,
+    path: Option<&str>,
+    secure: bool,
+    url: &url::Url,
+) -> bool {
+    let Some(domain) = domain else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let domain = domain.trim_start_matches('.').to_ascii_lowercase();
+    if domain.is_empty() || !(host == domain || host.ends_with(&format!(".{domain}"))) {
+        return false;
+    }
+    if secure && url.scheme() != "https" {
+        return false;
+    }
+    let path = path.unwrap_or("/");
+    url.path() == path
+        || (url.path().starts_with(path)
+            && (path.ends_with('/') || url.path().as_bytes().get(path.len()) == Some(&b'/')))
+}
+
+#[cfg(test)]
+mod macos_cookie_scope_tests {
+    use super::cookie_matches_provider_url;
+
+    #[test]
+    fn parent_domain_sessions_match_the_registered_provider_host() {
+        for (domain, url) in [(".baidu.com", "https://pan.baidu.com/"), (".quark.cn", "https://pan.quark.cn/")] {
+            assert!(cookie_matches_provider_url(Some(domain), Some("/"), true, &url::Url::parse(url).unwrap()));
+        }
+    }
+
+    #[test]
+    fn cookies_never_cross_an_unrelated_domain_path_or_insecure_origin() {
+        for url in ["https://evilbaidu.com/", "https://baidu.com.evil.test/", "https://quark.cn/", "http://pan.baidu.com/"] {
+            assert!(!cookie_matches_provider_url(Some(".baidu.com"), Some("/"), true, &url::Url::parse(url).unwrap()));
+        }
+        assert!(!cookie_matches_provider_url(None, Some("/"), false, &url::Url::parse("https://pan.baidu.com/").unwrap()));
+        assert!(!cookie_matches_provider_url(Some(".baidu.com"), Some("/disk"), true, &url::Url::parse("https://pan.baidu.com/disk-other").unwrap()));
+        assert!(cookie_matches_provider_url(Some(".baidu.com"), Some("/disk"), true, &url::Url::parse("https://pan.baidu.com/disk/main").unwrap()));
+    }
 }
 
 pub(crate) fn web_value(raw: &str) -> Result<serde_json::Value, QuarkError> {

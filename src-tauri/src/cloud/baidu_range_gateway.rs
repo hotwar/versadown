@@ -118,8 +118,8 @@ impl BaiduRangeGateway {
         self.register_inner(task_id, upstream, headers, proxy, false)
     }
 
-    /// Refresh the upstream without changing the local URI that identifies
-    /// aria2-next's persisted byte ranges for a paused task.
+    /// Refresh the upstream while retaining the paused task's local endpoint,
+    /// avoiding unnecessary engine URI rotation.
     pub fn register_refreshing(
         &self,
         task_id: Uuid,
@@ -171,7 +171,8 @@ impl BaiduRangeGateway {
         );
         let mut builder = Client::builder()
             .redirect(reqwest::redirect::Policy::limited(5))
-            .timeout(std::time::Duration::from_secs(90));
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .read_timeout(std::time::Duration::from_secs(90));
         if let Some(proxy) = proxy {
             builder = builder.proxy(Proxy::all(proxy).map_err(|_| GatewayError::InvalidProxy)?);
         } else if match parsed.host() {
@@ -311,7 +312,7 @@ impl Target {
         start: u64,
         end: u64,
         expected_total: Option<u64>,
-    ) -> Result<(Bytes, u64, u64), StatusCode> {
+    ) -> Result<UpstreamRange, StatusCode> {
         let response = self
             .client
             .get(&self.upstream)
@@ -353,22 +354,77 @@ impl Target {
         {
             return Err(StatusCode::BAD_GATEWAY);
         }
-        let mut response = response;
-        let mut body = Vec::with_capacity(expected_length as usize);
-        while let Some(chunk) = response
+        Ok(UpstreamRange {
+            response,
+            end: actual_end,
+            total,
+            remaining: expected_length,
+        })
+    }
+}
+
+struct UpstreamRange {
+    response: reqwest::Response,
+    end: u64,
+    total: u64,
+    remaining: u64,
+}
+
+impl UpstreamRange {
+    async fn chunk(&mut self) -> io::Result<Bytes> {
+        let chunk = self
+            .response
             .chunk()
             .await
-            .map_err(|_| StatusCode::BAD_GATEWAY)?
-        {
-            if body.len() + chunk.len() > expected_length as usize {
-                return Err(StatusCode::BAD_GATEWAY);
+            .map_err(|_| io::Error::other("upstream body failed"))?
+            .ok_or_else(|| io::Error::other("upstream range truncated"))?;
+        if chunk.len() as u64 > self.remaining {
+            return Err(io::Error::other(
+                "upstream range exceeds its declared length",
+            ));
+        }
+        self.remaining -= chunk.len() as u64;
+        if self.remaining == 0 {
+            // Keep the last chunk until EOF is verified. Even chunked origins
+            // without Content-Length must not make an invalid range complete.
+            if self
+                .response
+                .chunk()
+                .await
+                .map_err(|_| io::Error::other("upstream body failed"))?
+                .is_some()
+            {
+                return Err(io::Error::other(
+                    "upstream range exceeds its declared length",
+                ));
             }
-            body.extend_from_slice(&chunk);
         }
-        if body.len() != expected_length as usize {
-            return Err(StatusCode::BAD_GATEWAY);
+        Ok(chunk)
+    }
+}
+
+struct RangeStream {
+    target: Arc<Target>,
+    current: UpstreamRange,
+    final_end: u64,
+    failed: bool,
+}
+
+impl RangeStream {
+    async fn next_chunk(&mut self) -> io::Result<Option<Bytes>> {
+        if self.current.remaining == 0 {
+            if self.current.end >= self.final_end {
+                return Ok(None);
+            }
+            let start = self.current.end + 1;
+            let end = start.saturating_add(CHUNK_BYTES - 1).min(self.final_end);
+            self.current = self
+                .target
+                .fetch(start, end, Some(self.current.total))
+                .await
+                .map_err(|_| io::Error::other("upstream range failed"))?;
         }
-        Ok((Bytes::from(body), actual_end, total))
+        self.current.chunk().await.map(Some)
     }
 }
 
@@ -398,11 +454,11 @@ async fn serve(
         .start
         .saturating_add(CHUNK_BYTES - 1)
         .min(requested.end.unwrap_or(u64::MAX));
-    let (first, first_actual_end, total) =
-        match target.fetch(requested.start, first_end, None).await {
-            Ok(result) => result,
-            Err(status) => return empty(status),
-        };
+    let first = match target.fetch(requested.start, first_end, None).await {
+        Ok(result) => result,
+        Err(status) => return empty(status),
+    };
+    let total = first.total;
     let final_end = requested.end.unwrap_or(total - 1).min(total - 1);
     let mut builder = Response::builder()
         .status(if requested.partial {
@@ -426,37 +482,27 @@ async fn serve(
             .body(Body::empty())
             .unwrap();
     }
+    // Forward each received chunk immediately after validating range headers.
+    // Buffering a whole 4 MiB range hides healthy slow CDN traffic from aria2,
+    // whose eight-second stall detector then cancels the local connection.
     let chunks = stream::unfold(
-        (
+        RangeStream {
             target,
-            Some(first),
-            requested.start,
-            first_actual_end,
+            current: first,
             final_end,
-            total,
-        ),
-        |(target, first, start, current_end, final_end, total)| async move {
-            if let Some(first) = first {
-                return Some((
-                    Ok::<_, io::Error>(first),
-                    (target, None, start, current_end, final_end, total),
-                ));
-            }
-            if current_end >= final_end {
+            failed: false,
+        },
+        |mut state| async move {
+            if state.failed {
                 return None;
             }
-            let next_start = current_end + 1;
-            let next_end = next_start.saturating_add(CHUNK_BYTES - 1).min(final_end);
-            let result = target.fetch(next_start, next_end, Some(total)).await;
-            match result {
-                Ok((bytes, actual_end, _)) => Some((
-                    Ok(bytes),
-                    (target, None, start, actual_end, final_end, total),
-                )),
-                Err(_) => Some((
-                    Err(io::Error::other("upstream range failed")),
-                    (target, None, start, final_end, final_end, total),
-                )),
+            match state.next_chunk().await {
+                Ok(Some(chunk)) => Some((Ok(chunk), state)),
+                Ok(None) => None,
+                Err(error) => {
+                    state.failed = true;
+                    Some((Err(error), state))
+                }
             }
         },
     );

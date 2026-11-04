@@ -421,10 +421,37 @@ static WINDOW_CLASS: Lazy<WindowClass> = Lazy::new(|| unsafe {
     is_focusable as extern "C" fn(_, _) -> _,
   );
   decl.add_method(sel!(sendEvent:), send_event as extern "C" fn(_, _, _));
+  // VersaDown's launcher has a small icon inside a much larger transparent
+  // canvas. Exempt only that opted-in window from AppKit's top-edge clamp.
+  decl.add_ivar::<Bool>(CStr::from_bytes_with_nul(b"versadownAllowsOffscreen\0").unwrap());
+  decl.add_method(
+    sel!(versadownSetAllowsOffscreen:),
+    set_allows_offscreen as extern "C" fn(_, _, _),
+  );
+  decl.add_method(
+    sel!(constrainFrameRect:toScreen:),
+    constrain_frame as extern "C" fn(_, _, _, _) -> _,
+  );
   // progress bar states, follows ProgressState
   decl.add_ivar::<Bool>(CStr::from_bytes_with_nul(b"focusable\0").unwrap());
   WindowClass(decl.register())
 });
+
+extern "C" fn set_allows_offscreen(this: &mut Object, _: Sel, value: Bool) {
+  #[allow(deprecated)]
+  unsafe { *this.get_mut_ivar::<Bool>("versadownAllowsOffscreen") = value; }
+}
+
+extern "C" fn constrain_frame(this: &Object, _: Sel, frame: NSRect, screen: *mut Object) -> NSRect {
+  #[allow(deprecated)]
+  unsafe {
+    if this.get_ivar::<Bool>("versadownAllowsOffscreen").as_bool() {
+      frame
+    } else {
+      msg_send![super(this, class!(NSWindow)), constrainFrameRect: frame toScreen: screen]
+    }
+  }
+}
 
 extern "C" fn is_focusable(this: &Object, _: Sel) -> Bool {
   #[allow(deprecated)] // TODO: Use define_class!
