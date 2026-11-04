@@ -109,13 +109,11 @@ impl DownloadOps for QuarkDriver<'_> {
         let http = &self.http;
         {
             let cookie = cookie(store)?;
-            let r = QuarkClient::new(cookie.clone(), http).download_url(file_id)?;
-            let v = response_json(&r)?;
-            let url = parse_quark_download_url(&r.body)?;
-            let download_cookie = cookie_for_download(&cookie, &r.set_cookies);
-            if !r.set_cookies.is_empty() {
-                store.save(CloudProvider::Quark.key(), download_cookie.as_bytes())?;
-            }
+            let result =
+                QuarkClient::new(cookie.clone(), http).download_url_with_cookie(file_id)?;
+            let v = response_json(&result.response)?;
+            let url = parse_quark_download_url(&result.response.body)?;
+            persist_quark_download_cookies(store, &cookie, &result)?;
             Ok(ResolvedCloudDownload {
                 url,
                 name: v
@@ -126,7 +124,7 @@ impl DownloadOps for QuarkDriver<'_> {
                 // The file-transfer profile is selected when resolving the
                 // signed URL, and these same headers must accompany aria2's
                 // CDN request for the server to retain it.
-                headers: quark_download_headers(&download_cookie, &[]),
+                headers: quark_download_headers(&result.cookie, &[]),
             })
         }
     }

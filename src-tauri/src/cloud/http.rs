@@ -9,6 +9,11 @@ use std::{
 };
 
 const MAX_EXPLICIT_COOKIE_SESSIONS: usize = 64;
+
+#[cfg(test)]
+#[path = "http_cookie_snapshot_tests.rs"]
+mod cookie_snapshot_tests;
+
 #[derive(Clone)]
 pub struct CloudHttpRequest {
     pub method: &'static str,
@@ -26,6 +31,15 @@ pub struct CloudHttpResponse {
 }
 pub trait CloudHttpTransport: Send + Sync {
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError>;
+
+    /// Return the cookie bound to this exact request, before its Set-Cookie
+    /// response. Stateless transports leave callers' explicit headers intact.
+    fn send_with_cookie_snapshot(
+        &self,
+        request: CloudHttpRequest,
+    ) -> Result<(CloudHttpResponse, Option<String>), QuarkError> {
+        self.send(request).map(|response| (response, None))
+    }
 
     /// Upload workers can prevent snapshot publication after cooperative cancellation.
     fn check_transfer(&self) -> Result<(), QuarkError> {
@@ -60,6 +74,13 @@ impl<T: CloudHttpTransport> CloudHttpTransport for ControlledUploadHttp<'_, T> {
         self.control.check()?;
         self.inner.send(request)
     }
+    fn send_with_cookie_snapshot(
+        &self,
+        request: CloudHttpRequest,
+    ) -> Result<(CloudHttpResponse, Option<String>), QuarkError> {
+        self.control.check()?;
+        self.inner.send_with_cookie_snapshot(request)
+    }
     fn check_transfer(&self) -> Result<(), QuarkError> {
         self.control.check()
     }
@@ -93,18 +114,38 @@ pub struct ReqwestTransport {
 
 struct ExplicitCookieSession {
     client: reqwest::blocking::Client,
-    _jar: Arc<reqwest::cookie::Jar>,
+    snapshot_client: Option<reqwest::blocking::Client>,
+    jar: Arc<reqwest::cookie::Jar>,
     last_used: Instant,
+}
+
+impl ExplicitCookieSession {
+    fn client(&mut self, snapshot: bool) -> Result<reqwest::blocking::Client, QuarkError> {
+        if !snapshot {
+            return Ok(self.client.clone());
+        }
+        if self.snapshot_client.is_none() {
+            self.snapshot_client = Some(ReqwestTransport::client_with_jar(
+                Arc::clone(&self.jar),
+                false,
+            )?);
+        }
+        Ok(self.snapshot_client.as_ref().unwrap().clone())
+    }
 }
 
 impl ReqwestTransport {
     fn client_with_jar(
         jar: Arc<reqwest::cookie::Jar>,
+        follow_redirects: bool,
     ) -> Result<reqwest::blocking::Client, QuarkError> {
         let mut builder = reqwest::blocking::Client::builder()
             .cookie_provider(jar)
             .timeout(std::time::Duration::from_secs(30))
             .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36");
+        if !follow_redirects {
+            builder = builder.redirect(reqwest::redirect::Policy::none());
+        }
         if let Some(proxy) = std::env::var_os("HTTPS_PROXY")
             .or_else(|| std::env::var_os("https_proxy"))
             .or_else(|| std::env::var_os("ALL_PROXY"))
@@ -124,7 +165,8 @@ impl ReqwestTransport {
         &self,
         url: &reqwest::Url,
         cookie_header: &str,
-    ) -> Result<reqwest::blocking::Client, QuarkError> {
+        snapshot: bool,
+    ) -> Result<(reqwest::blocking::Client, Arc<reqwest::cookie::Jar>), QuarkError> {
         let origin = url.origin().ascii_serialization();
         let mut hasher = Sha256::new();
         hasher.update(origin.as_bytes());
@@ -138,7 +180,7 @@ impl ReqwestTransport {
             .map_err(|_| QuarkError::Transport("HTTP 会话状态不可用".into()))?;
         if let Some(session) = sessions.get_mut(&key) {
             session.last_used = now;
-            return Ok(session.client.clone());
+            return Ok((session.client(snapshot)?, Arc::clone(&session.jar)));
         }
         if sessions.len() >= MAX_EXPLICIT_COOKIE_SESSIONS {
             if let Some(oldest) = sessions
@@ -163,29 +205,30 @@ impl ReqwestTransport {
             // paths while response Set-Cookie still observes its real scope.
             jar.add_cookie_str(cookie, &root_url);
         }
-        let client = Self::client_with_jar(Arc::clone(&jar))?;
-        sessions.insert(
-            key,
-            ExplicitCookieSession {
-                client: client.clone(),
-                _jar: jar,
-                last_used: now,
-            },
-        );
-        Ok(client)
+        let mut session = ExplicitCookieSession {
+            client: Self::client_with_jar(Arc::clone(&jar), true)?,
+            snapshot_client: None,
+            jar: Arc::clone(&jar),
+            last_used: now,
+        };
+        let client = session.client(snapshot)?;
+        sessions.insert(key, session);
+        Ok((client, jar))
     }
 
     pub fn new() -> Result<Self, QuarkError> {
         let jar = Arc::new(reqwest::cookie::Jar::default());
         Ok(Self {
-            client: Self::client_with_jar(Arc::clone(&jar))?,
+            client: Self::client_with_jar(Arc::clone(&jar), true)?,
             jar,
             explicit_cookie_sessions: Mutex::new(HashMap::new()),
         })
     }
-}
-impl CloudHttpTransport for ReqwestTransport {
-    fn send(&self, r: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+    fn send_request(
+        &self,
+        r: CloudHttpRequest,
+        snapshot: bool,
+    ) -> Result<(CloudHttpResponse, Option<String>), QuarkError> {
         let has_content_type = r
             .headers
             .keys()
@@ -199,9 +242,20 @@ impl CloudHttpTransport for ReqwestTransport {
                 headers.push((name, value));
             }
         }
+        let mut sent_cookie = None;
         let client = if let Some(cookie) = explicit_cookie.as_deref() {
             let url = reqwest::Url::parse(&r.url).map_err(|_| QuarkError::InvalidResponse)?;
-            self.explicit_cookie_client(&url, cookie)?
+            let (client, jar) = self.explicit_cookie_client(&url, cookie, snapshot)?;
+            if snapshot {
+                sent_cookie = Some(match jar.cookies(&url) {
+                    Some(value) => value
+                        .to_str()
+                        .map_err(|_| QuarkError::InvalidResponse)?
+                        .to_owned(),
+                    None => String::new(),
+                });
+            }
+            client
         } else {
             self.client.clone()
         };
@@ -211,6 +265,11 @@ impl CloudHttpTransport for ReqwestTransport {
         );
         for (k, v) in headers {
             b = b.header(k, v)
+        }
+        if let Some(cookie) = &sent_cookie {
+            // Pin the exact cookie to this request. Another response may rotate
+            // the shared jar before send; reqwest must not substitute that value.
+            b = b.header(reqwest::header::COOKIE, cookie);
         }
         if let Some(body) = r.body {
             if !has_content_type {
@@ -231,6 +290,10 @@ impl CloudHttpTransport for ReqwestTransport {
                 .into(),
             )
         })?;
+        if sent_cookie.is_some() && response.status().is_redirection() {
+            // A first-hop cookie is not evidence of a redirected signing request.
+            return Err(QuarkError::InvalidResponse);
+        }
         let status = response.status().as_u16();
         let set_cookies = response
             .headers()
@@ -239,11 +302,27 @@ impl CloudHttpTransport for ReqwestTransport {
             .filter_map(|value| value.to_str().ok().map(str::to_owned))
             .collect();
         let body = response.text().map_err(|_| QuarkError::InvalidResponse)?;
-        Ok(CloudHttpResponse {
-            status,
-            body,
-            set_cookies,
-        })
+        Ok((
+            CloudHttpResponse {
+                status,
+                body,
+                set_cookies,
+            },
+            sent_cookie,
+        ))
+    }
+}
+impl CloudHttpTransport for ReqwestTransport {
+    fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+        self.send_request(request, false)
+            .map(|(response, _)| response)
+    }
+
+    fn send_with_cookie_snapshot(
+        &self,
+        request: CloudHttpRequest,
+    ) -> Result<(CloudHttpResponse, Option<String>), QuarkError> {
+        self.send_request(request, true)
     }
 
     fn isolated_session(&self) -> Result<Option<Box<dyn CloudHttpTransport>>, QuarkError> {

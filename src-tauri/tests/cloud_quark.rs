@@ -1,13 +1,17 @@
 #[path = "support/upload.rs"]
 mod upload_support;
-use versadown_lib::cloud::{
-    parse_quark_download_url, parse_quark_files, CloudHttpRequest, CloudHttpResponse,
-    CloudHttpTransport, CloudProvider, CloudUploadTransport, CredentialStore,
-    MemoryCredentialStore, ProviderRegistry, QuarkClient, QuarkError, UploadHttpRequest,
-    UploadHttpResponse,
-};
 use base64::Engine;
 use std::{collections::VecDeque, io::Write, sync::Mutex};
+use versadown_lib::cloud::{
+    parse_quark_download_url, parse_quark_files,
+    share::{
+        provider_share_adapter, CloudShareEntry, CloudSharePlan, CloudShareResolvedEntry,
+        RecordedTransferDownload, ShareResolution, ShareResolve,
+    },
+    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudUploadTransport,
+    CredentialStore, MemoryCredentialStore, ProviderRegistry, QuarkClient, QuarkError,
+    UploadHttpRequest, UploadHttpResponse,
+};
 
 struct RecordingHttp(Mutex<Vec<CloudHttpRequest>>);
 impl RecordingHttp {
@@ -121,6 +125,121 @@ fn quark_personal_download_forwards_the_desktop_profile_to_the_cdn() {
         .query_pairs()
         .collect::<std::collections::BTreeMap<_, _>>();
     assert_eq!(query.get("entry"), Some(&"ft".into()));
+}
+
+struct DownloadCookieHttp {
+    response_cookies: Vec<String>,
+}
+
+impl CloudHttpTransport for DownloadCookieHttp {
+    fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+        assert!(request.url.contains("/file/download?"));
+        assert_eq!(request.headers["Cookie"], "sid=stored; __puus=stored");
+        Ok(CloudHttpResponse {
+            status: 200,
+            body: r#"{"code":0,"data":[{"fid":"file-1","file_name":"movie.mkv","download_url":"https://download.quark.cn/movie?sign=fixture"}]}"#.into(),
+            set_cookies: self.response_cookies.clone(),
+        })
+    }
+
+    fn send_with_cookie_snapshot(
+        &self,
+        request: CloudHttpRequest,
+    ) -> Result<(CloudHttpResponse, Option<String>), QuarkError> {
+        Ok((self.send(request)?, Some("sid=sent; __puus=sent".into())))
+    }
+}
+
+fn cookie_bound_share_entry() -> CloudShareResolvedEntry {
+    let plan = CloudSharePlan::new(
+        CloudProvider::Quark,
+        "share-fixture".into(),
+        None,
+        vec![CloudShareEntry::new(
+            "share-fixture",
+            "file-1".into(),
+            "movie.mkv".into(),
+            vec![],
+            Some(12),
+        )],
+        serde_json::json!({"stoken":"fixture-share-token","files":{"file-1":{"token":"fixture-file-token","parent":"0"}}}),
+    );
+    CloudShareResolvedEntry {
+        provider: plan.provider,
+        entry: plan.entries[0].clone(),
+        plan,
+    }
+}
+
+fn assert_bound_download_cookie(
+    headers: &[(String, String)],
+    store: &MemoryCredentialStore,
+    expected: &str,
+) {
+    fn pairs(cookie: &str) -> std::collections::BTreeMap<&str, &str> {
+        cookie
+            .split(';')
+            .map(str::trim)
+            .map(|pair| pair.split_once('=').unwrap())
+            .collect()
+    }
+    let sent = headers
+        .iter()
+        .find_map(|(name, value)| name.eq_ignore_ascii_case("Cookie").then_some(value))
+        .expect("download Cookie header");
+    let stored = String::from_utf8(store.load("quark").unwrap().unwrap()).unwrap();
+    assert_eq!(pairs(sent), pairs(expected));
+    assert_eq!(pairs(&stored), pairs(expected));
+}
+
+#[test]
+fn quark_personal_download_persists_the_sent_cookie_without_a_new_set_cookie() {
+    let store = MemoryCredentialStore::default();
+    store.save("quark", b"sid=stored; __puus=stored").unwrap();
+    let http = DownloadCookieHttp {
+        response_cookies: vec![],
+    };
+
+    let download = ProviderRegistry::global()
+        .driver(CloudProvider::Quark, &store, &http)
+        .resolve_download("file-1")
+        .unwrap();
+
+    assert_bound_download_cookie(&download.headers, &store, "sid=sent; __puus=sent");
+}
+
+#[test]
+fn quark_share_direct_download_merges_response_rotation_into_the_sent_cookie() {
+    let store = MemoryCredentialStore::default();
+    store.save("quark", b"sid=stored; __puus=stored").unwrap();
+    let http = DownloadCookieHttp {
+        response_cookies: vec!["__puus=response; Path=/; Secure".into()],
+    };
+    let adapter = provider_share_adapter(CloudProvider::Quark, &store, &http).unwrap();
+
+    let ShareResolution::Direct(download) = adapter.resolve(&cookie_bound_share_entry()).unwrap()
+    else {
+        panic!("direct download required")
+    };
+
+    assert_bound_download_cookie(&download.headers, &store, "sid=sent; __puus=response");
+}
+
+#[test]
+fn quark_recorded_transfer_download_persists_the_sent_cookie_without_a_new_set_cookie() {
+    let store = MemoryCredentialStore::default();
+    store.save("quark", b"sid=stored; __puus=stored").unwrap();
+    let http = DownloadCookieHttp {
+        response_cookies: vec![],
+    };
+    let adapter = provider_share_adapter(CloudProvider::Quark, &store, &http).unwrap();
+
+    let refreshed = adapter
+        .refresh_recorded_transfer(&cookie_bound_share_entry(), "personal-file-1")
+        .unwrap();
+    let RecordedTransferDownload::Available(download) = refreshed.result.unwrap();
+
+    assert_bound_download_cookie(&download.headers, &store, "sid=sent; __puus=sent");
 }
 
 #[test]

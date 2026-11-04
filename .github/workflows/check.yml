@@ -68,6 +68,10 @@ jobs:
           cargo test --locked --manifest-path src-tauri/Cargo.toml --test baidu_range_gateway --test cloud_gateway_proxy --test downloader
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib aria2::native_resume::tests
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib aria2::service::tests
+      - name: Check Quark download cookie binding
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --test cloud_quark --test quark_cookie_binding
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::http::cookie_snapshot_tests
       - name: Check parser and startup failure handling
         run: |
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib parser::
@@ -82,12 +86,14 @@ jobs:
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib unavailable_credential_storage_does_not_reset_or_delete_saved_accounts
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib macos_cookie_scope_tests
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib private_history_reset
-      - name: Upload session regression (isolated credentials)
+      - name: Upload and Quark share regression (isolated credentials)
         env:
           VERSADOWN_NATIVE_SMOKE: '1'
           VERSADOWN_BACKGROUND_UI_TEST: '1'
           VERSADOWN_TEST_DATA_DIR: ${{ runner.temp }}/versadown-upload-regression
-        run: cargo test --locked --manifest-path src-tauri/Cargo.toml --features native-smoke --test cloud_upload
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --features native-smoke --test cloud_upload
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --features native-smoke --lib cloud::quark::tests
       - name: Check macOS encrypted credentials without accessing Keychain
         if: runner.os == 'macOS'
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::credentials::macos::tests
