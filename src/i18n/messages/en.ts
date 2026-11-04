@@ -1,4 +1,9 @@
 const messages = {
+  'cloud.verification.xunlei.shareProfileUnsupported': 'This Xunlei web profile is unsupported for share links. Open the share on the official website. [XL-SHARE-PROFILE]',
+  'cloud.verification.xunlei.metadataMissing': 'Xunlei operation verification is unavailable. [XL-LOCAL-MISSING]',
+  'cloud.verification.xunlei.metadataExpired': 'The Xunlei verification data saved by VersaDown exceeded its local reuse limit. Reauthorize in the browser, then retry this operation. [XL-LOCAL-EXPIRED]',
+  'cloud.verification.xunlei.timestampInvalid': 'The Xunlei verification timestamp is invalid or ahead of the system clock. The current request was not sent. Check the system time. [XL-LOCAL-TIME]',
+  'cloud.verification.xunlei.unavailable': 'VersaDown cannot prepare verification for this Xunlei operation. Use the official website for now. [XL-LOCAL]',
   'startup.credentialsUnavailable': 'System credential storage is unavailable. Standard downloads remain available; cloud accounts and private tasks stay protected. Unlock your login keychain and restart VersaDown.',
   'app.title': 'VersaDown Universal Downloader',
   'app.brand': 'VersaDown',
@@ -523,6 +528,7 @@ const messages = {
   'cloud.share.passCodeGeneratedByProvider': 'The provider generates the access code automatically',
   'cloud.share.autoGenerate': 'Generate automatically',
   'cloud.share.fixedCodeHint': 'The access code must contain {count} letters or numbers.',
+  'cloud.share.generatedOptions': 'The drive generates an access code automatically. You can set an expiration.',
   'cloud.share.requiredOptions': 'An access code is required; generate one automatically or enter your own. {hint}',
   'cloud.share.requiredPassCode': 'Access code (required)',
   'cloud.share.linkWithPassCode': '{url}\nAccess code: {passCode}',

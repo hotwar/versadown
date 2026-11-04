@@ -354,7 +354,7 @@ fn rotated_operation_continues_profile(kind: SessionWorkKind) {
             match phase {
                 RecoveryPhase::Proactive => Err(CloudError::WebAuthorizationRequired),
                 RecoveryPhase::ProfileOnly => store.save(provider.key(), b"profile-session"),
-                RecoveryPhase::AuthFailure => {
+                RecoveryPhase::AuthFailure | RecoveryPhase::OperationVerification => {
                     panic!("the same attempt must continue at profile only")
                 }
             }
@@ -646,6 +646,101 @@ fn mutation_is_invoked_once_and_requires_explicit_retry_after_renewal() {
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(store.load("pikpak").unwrap(), Some(b"renewed".to_vec()));
+}
+
+fn xunlei_web_session(ticket: &str, expires_at: u64) -> Vec<u8> {
+    let mut session = xunlei::XunleiSession::with_access(
+        "fixture-access",
+        "fixture-refresh",
+        xunlei::XunleiClientProfile {
+            client_id: "Xqp0kJBXWhwaTpB6".into(),
+            client_version: "1.93.22".into(),
+            package_name: "pan.xunlei.com".into(),
+            device_id: "fixture-device".into(),
+            user_agent: "fixture-browser".into(),
+            ..Default::default()
+        },
+    );
+    session.user_id = "A".into();
+    session.expires_at = 10000;
+    session.web_security.captcha_token = ticket.into();
+    session.web_security.expires_at = expires_at;
+    serde_json::to_vec(&session).unwrap()
+}
+
+#[test]
+fn xunlei_unchanged_or_unusable_verification_never_reports_login_restored() {
+    for (ticket, expires_at) in [
+        ("rejected-ticket", 2000),
+        ("rejected-ticket", 3000),
+        ("", 3000),
+        ("new-ticket", 1000),
+    ] {
+        let (supervisor, _, store) = fixture(1000, 30);
+        let original = xunlei_web_session("rejected-ticket", 2000);
+        store.save("xunlei", &original).unwrap();
+        supervisor
+            .ready(&store, CloudProvider::Xunlei, Some("A".into()), None, Some(10000))
+            .unwrap();
+        let recoveries = AtomicUsize::new(0);
+        for _ in 0..2 {
+            let result: Result<(), _> = supervisor.run(
+                &store,
+                CloudProvider::Xunlei,
+                SessionWorkKind::Mutation,
+                |_| Err(CloudError::WebAuthorizationRequired),
+                |phase| {
+                    assert!(phase == RecoveryPhase::ProfileOnly);
+                    recoveries.fetch_add(1, Ordering::SeqCst);
+                    store.save("xunlei", &xunlei_web_session(ticket, expires_at))
+                },
+            );
+            assert!(matches!(result, Err(CloudError::WebAuthorizationRequired)));
+        }
+        assert_eq!(recoveries.load(Ordering::SeqCst), 1);
+        assert_eq!(store.load("xunlei").unwrap(), Some(original));
+        assert_eq!(
+            supervisor.record(&store, CloudProvider::Xunlei).unwrap().consecutive_failures,
+            1,
+        );
+    }
+}
+
+#[test]
+fn xunlei_new_verification_retries_reads_and_never_replays_mutations() {
+    for kind in [SessionWorkKind::Read, SessionWorkKind::Mutation] {
+        let (supervisor, _, store) = fixture(1000, 30);
+        store
+            .save("xunlei", &xunlei_web_session("rejected-ticket", 2000))
+            .unwrap();
+        supervisor
+            .ready(&store, CloudProvider::Xunlei, Some("A".into()), None, Some(10000))
+            .unwrap();
+        let calls = AtomicUsize::new(0);
+        let result = supervisor.run(
+            &store,
+            CloudProvider::Xunlei,
+            kind,
+            |_| {
+                if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(CloudError::WebAuthorizationRequired)
+                } else {
+                    Ok(())
+                }
+            },
+            |phase| {
+                assert!(phase == RecoveryPhase::ProfileOnly);
+                store.save("xunlei", &xunlei_web_session("new-ticket", 3000))
+            },
+        );
+        if kind == SessionWorkKind::Read {
+            result.unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+        } else {
+            assert!(matches!(result, Err(CloudError::SessionRenewedRetryOperation)));
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+    }
 }
 
 #[test]

@@ -1,4 +1,9 @@
 const messages = {
+  'cloud.verification.xunlei.shareProfileUnsupported': '当前迅雷网页版本的分享链接解析暂不受支持，请在迅雷官网打开此分享。[XL-SHARE-PROFILE]',
+  'cloud.verification.xunlei.metadataMissing': '缺少迅雷操作验证信息。[XL-LOCAL-MISSING]',
+  'cloud.verification.xunlei.metadataExpired': 'VD 保存的迅雷验证信息已超过本地复用时限。请重新网页授权后重试此操作。[XL-LOCAL-EXPIRED]',
+  'cloud.verification.xunlei.timestampInvalid': '迅雷验证信息的时间戳无效或超前于系统时间，当前请求未发送。请检查系统时间。[XL-LOCAL-TIME]',
+  'cloud.verification.xunlei.unavailable': 'VD 无法准备本次迅雷操作所需的验证信息，请暂用官网完成操作。[XL-LOCAL]',
   'startup.credentialsUnavailable': '系统凭据存储暂不可用。普通下载仍可使用，网盘账号与隐私任务保持保护。请解锁登录钥匙串后重新启动 VersaDown。',
   'app.title': '万能下载 VersaDown',
   'app.brand': '万能下载',
@@ -523,6 +528,7 @@ const messages = {
   'cloud.share.passCodeGeneratedByProvider': '提取码由天翼云盘自动生成',
   'cloud.share.autoGenerate': '自动生成',
   'cloud.share.fixedCodeHint': '提取码必须为 {count} 位字母或数字',
+  'cloud.share.generatedOptions': '提取码由网盘自动生成，可设置有效期。',
   'cloud.share.requiredOptions': '必须设置提取码，可随机生成或自行填写，{hint}',
   'cloud.share.requiredPassCode': '提取码（必填）',
   'cloud.share.linkWithPassCode': '{url}\n提取码：{passCode}',

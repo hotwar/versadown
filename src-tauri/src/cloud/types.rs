@@ -348,6 +348,8 @@ pub enum CloudError {
     SessionRenewedRetryOperation,
     #[error("此登录方式需要网页验证，请点击网页授权完成登录")]
     WebAuthorizationRequired,
+    #[error("{0}")]
+    XunleiVerificationUnavailable(&'static str),
     #[error("网盘要求完成官方操作验证后重试")]
     CaptchaRequired,
     #[error("PikPak {0}需要官方操作验证，并非登录失效；请完成验证后返回重试")]
@@ -391,6 +393,7 @@ impl Serialize for CloudError {
             Self::AuthorizationExpired => "credentials_expired",
             Self::SessionRenewedRetryOperation => "session_renewed_retry_operation",
             Self::WebAuthorizationRequired => "web_auth_required",
+            Self::XunleiVerificationUnavailable(_) => "xunlei_verification_unavailable",
             Self::CaptchaRequired => "web_auth_required",
             Self::PikpakOperationVerificationRequired(_) => {
                 "pikpak_operation_verification_required"

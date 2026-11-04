@@ -65,15 +65,16 @@ mod tests {
     impl CloudHttpTransport for Root {
         fn send(&self, r: CloudHttpRequest) -> Result<CloudHttpResponse, CloudError> {
             assert_eq!(r.method, "GET");
-            assert!(r
-                .url
-                .starts_with("https://api-pan.xunlei.com/drive/v1/files?"));
+            let shares = r.url.starts_with("https://api-pan.xunlei.com/drive/v1/share/list?");
+            assert!(shares || r.url.starts_with("https://api-pan.xunlei.com/drive/v1/files?"));
             assert_eq!(r.headers["Authorization"], "Bearer official-access");
             assert_eq!(r.headers["X-Captcha-Token"], "official-ticket");
             Ok(CloudHttpResponse {
                 status: if self.reject { 401 } else { 200 },
                 body: if self.reject {
                     r#"{"error":"unauthenticated"}"#
+                } else if shares {
+                    r#"{"data":[]}"#
                 } else {
                     r#"{"files":[]}"#
                 }
@@ -89,7 +90,9 @@ mod tests {
                 "schema":1,"user_id":"user","access_token":"official-access","expires_at":4_000_000_000u64,
                 "client_id":"Xqp0kJBXWhwaTpB6","device_id":"official-device","client_version":"future-version",
                 "package_name":"pan.xunlei.com","user_agent":"Official browser",
-                "web_security":{"captcha_token":"official-ticket","expires_at":4_000_000_000u64,"action":"GET:/drive/v1/files"}
+                "web_security":{"captcha_token":"official-ticket","expires_at":4_000_000_000u64,"action":"GET:/drive/v1/files",
+                    "captcha_sign":"synthetic-signature","timestamp":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis().to_string(),
+                    "client_version":"future-version","package_name":"pan.xunlei.com"}
             }),
             ..Default::default()
         }
@@ -107,6 +110,20 @@ mod tests {
                 .account()
                 .unwrap();
             assert_eq!(restored.auth_method, method);
+        }
+    }
+    #[test]
+    fn valid_root_ticket_completes_both_login_methods_without_signing_metadata() {
+        for method in [CloudAuthMethod::Web, CloudAuthMethod::Password] {
+            let store = MemoryCredentialStore::default();
+            let mut input = candidate(method);
+            input.storage["web_security"]["captcha_sign"] = "".into();
+            let http = Root { reject: false };
+
+            let account = complete(&input, &store, &http).unwrap();
+            assert_eq!(account.auth_method, method);
+            let mut driver = ProviderRegistry::global().driver(CloudProvider::Xunlei, &store, &http);
+            assert!(driver.list_shares().unwrap().is_empty());
         }
     }
     #[test]

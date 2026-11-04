@@ -77,6 +77,7 @@ pub enum RecoveryPhase {
     Proactive,
     AuthFailure,
     ProfileOnly,
+    OperationVerification,
 }
 impl From<bool> for RecoveryPhase {
     fn from(genuine: bool) -> Self {
@@ -436,6 +437,7 @@ impl AuthSupervisor {
             if !auth_error && !self.is_due(store, provider)? {
                 return Ok(());
             }
+            let previous_health = record.health;
             record.health = if auth_error {
                 AuthHealth::NeedsSilentRelogin
             } else {
@@ -460,7 +462,12 @@ impl AuthSupervisor {
                     self.publish_locked(store, &record, false)
                 }
                 Err(error) => {
-                    record.health = if matches!(error, CloudError::CaptchaRequired) {
+                    record.health = if matches!(
+                        error,
+                        CloudError::XunleiVerificationUnavailable("metadata_expired")
+                    ) {
+                        previous_health
+                    } else if matches!(error, CloudError::CaptchaRequired) {
                         AuthHealth::RiskBlocked
                     } else if record.consecutive_failures >= 3 {
                         AuthHealth::NeedsInteractiveAuth
@@ -569,12 +576,62 @@ impl AuthSupervisor {
                     CloudError::AuthorizationExpired
                         | CloudError::NotAuthorized
                         | CloudError::WebAuthorizationRequired
-                ) =>
+                ) || (provider == CloudProvider::Xunlei
+                    && matches!(error, CloudError::XunleiVerificationUnavailable(
+                        "metadata_missing" | "metadata_expired" | "timestamp_invalid"
+                    ))) =>
             {
                 if snapshot.initial.is_none() || store.load(provider.key())?.is_none() {
                     return Err(error);
                 }
-                if let Some(ticket) = continuation.take() {
+                let mut recover = |phase| {
+                    if provider != CloudProvider::Xunlei
+                        || !matches!(error, CloudError::WebAuthorizationRequired)
+                    {
+                        return recover(phase);
+                    }
+                    let previous_bytes = store.load(provider.key())?.ok_or(CloudError::Storage)?;
+                    let previous: xunlei::XunleiSession = serde_json::from_slice(&previous_bytes)
+                        .map_err(|_| CloudError::Storage)?;
+                    if !previous.profile.is_modern_web() {
+                        return recover(phase);
+                    }
+                    // A successful Bearer refresh does not replace a rejected
+                    // web verification ticket. Require the browser recovery to
+                    // supply a different usable ticket before reporting renewal.
+                    recover(RecoveryPhase::ProfileOnly)?;
+                    let current: xunlei::XunleiSession = serde_json::from_slice(
+                        &store.load(provider.key())?.ok_or(CloudError::Storage)?,
+                    )
+                    .map_err(|_| CloudError::Storage)?;
+                    if current.web_security.captcha_token.is_empty()
+                        || current.web_security.captcha_token == previous.web_security.captcha_token
+                        || current.web_security.expires_at <= (self.clock)().max(0) as u64 + 30
+                    {
+                        store.save(provider.key(), &previous_bytes)?;
+                        return Err(CloudError::WebAuthorizationRequired);
+                    }
+                    Ok(())
+                };
+                if matches!(error, CloudError::XunleiVerificationUnavailable("metadata_expired")) {
+                    let recovery = self.maintain(store, provider, Some(revision), true, || {
+                        check()?;
+                        recover(RecoveryPhase::OperationVerification).map_err(|failure| {
+                            match failure {
+                                CloudError::WebAuthorizationRequired | CloudError::AuthorizationPending =>
+                                    CloudError::XunleiVerificationUnavailable("metadata_expired"),
+                                other => other,
+                            }
+                        })
+                    });
+                    if let Err(recovery_error) = recovery {
+                        check()?;
+                        return Err(match recovery_error {
+                            CloudError::WebAuthorizationRequired | CloudError::AuthorizationPending => error,
+                            other => other,
+                        });
+                    }
+                } else if let Some(ticket) = continuation.take() {
                     self.with_provider(provider, || {
                         let mut record = self.record(store, provider)?;
                         let current = self.snapshot(store, provider)?;
@@ -622,6 +679,11 @@ impl AuthSupervisor {
                     return Err(CloudError::NotAuthorized);
                 }
                 if kind == SessionWorkKind::Mutation {
+                    if cfg!(debug_assertions) && provider == CloudProvider::Xunlei
+                        && std::env::var("VERSADOWN_XUNLEI_DIAGNOSTICS").as_deref() == Ok("1")
+                    {
+                        eprintln!("[xunlei-recovery] session_changed={}", next.initial != snapshot.load(provider.key())?);
+                    }
                     return Err(CloudError::SessionRenewedRetryOperation);
                 }
                 let revision = next.revision;
@@ -718,7 +780,7 @@ pub fn recover_in_order(
                 | CloudError::WebAuthorizationRequired
         )
     }
-    if phase != RecoveryPhase::ProfileOnly {
+    if !matches!(phase, RecoveryPhase::ProfileOnly | RecoveryPhase::OperationVerification) {
         match auth.refresh_session() {
             Ok(true) => return Ok(()),
             Ok(false) => {}

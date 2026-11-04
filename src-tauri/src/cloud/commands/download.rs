@@ -985,6 +985,7 @@ pub(crate) fn directory_download_failure_fields(
     error: &QuarkError,
 ) -> (&'static str, &'static str) {
     match error {
+        QuarkError::XunleiVerificationUnavailable(reason) => ("xunlei_verification_unavailable", reason),
         QuarkError::AuthorizationExpired | QuarkError::NotAuthorized => {
             ("credentials_expired", "网盘会话已过期")
         }

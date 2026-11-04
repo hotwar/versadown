@@ -2,6 +2,7 @@ import { AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCo
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { version as appVersion } from '../../src-tauri/tauri.conf.json';
 import type { ThemeId } from './theme';
+import { t } from '../i18n';
 
 function fileNameFrom(value: string) {
   if (/^ed2k:\/\/\|file\|/i.test(value)) {
@@ -89,7 +90,13 @@ function duplicateResult(result: NativeTaskOutcome): TaskActionResult {
 
 export async function parseDownload(input: string, accessCode?: string, requireConfirmation = false): Promise<ParseDownloadResult> {
   if (!isTauriRuntime()) return parseLocally(input);
-  const result = await invoke<NativeParseOutcome>('parse_download', { input, accessCode, ...(requireConfirmation ? { requireConfirmation } : {}) });
+  const result = await invoke<NativeParseOutcome>('parse_download', { input, accessCode, ...(requireConfirmation ? { requireConfirmation } : {}) })
+    .catch((error: unknown) => {
+      if (error === 'xunlei_share_profile_unsupported') {
+        throw new Error(t('cloud.verification.xunlei.shareProfileUnsupported'));
+      }
+      throw error;
+    });
   if (result.kind === 'share_confirmation') {
     return {
       confirmation: {
