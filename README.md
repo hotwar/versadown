@@ -21,6 +21,34 @@
 
 ## 开发环境
 
+### macOS（Apple Silicon / Intel）
+
+需要 macOS 12+、Xcode Command Line Tools、Node 24+、pnpm 10 与 Rust stable。
+两种架构的 aria2-next 3.0.9 引擎随包提供，构建前检查官方 SHA-256；应用使用系统 WKWebView。
+
+```bash
+pnpm install --frozen-lockfile
+pnpm run build:macos:quick       # 增量调试二进制
+pnpm run build:macos:installer   # 调试 .app / .dmg，供本地验证
+pnpm run build:macos:release     # 正式 Release 编译与打包
+```
+
+安装产物和校验文件在 `artifacts/macos-arm64/` 或 `artifacts/macos-x86_64/`。
+将 DMG 中的 `VersaDown.app` 拖入 Applications；默认下载目录为用户的 Downloads。
+关闭主窗口后下载继续，点击 Dock 图标可重开；菜单栏菜单或 ⌘Q 退出时保存引擎会话。
+系统钥匙串不可用时会显示提示，普通下载仍可用，凭据操作报错且隐私任务保持锁定。
+没有 Developer ID 凭据时只做本地 ad-hoc 签名，产物不代表已通过 Apple 公证。
+
+包级黑盒检查（启动、真实下载校验、凭据不可用和子进程回收）：
+
+```bash
+python3 scripts/smoke-macos.py src-tauri/target/release/bundle/macos/VersaDown.app
+cargo test --manifest-path src-tauri/Cargo.toml --features native-smoke --test macos_native_smoke
+```
+
+`Desktop checks` 工作流在 PR 中检查 Windows、Linux、Apple Silicon 与 Intel Mac。
+推送与应用版本一致的 `v*` 标签后，`Desktop release` 在各平台构建，全部成功后发布同一个 GitHub Release。
+
 ### Linux x86_64 调试二进制
 
 安装 Node 24+、Rust stable、GTK/WebKitGTK 开发依赖后，执行以下命令生成嵌入静态前端资源的本机调试二进制。不要直接执行不含 `custom-protocol` 功能的 `cargo build` 产物，它会尝试连接 Vite 开发服务器的 `localhost:1420`。
@@ -42,7 +70,7 @@ pnpm install --frozen-lockfile
 pnpm run build:linux:release
 ```
 
-脚本使用 Tauri 生成 `.deb`、`.rpm` 和 `.AppImage`，只打包 Linux 版 aria2-next，并把安装包及 `SHA256SUMS` 放在 `artifacts/linux/`。该命令是完整 Release 编译，不是日常调试入口。GitHub Actions 的 `Linux release` 工作流可手动运行并下载产物；推送 `v*` 标签后，它会把同样的产物添加到**草稿** GitHub Release，仍需人工检查后发布。
+脚本使用 Tauri 生成 `.deb`、`.rpm` 和 `.AppImage`，只打包 Linux 版 aria2-next，并把安装包及 `SHA256SUMS` 放在 `artifacts/linux/`。该命令是完整 Release 编译，不是日常调试入口。GitHub Actions 的 `Desktop release` 工作流可手动运行并下载产物；推送与应用版本一致的 `v*` 标签后，各平台构建全部成功才会统一发布 GitHub Release。
 
 ### Windows
 

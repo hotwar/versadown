@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       source_run_id:
-        description: GitHub Actions run containing both platform artifacts
+        description: GitHub Actions run containing all desktop platform artifacts
         required: true
         type: string
 
@@ -51,7 +51,14 @@ jobs:
           path: artifacts/windows
           github-token: ${{ github.token }}
           run-id: ${{ inputs.source_run_id }}
-      - name: Verify and publish both platform assets
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: macos-*-release
+          path: artifacts/macos
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
+      - name: Verify and publish all desktop platform assets
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -68,7 +75,12 @@ jobs:
             sed -i 's/\r$//' SHA256SUMS.windows
             sha256sum --check SHA256SUMS.windows
           )
-          assets=(artifacts/linux/*.deb artifacts/linux/*.rpm artifacts/linux/*.AppImage artifacts/linux/SHA256SUMS artifacts/windows/*.exe artifacts/windows/SHA256SUMS.windows)
+          (
+            cd artifacts/macos
+            sha256sum --check SHA256SUMS.macos-arm64
+            sha256sum --check SHA256SUMS.macos-x86_64
+          )
+          assets=(artifacts/macos/*.dmg artifacts/macos/*.app.zip artifacts/macos/SHA256SUMS.macos-* artifacts/linux/*.deb artifacts/linux/*.rpm artifacts/linux/*.AppImage artifacts/linux/SHA256SUMS artifacts/windows/*.exe artifacts/windows/SHA256SUMS.windows)
           for asset in "${assets[@]}"; do
             test -f "$asset"
           done
