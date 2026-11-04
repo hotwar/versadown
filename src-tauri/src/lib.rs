@@ -17,6 +17,8 @@ mod ftp;
 mod launcher;
 mod launcher_drag;
 mod launcher_input;
+#[cfg(any(test, target_os = "macos"))]
+mod launcher_poll;
 mod launcher_window;
 mod link_association;
 mod local_upload_picker;
