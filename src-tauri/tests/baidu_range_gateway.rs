@@ -1,5 +1,6 @@
 use versadown_lib::aria2::{Aria2Api, Aria2LaunchConfig, Aria2Process};
 use versadown_lib::cloud::baidu_range_gateway::BaiduRangeGateway;
+#[cfg(windows)]
 use versadown_lib::cloud::{
     baidu::{BaiduClient, BaiduDownload, BaiduSession},
     CredentialStore, ReqwestTransport, SystemCredentialStore,
@@ -15,7 +16,9 @@ use axum::{
     routing::get,
     Router,
 };
+#[cfg(windows)]
 use sha2::{Digest, Sha256};
+#[cfg(windows)]
 use std::collections::VecDeque;
 use std::sync::{
     atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -25,6 +28,176 @@ use std::{path::PathBuf, time::Duration};
 use uuid::Uuid;
 
 const CHUNK: usize = 4 * 1024 * 1024;
+
+fn bundled_engine_path() -> PathBuf {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    versadown_lib::engine_binary::EngineBinary::for_current_target()
+        .unwrap()
+        .resolve(&manifest, &manifest)
+        .unwrap()
+}
+
+async fn pause_and_wait(client: &impl Aria2Api, gid: &str) -> versadown_lib::aria2::Aria2Status {
+    client.pause(gid).await.unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let status = client.tell_status(gid).await.unwrap();
+        if status.status == "paused" {
+            return status;
+        }
+        assert_eq!(status.status, "active", "unexpected pause state");
+        assert!(tokio::time::Instant::now() < deadline, "pause did not settle");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+// The bundled engine declares a connected peer stalled after eight seconds.
+// A healthy 320 KiB/s origin takes over twelve seconds to fill a 4 MiB range.
+async fn serve_slow_origin(State(origin): State<Origin>, headers: HeaderMap) -> Response {
+    let range = headers[header::RANGE]
+        .to_str()
+        .unwrap()
+        .strip_prefix("bytes=")
+        .unwrap()
+        .split_once('-')
+        .unwrap();
+    let start = range.0.parse::<usize>().unwrap();
+    let end = range
+        .1
+        .parse::<usize>()
+        .unwrap()
+        .min(origin.payload.len() - 1);
+    assert!(end - start < CHUNK);
+    origin.ranges.lock().unwrap().push((start, end));
+    let total = origin.payload.len();
+    let chunks = futures_util::stream::unfold(
+        (origin.payload, start),
+        move |(payload, offset)| async move {
+            if offset > end {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let next = (offset + 32 * 1024).min(end + 1);
+            Some((
+                Ok::<_, std::io::Error>(Bytes::copy_from_slice(&payload[offset..next])),
+                (payload, next),
+            ))
+        },
+    );
+    Response::builder()
+        .status(StatusCode::PARTIAL_CONTENT)
+        .header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{total}"),
+        )
+        .header(header::CONTENT_LENGTH, end - start + 1)
+        .body(Body::from_stream(chunks))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn bundled_engine_downloads_slow_continuous_ranges_without_false_stalls() {
+    let payload = Arc::new(
+        (0..2 * CHUNK + 37)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<_>>(),
+    );
+    let origin = Origin {
+        payload: Arc::clone(&payload),
+        ranges: Arc::new(Mutex::new(Vec::new())),
+        delay: Duration::ZERO,
+    };
+    let ranges = Arc::clone(&origin.ranges);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = format!("http://{}/slow", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/slow", get(serve_slow_origin))
+                .with_state(origin),
+        )
+        .await
+        .unwrap();
+    });
+    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = store.create(NewTask::direct(&upstream)).unwrap();
+    let registration = gateway.register(task.id, upstream, vec![], None).unwrap();
+    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut aria2 = versadown_lib::Aria2Settings::default();
+    aria2.rpc_port = reserved.local_addr().unwrap().port();
+    aria2.rpc_token = format!("slow-range-{}", aria2.rpc_port);
+    drop(reserved);
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let binary = versadown_lib::engine_binary::EngineBinary::for_current_target()
+        .unwrap()
+        .resolve(&manifest, &manifest)
+        .unwrap();
+    let output = root.path().join("downloads");
+    let (mut process, client) = Aria2Process::start(Aria2LaunchConfig {
+        binary,
+        data_dir: root.path().join("engine"),
+        download_dir: output.clone(),
+        parent_pid: std::process::id(),
+        peer_discovery: false,
+        aria2,
+    })
+    .await
+    .unwrap();
+    let service = DownloadService::new(Arc::new(client.clone()), store);
+    let submitted = service
+        .submit_uri_with_options(
+            task.id,
+            vec![registration.url().into()],
+            UriSubmissionOptions {
+                directory: Some(output.clone()),
+                output_name: Some("slow.bin".into()),
+                max_connections_per_server: Some(1),
+                max_tries: Some(1),
+                direct_loopback: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let started = tokio::time::Instant::now();
+    let mut observed_progress = false;
+    let result = loop {
+        let status = client
+            .tell_status(submitted.aria_gid.as_deref().unwrap())
+            .await
+            .unwrap();
+        observed_progress |= status.completed_length.parse::<u64>().unwrap_or_default() > 0;
+        if status.status == "error" {
+            break Err(format!(
+                "{:?}: {:?}",
+                status.error_code, status.error_message
+            ));
+        }
+        if status.status == "complete" {
+            break Ok(());
+        }
+        if started.elapsed() > Duration::from_secs(45) {
+            break Err("slow transfer exceeded deadline".into());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    process.terminate_fallback().unwrap();
+    server.abort();
+    assert!(
+        result.is_ok(),
+        "healthy continuous source failed: {result:?}"
+    );
+    assert!(observed_progress);
+    assert_eq!(std::fs::read(output.join("slow.bin")).unwrap(), *payload);
+    assert!(ranges
+        .lock()
+        .unwrap()
+        .iter()
+        .all(|(start, end)| end - start < CHUNK));
+}
 
 #[derive(Clone)]
 struct Origin {
@@ -124,6 +297,65 @@ async fn origin_returns_short_body() -> Response {
         .header(header::CONTENT_RANGE, "bytes 0-3/8")
         .body(Body::from("abc"))
         .unwrap()
+}
+
+fn chunked_range_with_wrong_length(expected: usize, error_at_eof: bool) -> Response {
+    let chunks = futures_util::stream::unfold(0, move |index| async move {
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        match index {
+            0 => Some((Ok::<_, std::io::Error>(Bytes::from_static(b"abc")), 1)),
+            1 => Some((Ok(Bytes::from_static(b"def")), 2)),
+            2 if error_at_eof => Some((Err(std::io::Error::other("truncated origin")), 3)),
+            _ => None,
+        }
+    });
+    Response::builder()
+        .status(StatusCode::PARTIAL_CONTENT)
+        .header(header::CONTENT_RANGE, format!("bytes 0-{}/8", expected - 1))
+        .body(Body::from_stream(chunks))
+        .unwrap()
+}
+
+#[tokio::test]
+async fn invalid_chunked_body_never_completes_the_advertised_range() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route(
+                    "/truncated",
+                    get(|| async { chunked_range_with_wrong_length(8, false) }),
+                )
+                .route(
+                    "/overlong",
+                    get(|| async { chunked_range_with_wrong_length(5, false) }),
+                )
+                .route(
+                    "/broken-eof",
+                    get(|| async { chunked_range_with_wrong_length(6, true) }),
+                ),
+        )
+        .await
+        .unwrap();
+    });
+    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    for path in ["truncated", "overlong", "broken-eof"] {
+        let registration = gateway
+            .register(Uuid::new_v4(), format!("{upstream}/{path}"), vec![], None)
+            .unwrap();
+        let response = client
+            .get(registration.url())
+            .header(header::RANGE, "bytes=0-7")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT, "{path}");
+        assert!(response.bytes().await.is_err(), "{path} must not complete");
+    }
+    server.abort();
 }
 
 async fn origin_returns_valid_short_ranges(
@@ -391,7 +623,6 @@ async fn large_local_range_is_fetched_in_exact_four_mib_baidu_ranges() {
     server.abort();
 }
 
-#[cfg(windows)]
 #[tokio::test]
 async fn bundled_engine_completes_large_baidu_file_through_bounded_gateway() {
     let origin = Origin {
@@ -434,8 +665,7 @@ async fn bundled_engine_completes_large_baidu_file_through_bounded_gateway() {
     drop(reserved);
     let download_dir = root.path().join("downloads");
     let config = Aria2LaunchConfig {
-        binary: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
+        binary: bundled_engine_path(),
         data_dir: root.path().join("engine"),
         download_dir: download_dir.clone(),
         parent_pid: std::process::id(),
@@ -493,19 +723,16 @@ async fn bundled_engine_completes_large_baidu_file_through_bounded_gateway() {
     server.abort();
 }
 
-#[cfg(windows)]
 #[tokio::test]
 async fn bundled_engine_resumes_after_pausing_with_a_rebound_gateway_token() {
     exercise_paused_gateway_resume(true).await;
 }
 
-#[cfg(windows)]
 #[tokio::test]
 async fn bundled_engine_resumes_after_pausing_when_the_old_gateway_token_is_gone() {
     exercise_paused_gateway_resume(false).await;
 }
 
-#[cfg(windows)]
 async fn exercise_paused_gateway_resume(rebind_existing_token: bool) {
     let origin = Origin {
         payload: Arc::new(
@@ -558,8 +785,7 @@ async fn exercise_paused_gateway_resume(rebind_existing_token: bool) {
     drop(reserved);
     let download_dir = root.path().join("downloads");
     let config = Aria2LaunchConfig {
-        binary: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
+        binary: bundled_engine_path(),
         data_dir: root.path().to_path_buf(),
         download_dir: download_dir.clone(),
         parent_pid: std::process::id(),
@@ -601,7 +827,7 @@ async fn exercise_paused_gateway_resume(rebind_existing_token: bool) {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    client.pause(&gid).await.unwrap();
+    pause_and_wait(&client, &gid).await;
     let paused = service.reconcile_task(task.id).await.unwrap();
     assert_eq!(paused.status, TaskStatus::Paused);
     let checkpoint =
@@ -688,7 +914,6 @@ async fn exercise_paused_gateway_resume(rebind_existing_token: bool) {
     server.abort();
 }
 
-#[cfg(windows)]
 #[tokio::test]
 async fn bundled_engine_restores_a_native_checkpoint_through_fresh_gateway_with_dead_old_mirror() {
     let origin = Origin {
@@ -715,7 +940,14 @@ async fn bundled_engine_restores_a_native_checkpoint_through_fresh_gateway_with_
     });
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(TaskStore::open_path(&root.path().join("tasks.sqlite")).unwrap());
-    let task = store.create(NewTask::direct(&upstream)).unwrap();
+    let task = store
+        .create(NewTask {
+            source: "cloud://baidu/restarted-gateway".into(),
+            name: "checkpoint.bin".into(),
+            kind: "cloud".into(),
+            is_private: false,
+        })
+        .unwrap();
     let gateway = BaiduRangeGateway::start().await.unwrap();
     let mut original = gateway
         .register(task.id, upstream.clone(), vec![], None)
@@ -727,8 +959,7 @@ async fn bundled_engine_restores_a_native_checkpoint_through_fresh_gateway_with_
     drop(reserved);
     let download_dir = root.path().join("downloads");
     let config = Aria2LaunchConfig {
-        binary: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
+        binary: bundled_engine_path(),
         data_dir: root.path().to_path_buf(),
         download_dir: download_dir.clone(),
         parent_pid: std::process::id(),
@@ -766,8 +997,7 @@ async fn bundled_engine_restores_a_native_checkpoint_through_fresh_gateway_with_
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    client.pause(&gid).await.unwrap();
-    let paused = client.tell_status(&gid).await.unwrap();
+    let paused = pause_and_wait(&client, &gid).await;
     assert_eq!(paused.status, "paused");
     let completed = paused.completed_length.parse::<u64>().unwrap();
     let total = origin.payload.len() as u64;
@@ -807,22 +1037,35 @@ async fn bundled_engine_restores_a_native_checkpoint_through_fresh_gateway_with_
     let mut replacement = gateway.register(task.id, upstream, vec![], None).unwrap();
     let (mut process, client) = Aria2Process::start(config).await.unwrap();
     let service = DownloadService::new(Arc::new(client.clone()), Arc::clone(&store));
+    // Restart imports the old GID in paused state. Production cloud dispatch
+    // refreshes that existing task; adding a new GID would contend for its file.
+    let dispatch = versadown_lib::cloud::download_dispatch::CloudDownloadDispatch::default();
+    dispatch
+        .prepare_expected_with_retry_intent(&store, &store.find(task.id).unwrap(), false, true)
+        .await
+        .unwrap();
+    let options = dispatch.retry_submission_options(
+        task.id,
+        UriSubmissionOptions {
+            directory: Some(download_dir.clone()),
+            output_name: Some("checkpoint.bin".into()),
+            continue_download: true,
+            direct_loopback: true,
+            ..Default::default()
+        },
+    );
     let resumed = service
-        .resubmit_uri_with_options(
+        .replace_cloud_uri_with_options(
             task.id,
+            &gid,
             vec![replacement.url().into()],
-            UriSubmissionOptions {
-                directory: Some(download_dir.clone()),
-                output_name: Some("checkpoint.bin".into()),
-                continue_download: true,
-                direct_loopback: true,
-                ..Default::default()
-            },
+            options,
         )
         .await
         .unwrap();
     replacement.commit();
     let resumed_gid = resumed.aria_gid.unwrap();
+    assert_eq!(resumed_gid, gid, "restored task must retain file ownership");
     loop {
         let status = client.tell_status(&resumed_gid).await.unwrap();
         assert_ne!(
@@ -844,7 +1087,6 @@ async fn bundled_engine_restores_a_native_checkpoint_through_fresh_gateway_with_
     server.abort();
 }
 
-#[cfg(windows)]
 #[tokio::test]
 async fn failed_old_gateway_gid_refreshes_without_losing_the_partial_file() {
     let origin = Origin {
@@ -890,8 +1132,7 @@ async fn failed_old_gateway_gid_refreshes_without_losing_the_partial_file() {
     drop(reserved);
     let download_dir = root.path().join("downloads");
     let config = Aria2LaunchConfig {
-        binary: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
+        binary: bundled_engine_path(),
         data_dir: root.path().to_path_buf(),
         download_dir: download_dir.clone(),
         parent_pid: std::process::id(),
@@ -929,7 +1170,7 @@ async fn failed_old_gateway_gid_refreshes_without_losing_the_partial_file() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    client.pause(&old_gid).await.unwrap();
+    pause_and_wait(&client, &old_gid).await;
     let paused = service.reconcile_task(task.id).await.unwrap();
     assert!(paused.completed_length > 0);
     gateway.remove_token(original.token());
@@ -1262,8 +1503,7 @@ async fn live_baidu_file_completes_through_bundled_engine_and_gateway() {
     drop(reserved);
     let download_dir = root.path().join("downloads");
     let config = Aria2LaunchConfig {
-        binary: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
+        binary: bundled_engine_path(),
         data_dir: root.path().join("engine"),
         download_dir: download_dir.clone(),
         parent_pid: std::process::id(),

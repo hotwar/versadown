@@ -14,6 +14,35 @@ use std::{
     sync::Mutex,
 };
 
+#[test]
+fn baidu_and_quark_wait_for_web_login_without_persisting_an_empty_session() {
+    use versadown_lib::cloud::{driver::WebAuthorizationInput, CloudAuthMethod, ProviderRegistry};
+    struct NoNetwork;
+    impl CloudHttpTransport for NoNetwork {
+        fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            panic!("login cookies must exist before validating a web session")
+        }
+    }
+    for provider in [CloudProvider::Baidu, CloudProvider::Quark] {
+        let store = MemoryCredentialStore::default();
+        let input = WebAuthorizationInput {
+            cookies: Vec::new(),
+            storage: serde_json::Value::Null,
+            browser_context: None,
+            auth_method: CloudAuthMethod::Web,
+        };
+        let result = ProviderRegistry::global()
+            .driver(provider, &store, &NoNetwork)
+            .auth()
+            .complete_web(&input);
+        assert!(
+            matches!(result, Err(QuarkError::AuthorizationPending)),
+            "{provider:?}: {result:?}"
+        );
+        assert!(store.load(provider.key()).unwrap().is_none());
+    }
+}
+
 // Breaks caught: a provider missing its download safety ceiling, an incorrect
 // ceiling, an accidental zero ceiling, or a camelCase DTO regression.
 #[test]
