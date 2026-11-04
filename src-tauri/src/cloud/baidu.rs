@@ -10,6 +10,7 @@ use base64::{
 };
 use rsa::{pkcs8::DecodePublicKey, Pkcs1v15Encrypt, RsaPublicKey};
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 use serde_json::{json, Value};
 use sha1::{Digest, Sha1};
 use std::{
@@ -89,6 +90,91 @@ mod tests {
         assert!(requests[2].url.contains("/share/taskquery?"));
         assert!(requests[2].headers["Cookie"].contains("BDCLND=verified-cookie"));
         assert_eq!(requests.len(), 4);
+    }
+
+    thread_local! {
+        static SLEPT_MS: std::cell::Cell<u128> = const { std::cell::Cell::new(0) };
+    }
+    fn record_sleep(delay: std::time::Duration) {
+        SLEPT_MS.with(|total| total.set(total.get() + delay.as_millis()));
+    }
+    fn slept_ms() -> u128 {
+        SLEPT_MS.with(std::cell::Cell::get)
+    }
+    fn transfer_context(shareid: u64) -> Value {
+        json!({"shorturl":"share123","shareid":shareid,"uk":33,"bdclnd":"verified-cookie"})
+    }
+    fn running_forever(task_id: u64) -> Http {
+        let mut replies = vec![
+            json!({"errno":0,"result":{"bdstoken":"token"}}),
+            json!({"errno":0,"task_id":task_id}),
+        ];
+        replies.extend((0..400).map(|_| json!({"errno":0,"status":"running","task_errno":0})));
+        Http::new(replies)
+    }
+
+    #[test]
+    fn share_transfer_poll_backs_off_to_two_seconds() {
+        assert_eq!(transfer_poll_delay(0).as_millis(), 250);
+        assert_eq!(transfer_poll_delay(1).as_millis(), 500);
+        assert_eq!(transfer_poll_delay(2).as_millis(), 1000);
+        assert_eq!(transfer_poll_delay(3).as_millis(), 2000);
+        assert_eq!(transfer_poll_delay(500).as_millis(), 2000);
+    }
+
+    #[test]
+    fn share_transfer_timeout_reports_unknown_result_not_invalid_share() {
+        let http = running_forever(8);
+        let error = BaiduClient::new(BaiduSession::cookie("BDUSS=timeout"), &http)
+            .with_poll_sleep(record_sleep)
+            .transfer_share_file(&transfer_context(7001), "11")
+            .unwrap_err();
+        assert!(matches!(error, QuarkError::BaiduTransferPending), "{error:?}");
+        assert!(!error.to_string().contains("无效"));
+        let total = slept_ms();
+        assert!((110_000..=120_000).contains(&total), "waited {total}ms");
+    }
+
+    #[test]
+    fn share_transfer_retry_resumes_the_timed_out_task_without_resubmitting() {
+        let first = running_forever(9);
+        let client = |http| BaiduClient::new(BaiduSession::cookie("BDUSS=resume"), http);
+        assert!(matches!(
+            client(&first)
+                .with_poll_sleep(record_sleep)
+                .transfer_share_file(&transfer_context(7002), "11"),
+            Err(QuarkError::BaiduTransferPending)
+        ));
+        let second = Http::new(vec![
+            json!({"errno":0,"result":{"bdstoken":"token"}}),
+            json!({"errno":0,"status":"success","task_errno":0,"list":[{"from_fs_id":11,"to_fs_id":99}]}),
+        ]);
+        let value = client(&second)
+            .transfer_share_file(&transfer_context(7002), "11")
+            .unwrap();
+        assert_eq!(value["extra"]["list"][0]["to_fs_id"], 99);
+        let requests = second.requests.lock().unwrap();
+        assert!(requests.iter().all(|r| !r.url.contains("/share/transfer?")));
+        assert!(requests[1].url.contains("taskid=9"));
+    }
+
+    #[test]
+    fn share_transfer_retry_resubmits_when_the_remembered_task_failed() {
+        let first = running_forever(10);
+        let client = |http| BaiduClient::new(BaiduSession::cookie("BDUSS=failed"), http);
+        let _ = client(&first)
+            .with_poll_sleep(record_sleep)
+            .transfer_share_file(&transfer_context(7003), "11");
+        let second = Http::new(vec![
+            json!({"errno":0,"result":{"bdstoken":"token"}}),
+            json!({"errno":0,"status":"failed","task_errno":2}),
+            json!({"errno":0,"extra":{"list":[{"from_fs_id":11,"to_fs_id":77}]}}),
+        ]);
+        let value = client(&second)
+            .transfer_share_file(&transfer_context(7003), "11")
+            .unwrap();
+        assert_eq!(value["extra"]["list"][0]["to_fs_id"], 77);
+        assert!(second.requests.lock().unwrap()[2].url.contains("/share/transfer?"));
     }
 
     #[test]
@@ -1455,9 +1541,16 @@ pub struct BaiduClient<'a, T: CloudHttpTransport + ?Sized> {
     session: BaiduSession,
     http: &'a T,
     use_transport_cookie_session: bool,
+    poll_sleep: fn(Duration),
 }
 
 impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
+    /// Replaces the wait between share-transfer polls (used by tests to run
+    /// the full backoff schedule without real delays).
+    pub fn with_poll_sleep(self, poll_sleep: fn(Duration)) -> Self {
+        Self { poll_sleep, ..self }
+    }
+
     pub fn new(mut session: BaiduSession, http: &'a T) -> Self {
         // WebView2 stores the current QR-login credential as BDUSS_BFESS,
         // while Baidu's native xpan file API still expects the legacy BDUSS
@@ -1468,6 +1561,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             session,
             http,
             use_transport_cookie_session: false,
+            poll_sleep: std::thread::sleep,
         }
     }
 
@@ -1477,6 +1571,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             session,
             http,
             use_transport_cookie_session: true,
+            poll_sleep: std::thread::sleep,
         }
     }
 
@@ -1782,27 +1877,20 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
 
     fn transfer_share_file(&self, context: &Value, file_id: &str) -> Result<Value, QuarkError> {
         let token = self.web_token()?;
-        let referer = format!("{PAN}/s/1{}", encoded(&required(context, "shorturl")?));
-        let bdclnd = context["bdclnd"].as_str().unwrap_or("");
-        let response = self.share_http(
-            "POST",
-            &format!(
-                "/share/transfer?{}&shareid={}&from={}&ondup=newcopy&async=1",
-                write_query(&token, ""),
-                numeric_field(context, "shareid")?,
-                numeric_field(context, "uk")?
-            ),
-            Some(form(&[
-                (
-                    "fsidlist",
-                    format!("[{}]", numeric_field(&json!({"id":file_id}), "id")?),
-                ),
-                ("path", "/".into()),
-            ])),
-            bdclnd,
-            Some(&referer),
-        )?;
-        let value = share_json(&response)?;
+        let key = self.transfer_memo_key(context, file_id)?;
+        if let Some(task_id) = remembered_transfer_task(&key) {
+            // A previous attempt timed out while the server may still be
+            // copying. Resume that task instead of creating a `name(1)` copy.
+            match self.poll_transfer_task(context, &token, &task_id)? {
+                TransferPoll::Done(value) => {
+                    forget_transfer_task(&key);
+                    return Ok(value);
+                }
+                TransferPoll::Pending => return Err(QuarkError::BaiduTransferPending),
+                TransferPoll::Failed => forget_transfer_task(&key),
+            }
+        }
+        let value = self.submit_share_transfer(context, &token, file_id)?;
         if value
             .pointer("/extra/list")
             .and_then(Value::as_array)
@@ -1817,16 +1905,76 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             .ok_or(QuarkError::InvalidResponse)?;
         // Valid asynchronous transfers may return only a task ID. Resolve the
         // exact resulting file ID before journalling it or requesting bytes.
-        for attempt in 0..60 {
-            if attempt > 0 {
-                std::thread::sleep(std::time::Duration::from_millis(250));
+        match self.poll_transfer_task(context, &token, &task_id)? {
+            TransferPoll::Done(value) => Ok(value),
+            TransferPoll::Failed => Err(QuarkError::Provider("百度分享无效或请求被拒绝".into())),
+            TransferPoll::Pending => {
+                remember_transfer_task(&key, &task_id);
+                Err(QuarkError::BaiduTransferPending)
             }
+        }
+    }
+
+    fn transfer_memo_key(&self, context: &Value, file_id: &str) -> Result<String, QuarkError> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.session.cookie.hash(&mut hasher);
+        Ok(format!(
+            "{:x}:{}:{}:{}",
+            hasher.finish(),
+            numeric_field(context, "shareid")?,
+            numeric_field(context, "uk")?,
+            file_id
+        ))
+    }
+
+    fn submit_share_transfer(
+        &self,
+        context: &Value,
+        token: &str,
+        file_id: &str,
+    ) -> Result<Value, QuarkError> {
+        let referer = format!("{PAN}/s/1{}", encoded(&required(context, "shorturl")?));
+        let bdclnd = context["bdclnd"].as_str().unwrap_or("");
+        let response = self.share_http(
+            "POST",
+            &format!(
+                "/share/transfer?{}&shareid={}&from={}&ondup=newcopy&async=1",
+                write_query(token, ""),
+                numeric_field(context, "shareid")?,
+                numeric_field(context, "uk")?
+            ),
+            Some(form(&[
+                (
+                    "fsidlist",
+                    format!("[{}]", numeric_field(&json!({"id":file_id}), "id")?),
+                ),
+                ("path", "/".into()),
+            ])),
+            bdclnd,
+            Some(&referer),
+        )?;
+        share_json(&response)
+    }
+
+    /// Polls with exponential backoff until the task finishes, fails
+    /// explicitly, or the total wait budget is spent (`Pending`).
+    fn poll_transfer_task(
+        &self,
+        context: &Value,
+        token: &str,
+        task_id: &str,
+    ) -> Result<TransferPoll, QuarkError> {
+        let referer = format!("{PAN}/s/1{}", encoded(&required(context, "shorturl")?));
+        let bdclnd = context["bdclnd"].as_str().unwrap_or("");
+        let mut waited = Duration::ZERO;
+        for attempt in 0.. {
             let response = self.share_http(
                 "GET",
                 &format!(
                     "/share/taskquery?{}&taskid={}&shareid={}&from={}",
-                    write_query(&token, ""),
-                    encoded(&task_id),
+                    write_query(token, ""),
+                    encoded(task_id),
                     numeric_field(context, "shareid")?,
                     numeric_field(context, "uk")?
                 ),
@@ -1834,21 +1982,17 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
                 bdclnd,
                 Some(&referer),
             )?;
-            let value = share_json(&response)?;
-            if value.get("task_errno").and_then(Value::as_i64).unwrap_or(0) != 0
-                || value["status"] == "failed"
-            {
-                return Err(QuarkError::Provider("百度分享无效或请求被拒绝".into()));
+            if let Some(outcome) = classify_transfer_task(&share_json(&response)?)? {
+                return Ok(outcome);
             }
-            if value["status"] == "success" {
-                let list = value
-                    .get("list")
-                    .and_then(Value::as_array)
-                    .ok_or(QuarkError::InvalidResponse)?;
-                return Ok(json!({"extra":{"list":list}}));
+            let delay = transfer_poll_delay(attempt);
+            if waited + delay > TRANSFER_POLL_BUDGET {
+                return Ok(TransferPoll::Pending);
             }
+            waited += delay;
+            (self.poll_sleep)(delay);
         }
-        Err(QuarkError::Provider("百度分享无效或请求被拒绝".into()))
+        Ok(TransferPoll::Pending)
     }
 
     pub fn list_shares(&self) -> Result<Vec<CloudShare>, QuarkError> {
@@ -3051,6 +3195,64 @@ impl<T: CloudHttpTransport + ?Sized> BaiduClient<'_, T> {
         })
     }
 }
+const TRANSFER_POLL_BUDGET: Duration = Duration::from_secs(120);
+const TRANSFER_POLL_INITIAL: Duration = Duration::from_millis(250);
+const TRANSFER_POLL_MAX: Duration = Duration::from_secs(2);
+
+enum TransferPoll {
+    Done(Value),
+    Failed,
+    Pending,
+}
+
+fn transfer_poll_delay(attempt: u32) -> Duration {
+    TRANSFER_POLL_INITIAL
+        .saturating_mul(1u32 << attempt.min(8))
+        .min(TRANSFER_POLL_MAX)
+}
+
+/// `Ok(None)` means the task is still in progress (including unknown
+/// statuses); explicit failure and success are reported separately.
+fn classify_transfer_task(value: &Value) -> Result<Option<TransferPoll>, QuarkError> {
+    if value.get("task_errno").and_then(Value::as_i64).unwrap_or(0) != 0
+        || value["status"] == "failed"
+    {
+        return Ok(Some(TransferPoll::Failed));
+    }
+    if value["status"] != "success" {
+        return Ok(None);
+    }
+    let list = value
+        .get("list")
+        .and_then(Value::as_array)
+        .ok_or(QuarkError::InvalidResponse)?;
+    Ok(Some(TransferPoll::Done(json!({"extra":{"list":list}}))))
+}
+
+type TransferTasks = std::collections::HashMap<String, String>;
+static TRANSFER_TASKS: std::sync::Mutex<Option<TransferTasks>> = std::sync::Mutex::new(None);
+
+fn with_transfer_tasks<R>(f: impl FnOnce(&mut TransferTasks) -> R) -> R {
+    let mut guard = TRANSFER_TASKS.lock().unwrap_or_else(|e| e.into_inner());
+    f(guard.get_or_insert_with(Default::default))
+}
+
+fn remembered_transfer_task(key: &str) -> Option<String> {
+    with_transfer_tasks(|tasks| tasks.get(key).cloned())
+}
+
+fn remember_transfer_task(key: &str, task_id: &str) {
+    with_transfer_tasks(|tasks| {
+        tasks.insert(key.to_owned(), task_id.to_owned());
+    });
+}
+
+fn forget_transfer_task(key: &str) {
+    with_transfer_tasks(|tasks| {
+        tasks.remove(key);
+    });
+}
+
 fn share_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
     if response.status == 401 {
         return Err(QuarkError::AuthorizationExpired);

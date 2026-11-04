@@ -400,6 +400,7 @@ const messages = {
   'cloud.operation.recoveredRetry': '已自动恢复登录，请重新执行本次操作：{name}',
   'cloud.operation.failed': '{name}失败：{detail}',
   'cloud.operation.listRefreshFailed': '{name}已执行，但列表刷新失败；请刷新列表确认结果。',
+  'cloud.error.baiduTransferPending': '百度转存仍在进行或结果未知，请先在网盘中查看，确认后再重试，以免产生重复副本。',
   'cloud.verification.baidu.required': '百度网盘需要安全验证。请打开官方回收站完成验证，然后返回应用重试永久删除。',
   'cloud.verification.baidu.open': '打开百度网盘官方回收站验证',
   'cloud.verification.baidu.opened': '请在百度网盘官方页面完成安全验证，返回后点击“我已完成验证”。不会自动永久删除文件。',

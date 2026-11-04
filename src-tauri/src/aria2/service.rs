@@ -581,6 +581,12 @@ impl DownloadService {
                 .map(str::to_owned);
         }
         self.reserve_uri_output(task, &mut options)?;
+        if restart_unwritten {
+            if let (Some(directory), Some(name)) = (&options.directory, &options.output_name) {
+                super::native_resume::remove_empty_unwritten_output(&directory.join(name))
+                    .map_err(|_| DownloadServiceError::InvalidNativeCheckpoint)?;
+            }
+        }
         let mut result = options.into_aria2_options()?;
         // Output paths are allocated by the application, rather than left to
         // aria2's implicit renaming. This keeps the durable task name and the

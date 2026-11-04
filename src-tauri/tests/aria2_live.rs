@@ -778,3 +778,57 @@ async fn bundled_aria2_restores_session_and_cancel_preserves_partial_files() {
     fixture.terminate_for_cleanup();
     println!("Aria2 Next 3.0.9: saved GID recovery, Range resume, SHA-256 and cancellation preserving partial files passed");
 }
+
+#[tokio::test]
+async fn bundled_aria2_restarts_an_unwritten_cloud_task_over_a_zero_byte_leftover() {
+    // Real aria2 refuses an existing file when continue=false and overwrite is
+    // disallowed, so a failed attempt's empty payload must not block the retry.
+    let mut fixture = LiveAria2Fixture::start().await;
+    // The unwritten-restart check inspects the native state beside the store,
+    // so it needs a file-backed database rather than an in-memory one.
+    let store_dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(TaskStore::open_path(&store_dir.path().join("tasks.db")).unwrap());
+    let service = DownloadService::new(Arc::new(fixture.client.clone()), Arc::clone(&store));
+    let task = store
+        .create(NewTask {
+            source: "cloud://baidu/file-id".into(),
+            name: "leftover.bin".into(),
+            kind: "cloud".into(),
+            is_private: false,
+        })
+        .unwrap();
+    let output = fixture.config.download_dir.join("leftover.bin");
+    std::fs::create_dir_all(&fixture.config.download_dir).unwrap();
+    std::fs::File::create(&output).unwrap();
+    assert!(store.reserve_output_path(task.id, &output).unwrap());
+
+    service
+        .submit_uri_with_options(
+            task.id,
+            vec![format!("{}/payload.bin", fixture.origin)],
+            UriSubmissionOptions {
+                directory: Some(fixture.config.download_dir.clone()),
+                output_name: Some("leftover.bin".into()),
+                native_resume_gid: Some("0123456789abcdef".into()),
+                continue_download: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            service.reconcile_task(task.id).await.unwrap();
+            let task = store.find(task.id).unwrap();
+            assert_ne!(task.status, TaskStatus::Failed, "{:?}", task.error);
+            if task.status == TaskStatus::Completed {
+                break;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+    })
+    .await
+    .expect("restarted task did not complete");
+    assert_eq!(std::fs::read(&output).unwrap(), *fixture.http.payload);
+    fixture.save_and_shutdown().await;
+}

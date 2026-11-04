@@ -305,7 +305,9 @@ async fn cloud_zero_byte_retry_submits_again_without_a_checkpoint() {
         assert_eq!(options["continue"], "false", "{state}");
         assert_eq!(options["allow-overwrite"], "false", "{state}");
         assert!(!options.contains_key("remove-control-file"), "{state}");
-        assert_eq!(payload.exists(), state == "empty-payload", "{state}");
+        // A zero-byte leftover would make real aria2 reject the submission
+        // (continue=false, allow-overwrite=false), so it is removed first.
+        assert!(!payload.exists(), "{state}");
     }
 }
 
