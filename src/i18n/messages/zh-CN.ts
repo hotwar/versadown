@@ -397,6 +397,7 @@ const messages = {
   'cloud.download.submitted': '已经提交下载任务',
   'cloud.upload.filesCompleted': '已上传 {count} 个文件',
   'cloud.operation.succeeded': '{name}成功',
+  'cloud.share.cancelPartial': '{succeeded} 个分享已取消，{failed} 个失败：{detail}。失败项仍保持选中，可直接重试。',
   'cloud.operation.recoveredRetry': '已自动恢复登录，请重新执行本次操作：{name}',
   'cloud.operation.failed': '{name}失败：{detail}',
   'cloud.operation.listRefreshFailed': '{name}已执行，但列表刷新失败；请刷新列表确认结果。',

@@ -654,6 +654,39 @@ it('refreshes my shares from the provider after cancelling a share', async () =>
   expect(listCloudShares).toHaveBeenCalledTimes(2);
 });
 
+it('reports partial share cancellation and keeps only the failed shares selected for retry', async () => {
+  const user = userEvent.setup();
+  const share = (id: string, name: string) => ({ id, url: `https://pan.example/s/${id}`, name, kind: 'folder' as const, sourceFileIds: [`f-${id}`] });
+  const outcome = { cancelled: ['s1', 's3'], failures: [{ id: 's2', code: 'provider_error', message: '迅雷取消分享请求失败，请稍后重试' }] };
+  const cancelCloudShares = vi.fn()
+    .mockResolvedValueOnce(outcome)
+    .mockResolvedValueOnce({ cancelled: ['s2'], failures: [] });
+  const listCloudShares = vi.fn()
+    .mockResolvedValueOnce([share('s1', '分享一'), share('s2', '分享二'), share('s3', '分享三')])
+    .mockResolvedValueOnce([share('s2', '分享二')])
+    .mockResolvedValueOnce([]);
+  const client = createCloudFake({ listCloudShares, cancelCloudShares });
+  render(<CloudManager provider="xunlei" client={client} initialAccount={{ id: 'x', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} />);
+
+  await user.dblClick(await screen.findByText('我的分享'));
+  await user.click(await screen.findByText('分享一'));
+  await user.keyboard('{Control>}');
+  await user.click(screen.getByText('分享二'));
+  await user.click(screen.getByText('分享三'));
+  await user.keyboard('{/Control}');
+  fireEvent.contextMenu(screen.getByText('分享二'));
+  await user.click(screen.getByRole('menuitem', { name: '取消分享' }));
+
+  await waitFor(() => expect(cancelCloudShares).toHaveBeenCalledWith('xunlei', ['s1', 's2', 's3']));
+  expect(await screen.findByText(/2 个分享已取消，1 个失败/)).toBeVisible();
+  expect(screen.queryByText('分享一')).not.toBeInTheDocument();
+  expect(screen.getByText('分享二')).toBeVisible();
+
+  fireEvent.contextMenu(screen.getByText('分享二'));
+  await user.click(screen.getByRole('menuitem', { name: '取消分享' }));
+  await waitFor(() => expect(cancelCloudShares).toHaveBeenLastCalledWith('xunlei', ['s2']));
+});
+
 it('keeps my-shares visually distinct from a same-named folder and read-only', async () => {
   const user = userEvent.setup();
   const client = createCloudFake({ listCloudDirectory: vi.fn().mockResolvedValue({

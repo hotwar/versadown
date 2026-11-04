@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import type { LocalUploadListing } from './localUpload';
 import type { CloudAccountCapacity, CloudAuthorizationStateEvent, CloudCapacityInvalidated, CloudUploadAction, CloudUploadProgress } from './cloudTypes';
 import type { DuplicateDownloadState, QueueTask, TaskActionResult } from './types';
-import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider, CloudShare, CloudShareOptions, CloudUploadOutcome } from './cloudTypes';
+import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider, CloudShare, CloudShareCancelOutcome, CloudShareOptions, CloudUploadOutcome } from './cloudTypes';
 
 export const getCloudProviderCatalog = () => invoke<ProviderDescriptor[]>('cloud_provider_catalog');
 
@@ -87,7 +87,7 @@ export const deleteCloudFiles = (provider: CloudProvider, fileIds: string[]) => 
 export const restoreCloudFiles = (provider: CloudProvider, fileIds: string[]) => invoke<void>('cloud_restore', { provider, fileIds });
 export const createCloudShare = (provider: CloudProvider, fileIds: string[], options: CloudShareOptions) => invoke<CloudShare>('cloud_create_share', { provider, fileIds, options });
 export const listCloudShares = (provider: CloudProvider) => invoke<CloudShare[]>('cloud_list_shares', { provider });
-export const cancelCloudShares = (provider: CloudProvider, shareIds: string[]) => invoke<void>('cloud_cancel_shares', { provider, shareIds });
+export const cancelCloudShares = (provider: CloudProvider, shareIds: string[]) => invoke<CloudShareCancelOutcome>('cloud_cancel_shares', { provider, shareIds });
 export const updateCloudSharePassCode = (provider: CloudProvider, shareId: string, passCode: string) => invoke<void>('cloud_update_share_pass_code', { provider, shareId, passCode });
 type NativeCloudDownload = QueueTask & { duplicate?: DuplicateDownloadState; queueTask?: QueueTask };
 type NativeCloudDirectoryDownload = {

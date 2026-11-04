@@ -755,6 +755,44 @@ mod tests {
     }
 
     #[test]
+    fn xunlei_cancel_shares_continues_past_failures_and_treats_missing_as_done() {
+        struct ScriptedHttp(std::sync::Mutex<Vec<String>>);
+        impl CloudHttpTransport for ScriptedHttp {
+            fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                if !request.url.ends_with("/drive/v1/share/delete") {
+                    return Ok(CloudHttpResponse {
+                        status: 200,
+                        body: json!({"captcha_token":"share-token","expires_in":300}).to_string(),
+                        ..Default::default()
+                    });
+                }
+                let body: Value = serde_json::from_str(request.body.as_deref().unwrap()).unwrap();
+                let id = body["share_id"].as_str().unwrap().to_owned();
+                self.0.lock().unwrap().push(id.clone());
+                let (status, text) = match id.as_str() {
+                    "gone" => (404, r#"{"error":"not_found"}"#),
+                    "broken" => (500, r#"{"error":"internal"}"#),
+                    _ => (200, "{}"),
+                };
+                Ok(CloudHttpResponse { status, body: text.into(), ..Default::default() })
+            }
+        }
+        let store = credentials();
+        let http = ScriptedHttp(std::sync::Mutex::new(Vec::new()));
+        let ids: Vec<String> = ["a", "broken", "gone", "b"].map(String::from).to_vec();
+        let outcome = ProviderRegistry::global()
+            .driver(CloudProvider::Xunlei, &store, &http)
+            .cancel_shares_detailed(&ids)
+            .unwrap();
+        assert_eq!(outcome.cancelled, ["a", "gone", "b"]);
+        assert_eq!(outcome.failures.len(), 1);
+        assert_eq!(outcome.failures[0].id, "broken");
+        assert_eq!(outcome.failures[0].code, "provider_error");
+        assert!(!outcome.failures[0].message.contains("500"));
+        assert_eq!(*http.0.lock().unwrap(), ids);
+    }
+
+    #[test]
     fn xunlei_cancels_shares_with_the_web_management_contract() {
         let store = credentials();
         let http = Http::new(vec![
@@ -1205,6 +1243,12 @@ impl XunleiShareSession<'_> {
             None,
         )
     }
+}
+fn share_already_gone(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    ["http 404", "not_found", "not_exist", "not exist"]
+        .iter()
+        .any(|marker| message.contains(marker))
 }
 fn xunlei_share_status(value: &Value) -> Result<(), QuarkError> {
     match value["share_status"].as_str() {
@@ -2853,18 +2897,49 @@ impl<'a, T: CloudHttpTransport> XunleiClient<'a, T> {
         Err(QuarkError::InvalidResponse)
     }
 
-    pub fn cancel_shares(&self, share_ids: &[String]) -> Result<(), QuarkError> {
+    /// Cancels shares one by one without aborting on an item failure. Ids the
+    /// provider no longer has count as cancelled (idempotent). A session-level
+    /// error stops the batch; the untouched ids are reported as failed.
+    pub fn cancel_shares(
+        &self,
+        share_ids: &[String],
+    ) -> Result<CloudShareCancelOutcome, QuarkError> {
         if share_ids.is_empty() {
             return Err(QuarkError::InvalidInput("请选择至少一个分享".into()));
         }
+        let mut outcome = CloudShareCancelOutcome::default();
+        let mut halted: Option<CloudShareCancelFailure> = None;
         for share_id in share_ids {
-            self.request(
-                "POST",
-                self.drive_url("/drive/v1/share/delete"),
-                Some(json!({"space": "", "share_id": share_id})),
-            )?;
+            if let Some(stop) = &halted {
+                outcome.failures.push(CloudShareCancelFailure { id: share_id.clone(), ..stop.clone() });
+                continue;
+            }
+            match self.cancel_one_share(share_id) {
+                Ok(()) => outcome.cancelled.push(share_id.clone()),
+                Err(error) => {
+                    let failure = CloudShareCancelFailure::from_error(share_id, &error);
+                    if error.is_session_level() {
+                        if outcome.cancelled.is_empty() {
+                            return Err(error);
+                        }
+                        halted = Some(failure.clone());
+                    }
+                    outcome.failures.push(failure);
+                }
+            }
         }
-        Ok(())
+        Ok(outcome)
+    }
+
+    fn cancel_one_share(&self, share_id: &str) -> Result<(), QuarkError> {
+        match self.request(
+            "POST",
+            self.drive_url("/drive/v1/share/delete"),
+            Some(json!({"space": "", "share_id": share_id})),
+        ) {
+            Err(QuarkError::Provider(message)) if share_already_gone(&message) => Ok(()),
+            result => result.map(|_| ()),
+        }
     }
 
     fn file(value: &Value, parent: &str) -> Result<CloudFile, QuarkError> {

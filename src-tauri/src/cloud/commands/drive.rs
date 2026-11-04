@@ -241,14 +241,14 @@ pub async fn cloud_cancel_shares(
     app: AppHandle,
     provider: CloudProvider,
     share_ids: Vec<String>,
-) -> Result<(), QuarkError> {
+) -> Result<CloudShareCancelOutcome, QuarkError> {
     if share_ids.is_empty() {
         return Err(QuarkError::InvalidInput("请选择至少一个分享".into()));
     }
     run_session_work(app, provider, SessionWorkKind::Mutation, move |s, h| {
         ProviderRegistry::global()
             .driver(provider, &s.store, h)
-            .cancel_shares(&share_ids)
+            .cancel_shares_detailed(&share_ids)
     })
     .await
 }

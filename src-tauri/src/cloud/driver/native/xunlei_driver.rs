@@ -179,6 +179,16 @@ impl ShareOps for XunleiDriver<'_> {
         with_xunlei_client(&self.store, &self.http, |client| client.list_shares())
     }
     fn cancel_shares(&mut self, share_ids: &[String]) -> Result<(), CloudError> {
+        let outcome = self.cancel_shares_detailed(share_ids)?;
+        match outcome.failures.first() {
+            None => Ok(()),
+            Some(failure) => Err(CloudError::Provider(failure.message.clone())),
+        }
+    }
+    fn cancel_shares_detailed(
+        &mut self,
+        share_ids: &[String],
+    ) -> Result<CloudShareCancelOutcome, CloudError> {
         with_xunlei_client(&self.store, &self.http, |client| {
             client.cancel_shares(share_ids)
         })
