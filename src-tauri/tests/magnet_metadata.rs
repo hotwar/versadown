@@ -1,4 +1,3 @@
-use versadown_lib::{resolve_magnet_metadata, resolve_magnet_torrent, MagnetMetadataSettings};
 use axum::{
     extract::Json,
     http::{header::USER_AGENT, HeaderMap, StatusCode},
@@ -11,8 +10,43 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc, Mutex,
 };
+use versadown_lib::{resolve_magnet_metadata, resolve_magnet_torrent, MagnetMetadataSettings};
 
 const MAGNET: &str = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+
+#[tokio::test]
+async fn keeps_the_preview_when_the_cached_torrent_is_missing_empty_or_oversized() {
+    for (status, length) in [
+        (StatusCode::NOT_FOUND, "0"),
+        (StatusCode::OK, "0"),
+        (StatusCode::OK, "16777217"),
+    ] {
+        let app = Router::new()
+            .route(
+                "/api/v1/metadata",
+                post(|| async {
+                    Json(json!({"name": "fixture", "download_url": "/download/fixture"}))
+                }),
+            )
+            .route(
+                "/download/fixture",
+                get(move || async move { (status, [("content-length", length)], "") }),
+            );
+        let base_url = serve(app).await;
+        let resolved = resolve_magnet_metadata(
+            &MagnetMetadataSettings {
+                enabled: true,
+                base_url,
+            },
+            MAGNET,
+        )
+        .await
+        .unwrap()
+        .expect("cache failures must preserve the preview");
+        assert_eq!(resolved.title.as_deref(), Some("fixture"));
+        assert_eq!(resolved.torrent, None);
+    }
+}
 
 async fn serve(app: Router) -> String {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

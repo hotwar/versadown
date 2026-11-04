@@ -52,6 +52,7 @@ export function LocalUploadPicker({ listEntries, onConfirm, onCancel }: LocalUpl
   const [error, setError] = useState('');
   const [visibleCount, setVisibleCount] = useState(200);
   const [sort, setSort] = useState<UploadSort | null>(null);
+  const [showHidden, setShowHidden] = useState(false);
   const request = useRef(0);
   const submitted = useRef(false);
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -61,7 +62,7 @@ export function LocalUploadPicker({ listEntries, onConfirm, onCancel }: LocalUpl
   const allRef = useRef<HTMLInputElement>(null);
   const selectionKeys = useMemo(() => new Set(selected.map(item => uploadPathKey(item.path))), [selected]);
   const normalized = useMemo(() => normalizeUploadSelection(selected), [selected]);
-  const entries = useMemo(() => sortUploadEntries(listing?.entries ?? [], sort), [listing?.entries, sort]);
+  const entries = useMemo(() => sortUploadEntries((listing?.entries ?? []).filter(entry => showHidden || !entry.name.startsWith('.')), sort), [listing?.entries, showHidden, sort]);
   const selectedHere = entries.filter(item => selectionKeys.has(uploadPathKey(item.path))).length;
 
   const load = useCallback(async (path?: string) => {
@@ -170,7 +171,7 @@ export function LocalUploadPicker({ listEntries, onConfirm, onCancel }: LocalUpl
         </>}
       </section>
     </div>
-    <footer><p>{translate('upload.itemsToUpload', { count: normalized.length })}</p><button type="button" onClick={onCancel}>{translate('dialog.cancel')}</button><button type="button" className="primary" disabled={!normalized.length || loading} onClick={() => {
+    <footer><p>{translate('upload.itemsToUpload', { count: normalized.length })}</p><label className="local-upload-hidden-toggle"><input type="checkbox" checked={showHidden} onChange={event => setShowHidden(event.target.checked)} />{translate('upload.showHidden')}</label><button type="button" onClick={onCancel}>{translate('dialog.cancel')}</button><button type="button" className="primary" disabled={!normalized.length || loading} onClick={() => {
       if (submitted.current || !normalized.length) return;
       submitted.current = true;
       onConfirm(normalized.map(item => item.path));

@@ -441,12 +441,32 @@ async function copyCloudShareLink(value: string) {
   await navigator.clipboard.writeText(value);
 }
 
+function cloudShareCopyUrl(url: string, passCode?: string): string {
+  if (!passCode) return url;
+  try {
+    const parsed = new URL(url);
+    // Baidu supports an access code in the URL itself. Other providers keep
+    // their returned URL; the code remains a separate field in the dialog.
+    if (parsed.hostname === 'pan.baidu.com') {
+      parsed.searchParams.set('pwd', passCode);
+      return parsed.toString();
+    }
+  } catch { /* Preserve the provider value if it is not an absolute URL. */ }
+  return url;
+}
+
+function sharePassCodeHint(constraint: SharePassCodeConstraint): string {
+  return constraint.characterSet === 'asciiAlphanumeric' && constraint.minLength === constraint.maxLength
+    ? t('cloud.share.fixedCodeHint', { count: constraint.minLength }) : constraint.hint;
+}
+
 function sharePassCodeError(passCode: string, constraint?: SharePassCodeConstraint): string | null {
   const value = passCode.trim();
-  if (!value || !constraint) return null;
+  if (!value) return constraint?.required ? sharePassCodeHint(constraint) : null;
+  if (!constraint) return null;
   const hasValidLength = value.length >= constraint.minLength && value.length <= constraint.maxLength;
   const hasValidCharacters = constraint.characterSet !== 'asciiAlphanumeric' || /^[A-Za-z0-9]+$/.test(value);
-  return hasValidLength && hasValidCharacters ? null : constraint.hint;
+  return hasValidLength && hasValidCharacters ? null : sharePassCodeHint(constraint);
 }
 
 function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstraint, onCreate, onCopy, onClose, onUpdatePassCode }: { provider: CloudProvider; items: readonly CloudFile[]; share: CloudShare | null; busy: boolean; sharePassCodeConstraint?: SharePassCodeConstraint; onCreate(options: CloudShareOptions): void; onCopy(value: string): void; onClose(): void; onUpdatePassCode?(passCode: string): Promise<void> }) {
@@ -454,7 +474,7 @@ function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstrain
   const dialogRef = useRef<HTMLElement>(null);
   const initialFocusRef = useRef<HTMLInputElement>(null);
   const [passCode, setPassCode] = useState('');
-  const [generatePassCode, setGeneratePassCode] = useState(false);
+  const [generatePassCode, setGeneratePassCode] = useState(Boolean(sharePassCodeConstraint?.required));
   const [expiresInDays, setExpiresInDays] = useState('');
   const [updatedPassCode, setUpdatedPassCode] = useState(share?.passCode ?? '');
   const [savingPassCode, setSavingPassCode] = useState(false);
@@ -478,18 +498,18 @@ function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstrain
   const serverGeneratedPassCode = provider === 'pikpak' || provider === 'xunlei';
   const alwaysGeneratedPassCode = provider === 'tianyi';
   const expiryOptions = alwaysGeneratedPassCode ? [['', t('cloud.share.permanent')], ['1', t('cloud.share.days', { count: 1 })], ['7', t('cloud.share.days', { count: 7 })]] : [['', t('cloud.share.permanent')], ['1', t('cloud.share.days', { count: 1 })], ['7', t('cloud.share.days', { count: 7 })], ['30', t('cloud.share.days', { count: 30 })]];
-  const passCodeError = sharePassCodeError(passCode, sharePassCodeConstraint);
+  const passCodeError = generatePassCode ? null : sharePassCodeError(passCode, sharePassCodeConstraint);
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (passCodeError) return;
-    onCreate({ name: title, ...(serverGeneratedPassCode ? (generatePassCode ? { generatePassCode: true } : {}) : (passCode.trim() ? { passCode: passCode.trim() } : {})), ...(expiresInDays ? { expiresInDays: Number(expiresInDays) } : {}) });
+    onCreate({ name: title, ...(generatePassCode ? { generatePassCode: true } : (passCode.trim() ? { passCode: passCode.trim() } : {})), ...(expiresInDays ? { expiresInDays: Number(expiresInDays) } : {}) });
   };
   return createPortal(<div className="cloud-confirm-backdrop">
     <section ref={dialogRef} className="cloud-share-dialog" role="dialog" aria-modal="true" aria-label={share ? t('cloud.share.created') : t('cloud.share.create')}>
       {share ? <>
         <h3>{t('cloud.share.created')}</h3>
         <p>{share.name}</p>
-        <form className="cloud-operation-editor"><label>{t('cloud.share.link')}<input aria-label={t('cloud.share.link')} readOnly value={share.url} /></label></form>
+        <form className="cloud-operation-editor"><label>{t('cloud.share.link')}<input aria-label={t('cloud.share.link')} readOnly value={cloudShareCopyUrl(share.url, share.passCode)} /></label></form>
         {share.passCode && <p>{t('cloud.share.passCodeLabel')}：<b>{share.passCode}</b></p>}
         {onUpdatePassCode && <form className="cloud-operation-editor cloud-share-passcode-editor" onSubmit={updatePassCode}>
           <label>{t('cloud.share.changePassCode')}<input aria-label={t('cloud.share.newPassCode')} aria-invalid={Boolean(updatedPassCodeError)} disabled={savingPassCode || busy} value={updatedPassCode} maxLength={sharePassCodeConstraint?.maxLength ?? 32} onChange={(event) => { setUpdatedPassCode(event.target.value); setUpdateNotice(null); }} /></label>
@@ -497,16 +517,17 @@ function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstrain
           {updatedPassCodeError && <p role="alert">{updatedPassCodeError}</p>}
           {updateNotice && <p role={updateNotice.error ? 'alert' : 'status'}>{updateNotice.message}</p>}
         </form>}
-        <button className="secondary" onClick={() => onCopy(share.url)}>{t('cloud.share.copyLink')}</button><button className="primary" disabled={savingPassCode} onClick={onClose}>{t('common.done')}</button>
+        <button className="secondary" onClick={() => onCopy(cloudShareCopyUrl(share.url, share.passCode))}>{t('cloud.share.copyLink')}</button><button className="primary" disabled={savingPassCode} onClick={onClose}>{t('common.done')}</button>
       </> : <form onSubmit={submit}>
         <h3>{t('cloud.share.create')}</h3>
-        <p>{t('cloud.share.description', { name: title, options: sharePassCodeConstraint ? t('cloud.share.optionsWithHint', { hint: sharePassCodeConstraint.hint }) : t('cloud.share.options') })}</p>
+        <p>{t('cloud.share.description', { name: title, options: sharePassCodeConstraint?.required ? t('cloud.share.requiredOptions', { hint: sharePassCodeHint(sharePassCodeConstraint) }) : sharePassCodeConstraint ? t('cloud.share.optionsWithHint', { hint: sharePassCodeHint(sharePassCodeConstraint) }) : t('cloud.share.options') })}</p>
         {serverGeneratedPassCode && onUpdatePassCode && <p>{t('cloud.share.generatedThenChangeable')}</p>}
         <div className="cloud-share-options">
           {alwaysGeneratedPassCode ? <label>{t('cloud.share.passCodeGeneratedByProvider')}</label> : serverGeneratedPassCode ? <div className="cloud-share-code-field">
             <span>{t('cloud.share.passCodeLabel')}</span>
             <label className="cloud-share-checkbox"><input ref={initialFocusRef} aria-label={t('cloud.share.autoGenerate')} type="checkbox" checked={generatePassCode} onChange={(event) => setGeneratePassCode(event.target.checked)} /><span>{t('cloud.share.autoGenerate')}</span></label>
-          </div> : <label>{t('cloud.share.optionalPassCode')}<input ref={initialFocusRef} aria-invalid={Boolean(passCodeError)} aria-label={t('cloud.share.passCodeLabel')} disabled={busy} value={passCode} maxLength={sharePassCodeConstraint?.maxLength ?? 32} onChange={(event) => setPassCode(event.target.value)} /></label>}
+          </div> : <label>{t(sharePassCodeConstraint?.required ? 'cloud.share.requiredPassCode' : 'cloud.share.optionalPassCode')}<input ref={initialFocusRef} aria-invalid={Boolean(passCodeError)} aria-label={t('cloud.share.passCodeLabel')} disabled={busy || generatePassCode} value={passCode} maxLength={sharePassCodeConstraint?.maxLength ?? 32} onChange={(event) => setPassCode(event.target.value)} /></label>}
+          {sharePassCodeConstraint?.required && <label className="cloud-share-checkbox"><input type="checkbox" checked={generatePassCode} disabled={busy} onChange={(event) => setGeneratePassCode(event.target.checked)} />{t('cloud.share.autoGenerate')}</label>}
           <label>{t('cloud.share.expiration')}<select aria-label={t('cloud.share.expiration')} value={expiresInDays} onChange={(event) => setExpiresInDays(event.target.value)}>{expiryOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
         </div>
         <button type="button" className="secondary" disabled={busy} onClick={onClose}>{t('dialog.cancel')}</button><button className="primary" disabled={busy || Boolean(passCodeError)} type="submit">{busy ? t('cloud.share.creating') : t('cloud.share.create')}</button>
@@ -1432,8 +1453,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     void runOperation('取消分享', () => client.cancelCloudShares(provider, targets), true);
   }
 
-  function copyShareLink(value: string) {
-    void copyCloudShareLink(value).then(() => setOperation({ kind: 'success', message: t('cloud.share.linkCopied') })).catch((error) => setOperation({ kind: 'error', message: t('cloud.share.copyLinkFailed', { detail: errorMessage(error, t('common.retry')) }) }));
+  function copyShareLink(value: string, passCode?: string) {
+    void copyCloudShareLink(cloudShareCopyUrl(value, passCode)).then(() => setOperation({ kind: 'success', message: t('cloud.share.linkCopied') })).catch((error) => setOperation({ kind: 'error', message: t('cloud.share.copyLinkFailed', { detail: errorMessage(error, t('common.retry')) }) }));
   }
 
   function runContextAction(action: CloudMenuAction) {
@@ -1448,7 +1469,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     if (action === 'copy' && !isRecycleBin) setDestinationAction('copy');
     if (action === 'share') openShare();
     if (action === 'updateSharePassCode' && selected.length === 1) openSharePassCodeEditor();
-    if (action === 'copyShareLink' && menu?.kind === 'selection' && menu.item.shareUrl) copyShareLink(menu.item.shareUrl);
+    if (action === 'copyShareLink' && menu?.kind === 'selection' && menu.item.shareUrl) copyShareLink(menu.item.shareUrl, menu.item.sharePassCode);
     if (action === 'cancelShare' && menu?.kind === 'selection') {
       const shareIds = selected.map((item) => item.shareId).filter((id): id is string => Boolean(id));
       cancelCloudShares(shareIds);
@@ -1669,7 +1690,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       onKeyDown={handleFileListKeyDown}
       onContextMenu={(event) => { if (!(event.target as HTMLElement).closest('[data-cloud-file-row]')) { event.preventDefault(); setSelectedIds([]); setContextMenu({ kind: 'background', x: event.clientX, y: event.clientY }); } }}
     >
-      <div className="cloud-row cloud-columns"><span className="cloud-check-cell"><input ref={selectAllCheckbox} type="checkbox" aria-label={t('cloud.selectCurrentDirectory')} checked={allSelected} onChange={(event) => setSelectedIds(event.target.checked ? selectableItems.map((item) => item.id) : [])} /></span><span className="cloud-name-column">{selected.length > 0 ? <span className="cloud-header-selection" role="toolbar" aria-label={t('cloud.selectedFileActions', { count: selected.length })}><b>{t('cloud.itemsSelected', { count: selected.length })}</b>{selectedVirtualRecycleBin || selectedVirtualMyShares ? <span className="cloud-selection-hint">{t('cloud.specialFolderOpenOnly')}</span> : isRecycleBin ? <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={() => void runOperation(t('cloud.action.restore'), () => client.restoreCloudFiles(provider, selectedIds.slice()))}><CloudActionIcon action="restore" />{t('cloud.action.restore')}</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />{t('cloud.action.permanentDelete')}</button></span> : isMyShares ? <span className="cloud-selection-actions"><button disabled={operationBusy || !selected[0]?.shareUrl} onClick={() => selected[0]?.shareUrl && copyShareLink(selected[0].shareUrl)}><CloudActionIcon action="copyShareLink" />{t('cloud.action.copyLink')}</button><button className="danger" disabled={operationBusy} onClick={() => cancelCloudShares(selected.map((item) => item.shareId).filter((id): id is string => Boolean(id)))}><CloudActionIcon action="cancelShare" />{t('cloud.action.cancelShare')}</button></span> : <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={downloadSelection}><CloudActionIcon action="download" />{t('download.action.download')}</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />{t('download.action.delete')}</button><button ref={selectionMenuTrigger} className="cloud-selection-more" aria-label={t('cloud.moreFileActions')} aria-haspopup="menu" aria-expanded={Boolean(selectionMenuAnchor)} disabled={operationBusy} onClick={openSelectionOverflowMenu}>•••</button></span>}<button className="cloud-clear-selection" aria-label={t('cloud.clearSelection')} title={t('cloud.clearSelection')} onClick={() => setSelectedIds([])}><CloudActionIcon action="clear" /></button></span> : <button className="cloud-sort-button" type="button" aria-label={t('cloud.sortByName')} aria-description={sortDescription('name')} aria-pressed={sort?.column === 'name'} onClick={() => changeSort('name')}>{t('download.sort.name')}<span aria-hidden="true">{sort?.column === 'name' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button>}</span><span><button className="cloud-sort-button" type="button" aria-label={t('cloud.sortBySize')} aria-description={sortDescription('size')} aria-pressed={sort?.column === 'size'} onClick={() => changeSort('size')}>{t('download.sort.size')}<span aria-hidden="true">{sort?.column === 'size' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span><span><button className="cloud-sort-button" type="button" aria-label={t('cloud.sortByModifiedAt')} aria-description={sortDescription('modifiedAt')} aria-pressed={sort?.column === 'modifiedAt'} onClick={() => changeSort('modifiedAt')}>{t('download.sort.time')}<span aria-hidden="true">{sort?.column === 'modifiedAt' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span></div>
+      <div className="cloud-row cloud-columns"><span className="cloud-check-cell"><input ref={selectAllCheckbox} type="checkbox" aria-label={t('cloud.selectCurrentDirectory')} checked={allSelected} onChange={(event) => setSelectedIds(event.target.checked ? selectableItems.map((item) => item.id) : [])} /></span><span className="cloud-name-column">{selected.length > 0 ? <span className="cloud-header-selection" role="toolbar" aria-label={t('cloud.selectedFileActions', { count: selected.length })}><b>{t('cloud.itemsSelected', { count: selected.length })}</b>{selectedVirtualRecycleBin || selectedVirtualMyShares ? <span className="cloud-selection-hint">{t('cloud.specialFolderOpenOnly')}</span> : isRecycleBin ? <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={() => void runOperation(t('cloud.action.restore'), () => client.restoreCloudFiles(provider, selectedIds.slice()))}><CloudActionIcon action="restore" />{t('cloud.action.restore')}</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />{t('cloud.action.permanentDelete')}</button></span> : isMyShares ? <span className="cloud-selection-actions"><button disabled={operationBusy || !selected[0]?.shareUrl} onClick={() => selected[0]?.shareUrl && copyShareLink(selected[0].shareUrl, selected[0].sharePassCode)}><CloudActionIcon action="copyShareLink" />{t('cloud.action.copyLink')}</button><button className="danger" disabled={operationBusy} onClick={() => cancelCloudShares(selected.map((item) => item.shareId).filter((id): id is string => Boolean(id)))}><CloudActionIcon action="cancelShare" />{t('cloud.action.cancelShare')}</button></span> : <span className="cloud-selection-actions"><button disabled={operationBusy} onClick={downloadSelection}><CloudActionIcon action="download" />{t('download.action.download')}</button><button className="danger" disabled={operationBusy} onClick={() => setPendingTrash(true)}><CloudActionIcon action="delete" />{t('download.action.delete')}</button><button ref={selectionMenuTrigger} className="cloud-selection-more" aria-label={t('cloud.moreFileActions')} aria-haspopup="menu" aria-expanded={Boolean(selectionMenuAnchor)} disabled={operationBusy} onClick={openSelectionOverflowMenu}>•••</button></span>}<button className="cloud-clear-selection" aria-label={t('cloud.clearSelection')} title={t('cloud.clearSelection')} onClick={() => setSelectedIds([])}><CloudActionIcon action="clear" /></button></span> : <button className="cloud-sort-button" type="button" aria-label={t('cloud.sortByName')} aria-description={sortDescription('name')} aria-pressed={sort?.column === 'name'} onClick={() => changeSort('name')}>{t('download.sort.name')}<span aria-hidden="true">{sort?.column === 'name' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button>}</span><span><button className="cloud-sort-button" type="button" aria-label={t('cloud.sortBySize')} aria-description={sortDescription('size')} aria-pressed={sort?.column === 'size'} onClick={() => changeSort('size')}>{t('download.sort.size')}<span aria-hidden="true">{sort?.column === 'size' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span><span><button className="cloud-sort-button" type="button" aria-label={t('cloud.sortByModifiedAt')} aria-description={sortDescription('modifiedAt')} aria-pressed={sort?.column === 'modifiedAt'} onClick={() => changeSort('modifiedAt')}>{t('download.sort.time')}<span aria-hidden="true">{sort?.column === 'modifiedAt' ? sort.direction === 'ascending' ? '↑' : '↓' : '↕'}</span></button></span></div>
       {canNavigateToParent && <div className="cloud-row cloud-file-row cloud-parent-directory-row" role="treeitem" aria-label={t('cloud.parentDirectory')} tabIndex={0} onClick={navigateToParent} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); event.stopPropagation(); navigateToParent(); } }} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); }}>
         <span className="cloud-check-cell"><input type="checkbox" aria-label={t('cloud.selectNamed', { name: t('cloud.parentDirectory') })} disabled /></span>
         <span className="cloud-file-name"><i className="folder"><CloudFileIcon kind="folder" /></i><b title={t('cloud.parentDirectory')}>{t('cloud.parentDirectory')}</b></span>

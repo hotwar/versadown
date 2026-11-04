@@ -162,7 +162,9 @@ export function FloatingLauncher({ onScan, onActivateTaskList, onDroppedInput, o
         inputs.push(...await Promise.all(torrents.map((file) => onStageDroppedTorrent(file))));
       }
       const text = draggedText(event.dataTransfer);
-      if (text && onScan) {
+      // A Finder file drag also carries text/uri-list. Once file contents
+      // are staged, that URL is another representation of the same input.
+      if (!torrents.length && text && onScan) {
         const scanned = await onScan(text);
         inputs.push(...scanned.filter((item) => item.valid).map((item) => item.input));
       }

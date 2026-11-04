@@ -111,15 +111,15 @@ fn rejects_malformed_ed2k_file_links_and_extracts_complete_valid_links() {
 }
 
 #[test]
-fn recognizes_torrent_urls_with_query_and_fragment() {
+fn remote_torrent_urls_download_the_file_before_local_bt_selection() {
     for source in [
         "https://example.com/releases/game.torrent?token=temporary",
         "https://example.com/releases/game.TORRENT#download",
         "https://example.com/releases/game.torrent?token=temporary#download",
     ] {
         let candidate = classify_input(source);
-        assert_eq!(candidate.kind, CandidateKind::Torrent, "{source}");
-        assert!(!candidate.auto_start, "torrent selection must be confirmed");
+        assert_eq!(candidate.kind, CandidateKind::Direct, "{source}");
+        assert!(candidate.auto_start, "remote torrent files are ordinary downloads");
     }
 }
 
