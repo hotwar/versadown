@@ -393,7 +393,20 @@ impl CloudHttpTransport for MutatingHttp {
         let replace_after_hash_registration = request.url.contains("file/update/hash");
         let response = self.inner.send(request)?;
         if replace_after_hash_registration {
+            let modified = std::fs::metadata(&self.replacement_path)
+                .unwrap()
+                .modified()
+                .unwrap();
             std::fs::write(&self.replacement_path, b"mutated upload data!").unwrap();
+            // Exercise metadata rejection deterministically even when both
+            // writes fall in the same filesystem timestamp tick. The restored
+            // mtime test below separately covers streaming hash rejection.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&self.replacement_path)
+                .unwrap()
+                .set_modified(modified + std::time::Duration::from_secs(5))
+                .unwrap();
         }
         Ok(response)
     }
