@@ -397,6 +397,7 @@ const messages = {
   'cloud.download.submitted': 'Download task submitted',
   'cloud.upload.filesCompleted': '{count} files uploaded',
   'cloud.operation.succeeded': '{name} succeeded',
+  'cloud.share.cancelPartial': '{succeeded} shares cancelled, {failed} failed: {detail}. The failed shares stay selected for retry.',
   'cloud.operation.recoveredRetry': 'Sign-in was restored automatically. Retry {name}.',
   'cloud.operation.failed': '{name} failed: {detail}',
   'cloud.operation.listRefreshFailed': '{name} completed, but the list could not refresh. Refresh the list to verify the result.',
