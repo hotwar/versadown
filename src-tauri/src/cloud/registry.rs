@@ -435,6 +435,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(uc).unwrap()["sharePassCodeConstraint"],
             serde_json::json!({
+                "required": false,
                 "minLength": 4,
                 "maxLength": 4,
                 "characterSet": "asciiAlphanumeric",
@@ -448,6 +449,7 @@ mod tests {
         assert_eq!(
             serde_json::to_value(aliyun).unwrap()["sharePassCodeConstraint"],
             serde_json::json!({
+                "required": false,
                 "minLength": 1,
                 "maxLength": 64,
                 "characterSet": "any",
@@ -461,6 +463,21 @@ mod tests {
         assert_eq!(
             serde_json::to_value(quark).unwrap()["sharePassCodeConstraint"],
             serde_json::json!({
+                "required": false,
+                "minLength": 4,
+                "maxLength": 4,
+                "characterSet": "asciiAlphanumeric",
+                "hint": "提取码必须为 4 位字母或数字",
+            })
+        );
+        let baidu = catalog
+            .iter()
+            .find(|descriptor| descriptor.provider == CloudProvider::Baidu)
+            .expect("Baidu must be present in the catalog");
+        assert_eq!(
+            serde_json::to_value(baidu).unwrap()["sharePassCodeConstraint"],
+            serde_json::json!({
+                "required": true,
                 "minLength": 4,
                 "maxLength": 4,
                 "characterSet": "asciiAlphanumeric",
