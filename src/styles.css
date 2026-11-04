@@ -311,3 +311,4 @@ body *{font-weight:400!important}
 .task-title-eta{flex:0 0 auto;margin-left:auto;color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums;white-space:nowrap}.task-subtitle .task-peer-metric{margin-left:0}
 /* All application modal curtains must cover standard header panels and menus. */
 .modal-backdrop,.cloud-confirm-backdrop{z-index:100}
+.local-upload-hidden-toggle{display:flex;align-items:center;gap:6px;white-space:nowrap}

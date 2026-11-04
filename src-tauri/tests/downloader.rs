@@ -1522,6 +1522,9 @@ async fn cloud_share_refresh_resubmits_same_task_with_current_headers_once() {
         },
         CloudProvider,
     };
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("nested");
+    std::fs::create_dir(&directory).unwrap();
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let api = Arc::new(RecordingAria2 {
         status_error_message: Some("HTTP error".into()),
@@ -1543,7 +1546,7 @@ async fn cloud_share_refresh_resubmits_same_task_with_current_headers_once() {
             task.id,
             &[(
                 1,
-                "D:/Downloads/nested/original.bin".into(),
+                directory.join("original.bin").to_string_lossy().into_owned(),
                 1000,
                 250,
                 true,
@@ -1565,7 +1568,7 @@ async fn cloud_share_refresh_resubmits_same_task_with_current_headers_once() {
         vec!["https://cdn.example/file?signature=1"]
     );
     assert_eq!(api.added_options()[1]["header"], "x-share-token: token-1");
-    assert_eq!(api.added_options()[1]["dir"], "D:/Downloads/nested");
+    assert_eq!(api.added_options()[1]["dir"], directory.to_string_lossy());
     assert_eq!(api.added_options()[1]["out"], "original.bin");
     assert!(!budget
         .claim(&updated.source, updated.aria_error_code.as_deref())
@@ -1877,8 +1880,10 @@ fn magnet_waits_for_file_confirmation() {
 
 #[test]
 fn torrent_stays_in_parsing_until_bytes_are_loaded_and_aria2_returns_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let torrent = directory.path().join("game.torrent");
     let store = TaskStore::open_in_memory().unwrap();
-    let outcome = prepare_download("C:\\Downloads\\game.torrent", &store).unwrap();
+    let outcome = prepare_download(torrent.to_str().unwrap(), &store).unwrap();
     assert!(outcome.requires_confirmation);
     assert_eq!(outcome.task.kind, "torrent");
     assert_eq!(outcome.task.status, TaskStatus::Parsing);

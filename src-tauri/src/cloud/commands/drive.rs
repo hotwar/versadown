@@ -151,24 +151,21 @@ fn validate_share_options(
     if options.name.trim().is_empty() {
         return Err(QuarkError::InvalidInput("分享名称不能为空".into()));
     }
+    let constraint = ProviderRegistry::global().get(provider).share_pass_code_constraint;
+    if constraint.is_some_and(|constraint| constraint.required)
+        && options.pass_code.is_none() && !options.generate_pass_code
+    {
+        return Err(QuarkError::InvalidInput("提取码格式无效".into()));
+    }
     if let Some(pass_code) = &options.pass_code {
         let pass_code = pass_code.trim();
-        let requires_four_alphanumeric_characters = matches!(
-            provider,
-            CloudProvider::Quark | CloudProvider::Pikpak | CloudProvider::Uc
-        );
-        let has_valid_provider_format = if requires_four_alphanumeric_characters {
-            pass_code.chars().count() == 4
-                && pass_code
-                    .chars()
-                    .all(|character| character.is_ascii_alphanumeric())
+        let has_valid_provider_format = if let Some(constraint) = constraint {
+            let length = pass_code.chars().count();
+            length >= usize::from(constraint.min_length) && length <= usize::from(constraint.max_length)
+                && (constraint.character_set != CloudSharePassCodeCharacterSet::AsciiAlphanumeric
+                    || pass_code.chars().all(|character| character.is_ascii_alphanumeric()))
         } else {
-            let max_length = if provider == CloudProvider::Aliyun {
-                64
-            } else {
-                32
-            };
-            !pass_code.is_empty() && pass_code.chars().count() <= max_length
+            !pass_code.is_empty() && pass_code.chars().count() <= 32
         };
         if !has_valid_provider_format {
             return Err(QuarkError::InvalidInput("提取码格式无效".into()));
@@ -420,6 +417,13 @@ mod tests {
         assert!(validate_share_options(CloudProvider::Quark, &options("a1B2".into())).is_ok());
         assert!(validate_share_options(CloudProvider::Quark, &options("a1!2".into())).is_err());
         assert!(validate_share_options(CloudProvider::Quark, &options("a1B".into())).is_err());
+        assert!(validate_share_options(CloudProvider::Baidu, &options("a1B2".into())).is_ok());
+        assert!(validate_share_options(CloudProvider::Baidu, &options("a1B".into())).is_err());
+        let mut automatic = options("".into());
+        automatic.pass_code = None;
+        assert!(validate_share_options(CloudProvider::Baidu, &automatic).is_err());
+        automatic.generate_pass_code = true;
+        assert!(validate_share_options(CloudProvider::Baidu, &automatic).is_ok());
     }
 
     #[test]

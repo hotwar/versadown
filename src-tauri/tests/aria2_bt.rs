@@ -1,11 +1,19 @@
 #[path = "aria2_sync.rs"]
 mod fixture;
-use versadown_lib::{DownloadService, NewTask, TaskStatus, TaskStore, UriSubmissionOptions};
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use versadown_lib::{DownloadService, NewTask, TaskStatus, TaskStore, UriSubmissionOptions};
 
 const VALID_MAGNET: &str = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+
+fn fixture_path(name: &str) -> PathBuf {
+    std::env::temp_dir().join("versadown-bt-fixture").join(name)
+}
+
+fn torrent_source(name: &str) -> String {
+    fixture_path(name).to_string_lossy().into_owned()
+}
 
 fn magnet_task() -> NewTask {
     NewTask {
@@ -112,7 +120,7 @@ async fn byte_complete_paused_p2p_task_stays_completed_without_a_sharing_marker(
 async fn torrent_metadata_name_replaces_the_local_torrent_filename() {
     for (source, content_name, files) in [
         (
-            "C:\\Downloads\\release-bundle.torrent",
+            torrent_source("release-bundle.torrent"),
             "发布合集",
             json!([
                 {"index":"1","path":"发布合集/episode.mp4","length":"70","completedLength":"0","selected":"true"},
@@ -120,7 +128,7 @@ async fn torrent_metadata_name_replaces_the_local_torrent_filename() {
             ]),
         ),
         (
-            "C:\\Downloads\\opaque-name.torrent",
+            torrent_source("opaque-name.torrent"),
             "actual-video.mkv",
             json!([
                 {"index":"1","path":"actual-video.mkv","length":"100","completedLength":"0","selected":"true"}
@@ -178,7 +186,7 @@ async fn reconcile_replaces_a_legacy_torrent_filename_with_its_content_name() {
     .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(torrent_task("C:\\Downloads\\legacy-file.torrent"))
+        .create(torrent_task(torrent_source("legacy-file.torrent")))
         .unwrap();
     store.bind_gid(task.id, "legacy-torrent-gid").unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
@@ -391,7 +399,7 @@ async fn torrent_bytes_are_added_paused_then_real_files_are_selected_before_star
     .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(torrent_task("C:\\Downloads\\game.torrent"))
+        .create(torrent_task(torrent_source("game.torrent")))
         .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
 
@@ -545,7 +553,7 @@ async fn selected_torrent_uses_the_chosen_destination_before_unpausing() {
     let (client, server) = fixture::server(move |request| match request["method"].as_str().unwrap() {
         "aria2.changeOption" => {
             assert_eq!(request["params"][2]["select-file"], "1");
-            assert_eq!(request["params"][2]["dir"], "E:\\Media");
+            assert_eq!(request["params"][2]["dir"], fixture_path("Media").to_string_lossy().as_ref());
             json!("OK")
         }
         "aria2.unpause" => {
@@ -576,7 +584,7 @@ async fn selected_torrent_uses_the_chosen_destination_before_unpausing() {
             task.id,
             vec![1],
             UriSubmissionOptions {
-                directory: Some(PathBuf::from("E:\\Media")),
+                directory: Some(fixture_path("Media")),
                 ..Default::default()
             },
         )
@@ -598,7 +606,7 @@ async fn torrent_without_real_files_never_enters_empty_confirmation() {
     .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(torrent_task("C:\\Downloads\\empty.torrent"))
+        .create(torrent_task(torrent_source("empty.torrent")))
         .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
 
@@ -624,7 +632,7 @@ async fn malformed_torrent_status_is_removed_without_binding_the_task() {
     .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(torrent_task("C:\\Downloads\\malformed.torrent"))
+        .create(torrent_task(torrent_source("malformed.torrent")))
         .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
 
@@ -661,7 +669,7 @@ async fn failed_cleanup_binds_the_orphan_gid_and_recovery_does_not_import_a_dupl
     .await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(torrent_task("C:\\Downloads\\broken.torrent"))
+        .create(torrent_task(torrent_source("broken.torrent")))
         .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
 
@@ -731,9 +739,9 @@ async fn terminal_torrent_states_are_persisted_and_never_offered_for_confirmatio
         }).await;
         let store = Arc::new(TaskStore::open_in_memory().unwrap());
         let task = store
-            .create(torrent_task(format!(
-                "C:\\Downloads\\{aria_status}.torrent"
-            )))
+            .create(torrent_task(torrent_source(&format!(
+                "{aria_status}.torrent"
+            ))))
             .unwrap();
         let service = DownloadService::new(Arc::new(client), store.clone());
 
@@ -783,7 +791,7 @@ async fn waiting_torrent_with_files_is_a_valid_confirmation_candidate() {
     }}).await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(torrent_task("C:\\Downloads\\waiting.torrent"))
+        .create(torrent_task(torrent_source("waiting.torrent")))
         .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
 
@@ -821,7 +829,7 @@ async fn failed_waiting_pause_and_cleanup_persists_the_gid_as_failed() {
     }).await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(torrent_task("C:\\Downloads\\unpaused.torrent"))
+        .create(torrent_task(torrent_source("unpaused.torrent")))
         .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
 
@@ -859,7 +867,7 @@ async fn waiting_torrent_must_recheck_as_paused_even_if_it_reaches_a_terminal_st
     }).await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(torrent_task("C:\\Downloads\\raced.torrent"))
+        .create(torrent_task(torrent_source("raced.torrent")))
         .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
 
@@ -890,7 +898,7 @@ async fn active_torrent_is_rejected_instead_of_becoming_a_confirmation_candidate
     }).await;
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store
-        .create(torrent_task("C:\\Downloads\\active.torrent"))
+        .create(torrent_task(torrent_source("active.torrent")))
         .unwrap();
     let service = DownloadService::new(Arc::new(client), store.clone());
 

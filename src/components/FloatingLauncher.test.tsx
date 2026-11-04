@@ -74,6 +74,18 @@ it('stages a dropped torrent before opening the normal new-task dialog', async (
   expect(onDroppedInput).toHaveBeenCalledWith('C:\\AppData\\dropped-torrents\\fixture.torrent');
 });
 
+it('uses the staged torrent once when Finder also supplies its file URL', async () => {
+  const onStageDroppedTorrent = vi.fn().mockResolvedValue('/App Data/dropped-torrents/fixture.torrent');
+  const onScan = vi.fn().mockResolvedValue([{ input: 'file:///Users/test/My%20file.torrent', valid: true, kind: 'torrent' }]);
+  const onDroppedInput = vi.fn().mockResolvedValue(undefined);
+  render(<FloatingLauncher onScan={onScan} onDroppedInput={onDroppedInput} onStageDroppedTorrent={onStageDroppedTorrent} />);
+  fireEvent.drop(screen.getByRole('button', { name: '打开下载输入' }), {
+    dataTransfer: { files: [{ name: 'My file.torrent' }], getData: () => 'file:///Users/test/My%20file.torrent' },
+  });
+  await waitFor(() => expect(onDroppedInput).toHaveBeenCalledWith('/App Data/dropped-torrents/fixture.torrent'));
+  expect(onDroppedInput).toHaveBeenCalledTimes(1);
+});
+
 it('starts dragging after pointer movement without activating the task list', () => {
   const onDragStart = vi.fn();
   const onDragMove = vi.fn();

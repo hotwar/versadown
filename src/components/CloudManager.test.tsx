@@ -588,6 +588,29 @@ it('uses a provider-declared UC share-code constraint while the user types', asy
   expect(createCloudShare).toHaveBeenCalledWith('uc', ['file-1'], { name: '报告.pdf', passCode: 'a7b2' });
 });
 
+it('requires a Baidu code or explicit automatic generation and copies the resulting code', async () => {
+  const user = userEvent.setup();
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  const createCloudShare = vi.fn().mockResolvedValue({ id: 'bd-share', url: 'https://pan.baidu.com/s/1created', name: '报告.pdf', kind: 'file', sourceFileIds: ['file-1'], passCode: 'a7B2' });
+  render(<CloudManager provider="baidu" client={createCloudFake({ createCloudShare })} initialAccount={{ id: 'bd', displayName: 'alice', provider: 'baidu', authMethod: 'web' }} restoreOnMount={false} />);
+  fireEvent.contextMenu(await screen.findByText('报告.pdf'));
+  await user.click(screen.getByRole('menuitem', { name: '分享' }));
+  const dialog = await screen.findByRole('dialog', { name: '创建分享链接' });
+  expect(within(dialog).queryByText('提取码（可选）')).not.toBeInTheDocument();
+  const autoGenerate = within(dialog).getByRole('checkbox', { name: '自动生成' });
+  expect(autoGenerate).toBeChecked();
+  await user.click(autoGenerate);
+  expect(within(dialog).getByRole('button', { name: '创建分享链接' })).toBeDisabled();
+  await user.type(within(dialog).getByRole('textbox', { name: '提取码' }), 'a7B2');
+  await user.click(within(dialog).getByRole('button', { name: '创建分享链接' }));
+  expect(createCloudShare).toHaveBeenCalledWith('baidu', ['file-1'], { name: '报告.pdf', passCode: 'a7B2' });
+  const result = await screen.findByRole('dialog', { name: '分享链接已创建' });
+  expect(within(result).getByRole('textbox', { name: '分享链接' })).toHaveValue('https://pan.baidu.com/s/1created?pwd=a7B2');
+  await user.click(within(result).getByRole('button', { name: '复制分享链接' }));
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith('https://pan.baidu.com/s/1created?pwd=a7B2'));
+});
+
 it('uses the same four-character alphanumeric share-code guidance for Quark', async () => {
   const user = userEvent.setup();
   const createCloudShare = vi.fn().mockResolvedValue({ id: 'share-quark', url: 'https://pan.quark.cn/s/share-quark', name: '报告.pdf', kind: 'file', sourceFileIds: ['file-1'] });
@@ -2613,3 +2636,24 @@ it('automatically completes a renewed web authorization after credentials expire
   expect(await screen.findByRole('tree', { name: '夸克网盘文件' }, { timeout: 2_000 })).toBeVisible();
   expect(client.completeCloudAuthorization).not.toHaveBeenCalled();
 });
+
+it.each([
+  ['baidu', 'https://pan.baidu.com/s/test', 'https://pan.baidu.com/s/test?pwd=a7B2'],
+  ['xunlei', 'https://pan.xunlei.com/s/test?pwd=a7B2', 'https://pan.xunlei.com/s/test?pwd=a7B2'],
+  ['uc', 'https://drive.uc.cn/s/test', 'https://drive.uc.cn/s/test'],
+] as const)('copies only a usable URL from the %s share list', async (provider, url, expected) => {
+  const user = userEvent.setup();
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+  const client = createCloudFake({ listCloudShares: vi.fn().mockResolvedValue([
+    { id: 'copy-test', url, name: '复制测试.pdf', kind: 'file', sourceFileIds: ['file-1'], passCode: 'a7B2' }
+  ]) });
+  render(<CloudManager provider={provider} client={client} initialAccount={{ id: 'test', displayName: 'alice', provider, authMethod: 'web' }} restoreOnMount={false} />);
+  await user.dblClick(await screen.findByText('我的分享'));
+  fireEvent.contextMenu(await screen.findByText('复制测试.pdf'));
+  await user.click(screen.getByRole('menuitem', { name: '复制分享链接' }));
+  await waitFor(() => expect(writeText).toHaveBeenCalledWith(expected));
+  expect(new URL(writeText.mock.calls[0][0]).href).toBe(expected);
+});
+
+

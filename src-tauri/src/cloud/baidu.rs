@@ -19,6 +19,15 @@ use std::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
+pub const BAIDU_SHARE_PASS_CODE_CONSTRAINT: super::CloudSharePassCodeConstraint =
+    super::CloudSharePassCodeConstraint {
+        required: true,
+        min_length: 4,
+        max_length: 4,
+        character_set: super::CloudSharePassCodeCharacterSet::AsciiAlphanumeric,
+        hint: "提取码必须为 4 位字母或数字",
+    };
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1686,10 +1695,14 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         if file_ids.is_empty() {
             return Err(QuarkError::InvalidInput("请选择至少一个文件或目录".into()));
         }
-        if options.generate_pass_code {
-            return Err(QuarkError::InvalidInput(
-                "百度网盘需要设置自定义提取码".into(),
-            ));
+        use rand::distributions::{Alphanumeric, DistString};
+        let pass_code = if options.generate_pass_code {
+            Alphanumeric.sample_string(&mut rand::thread_rng(), 4)
+        } else {
+            options.pass_code.as_deref().unwrap_or_default().trim().to_owned()
+        };
+        if pass_code.len() != 4 || !pass_code.bytes().all(|ch| ch.is_ascii_alphanumeric()) {
+            return Err(QuarkError::InvalidInput(BAIDU_SHARE_PASS_CODE_CONSTRAINT.hint.into()));
         }
         let fsids = file_ids
             .iter()
@@ -1701,26 +1714,19 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             })
             .collect::<Result<Vec<_>, _>>()?;
         let token = self.web_token()?;
-        let pass_code = options
-            .pass_code
-            .as_deref()
-            .filter(|code| !code.trim().is_empty());
         let value = self.web_form(
             "/share/set",
             &write_query(&token, "channel=chunlei"),
             form(&[
                 ("fid_list", json!(fsids).to_string()),
-                (
-                    "schannel",
-                    if pass_code.is_some() { "4" } else { "0" }.into(),
-                ),
+                ("schannel", "4".into()),
                 ("channel_list", "[]".into()),
                 ("period", options.expires_in_days.unwrap_or(0).to_string()),
-                ("pwd", pass_code.unwrap_or_default().into()),
+                ("pwd", pass_code.clone()),
                 ("eflag_disable", "true".into()),
             ]),
         )?;
-        baidu_share_from_value(&value, Some(file_ids), pass_code)
+        baidu_share_from_value(&value, Some(file_ids), Some(&pass_code))
     }
 
     pub fn list_shares(&self) -> Result<Vec<CloudShare>, QuarkError> {

@@ -46,6 +46,7 @@ pub(crate) const ALIYUN_RECYCLE_BIN_ID: &str = "__versa_down_aliyun_recycle_bin_
 const ALIYUN_RECYCLE_BIN_NAME: &str = "回收站";
 pub const ALIYUN_SHARE_PASS_CODE_CONSTRAINT: CloudSharePassCodeConstraint =
     CloudSharePassCodeConstraint {
+        required: false,
         min_length: 1,
         max_length: 64,
         character_set: CloudSharePassCodeCharacterSet::Any,
