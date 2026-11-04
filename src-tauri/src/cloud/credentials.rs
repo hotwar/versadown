@@ -189,15 +189,24 @@ impl SystemCredentialStore {
     }
     pub fn new(root: PathBuf) -> Result<Self, QuarkError> {
         std::fs::create_dir_all(&root).map_err(|_| QuarkError::Storage)?;
-        #[cfg(target_os = "macos")]
-        macos::register_existing_data(&root)?;
+        Ok(Self::unprepared(root))
+    }
+    /// Startup never aborts on a broken credential directory: the store is
+    /// returned unusable and the flag tells the caller to report degradation.
+    pub(crate) fn new_or_degraded(root: PathBuf) -> (Self, bool) {
+        match Self::new(root.clone()) {
+            Ok(store) => (store, false),
+            Err(_) => (Self::unprepared(root), true),
+        }
+    }
+    fn unprepared(root: PathBuf) -> Self {
         let root_id = format!("{:x}", Sha256::digest(root.to_string_lossy().as_bytes()));
-        Ok(Self {
+        Self {
             #[cfg(all(target_os = "macos", test))]
             test_key: None,
             root,
             service: format!("{SYSTEM_CREDENTIAL_SERVICE_PREFIX}.{}", &root_id[..24]),
-        })
+        }
     }
     #[cfg(target_os = "macos")]
     fn master_key(&self, create: bool) -> Result<[u8; 32], QuarkError> {
@@ -240,7 +249,9 @@ impl CredentialStore for SystemCredentialStore {
             if !credential_key_is_supported(k) {
                 return Err(QuarkError::Storage);
             }
-            return macos::save(&self.root, &self.service, k, v, self.master_key(true)?);
+            let key = self.master_key(true)?;
+            macos::purge_undecryptable(&self.root, &self.service, key)?;
+            return macos::save(&self.root, &self.service, k, v, key);
         }
         #[cfg(not(target_os = "macos"))]
         self.entry(k)?
@@ -333,7 +344,9 @@ fn read_share_protection_key(_create: bool) -> Result<[u8; 32], QuarkError> {
         Ok(_) => return Err(QuarkError::Storage),
         Err(KeyringError::NoEntry) => {
             #[cfg(target_os = "macos")]
-            if !_create || macos::KEY_REQUIRED.load(std::sync::atomic::Ordering::SeqCst) {
+            // A lost key may be replaced only by an explicit create request;
+            // callers then purge the rows the old key protected.
+            if !_create {
                 return Err(QuarkError::Storage);
             }
             let mut key = vec![0_u8; 32];

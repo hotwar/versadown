@@ -5,6 +5,7 @@ pub mod baidu_range_gateway;
 mod browser_login;
 pub mod commands;
 mod common;
+mod credential_recovery;
 mod credentials;
 pub mod download_dispatch;
 pub mod download_scheduler;
