@@ -306,7 +306,7 @@ pub fn run() {
                 }
             }
             let startup_store = std::sync::Arc::clone(&store);
-            let ai_secrets = cloud::SystemCredentialStore::new(data_dir.join("ai-secrets"))?;
+            let ai_secrets = cloud::SystemCredentialStore::new_or_degraded(data_dir.join("ai-secrets")).0;
             // Webviews can invoke cloud commands while setup is still creating the
             // download runtime. Register this state immediately so those early
             // calls cannot race a later `manage` call.

@@ -157,9 +157,11 @@ impl CloudState {
         Ok(removed_plans)
     }
     pub fn new(root: PathBuf) -> Result<Self, QuarkError> {
+        let (share_store, share_degraded) = SystemCredentialStore::new_or_degraded(root.clone());
+        let (store, store_degraded) = SystemCredentialStore::new_or_degraded(root);
         let mut state = Self {
             credential_restore_failed: false,
-            share_plans: share::CloudSharePlanStore::new(SystemCredentialStore::new(root.clone())?),
+            share_plans: share::CloudSharePlanStore::new(share_store),
             share_refresh_budget: Default::default(),
             cloud_download_refresh_budget: Default::default(),
             authorization_resumption: Default::default(),
@@ -167,11 +169,12 @@ impl CloudState {
             authorization_results: Default::default(),
             auth_supervisor: Default::default(),
             application: OnceLock::new(),
-            store: SystemCredentialStore::new(root)?,
+            store,
             http: ReqwestTransport::new()?,
         };
-        state.credential_restore_failed =
-            restore_startup_authorizations(&state.auth_supervisor, &state.store);
+        state.credential_restore_failed = share_degraded
+            || store_degraded
+            || restore_startup_authorizations(&state.auth_supervisor, &state.store);
         Ok(state)
     }
     pub fn start_authorization_maintenance(self: &Arc<Self>) {
