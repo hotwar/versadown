@@ -134,6 +134,15 @@ impl ExplicitCookieSession {
     }
 }
 
+/// Loopback traffic never goes through a proxy; `NO_PROXY` entries are honoured
+/// too, because an explicit `Proxy::all` otherwise ignores them.
+fn proxy_bypass() -> Option<reqwest::NoProxy> {
+    let configured = std::env::var("NO_PROXY")
+        .or_else(|_| std::env::var("no_proxy"))
+        .unwrap_or_default();
+    reqwest::NoProxy::from_string(&format!("{configured},localhost,127.0.0.0/8,::1"))
+}
+
 impl ReqwestTransport {
     fn client_with_jar(
         jar: Arc<reqwest::cookie::Jar>,
@@ -153,7 +162,8 @@ impl ReqwestTransport {
         {
             builder = builder.proxy(
                 reqwest::Proxy::all(proxy.to_string_lossy().as_ref())
-                    .map_err(|_| QuarkError::Transport("代理配置无效".into()))?,
+                    .map_err(|_| QuarkError::Transport("代理配置无效".into()))?
+                    .no_proxy(proxy_bypass()),
             );
         }
         builder
@@ -247,13 +257,18 @@ impl ReqwestTransport {
             let url = reqwest::Url::parse(&r.url).map_err(|_| QuarkError::InvalidResponse)?;
             let (client, jar) = self.explicit_cookie_client(&url, cookie, snapshot)?;
             if snapshot {
-                sent_cookie = Some(match jar.cookies(&url) {
-                    Some(value) => value
-                        .to_str()
-                        .map_err(|_| QuarkError::InvalidResponse)?
-                        .to_owned(),
-                    None => String::new(),
-                });
+                // An empty jar means no Cookie header at all; callers then fall
+                // back to their stored session instead of an empty snapshot.
+                sent_cookie = match jar.cookies(&url) {
+                    Some(value) => Some(
+                        value
+                            .to_str()
+                            .map_err(|_| QuarkError::InvalidResponse)?
+                            .to_owned(),
+                    )
+                    .filter(|cookie| !cookie.is_empty()),
+                    None => None,
+                };
             }
             client
         } else {
