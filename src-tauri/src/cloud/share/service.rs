@@ -66,6 +66,13 @@ impl crate::cloud::CloudHttpTransport for ControlledShareTransport<'_> {
         self.control.check()?;
         self.http.send(request)
     }
+    fn send_with_cookie_snapshot(
+        &self,
+        request: crate::cloud::CloudHttpRequest,
+    ) -> Result<(crate::cloud::CloudHttpResponse, Option<String>), QuarkError> {
+        self.control.check()?;
+        self.http.send_with_cookie_snapshot(request)
+    }
     fn manages_cookie_session(&self) -> bool {
         self.http.manages_cookie_session()
     }
@@ -87,15 +94,9 @@ impl<'a> RetryingShareReadTransport<'a> {
     pub(crate) fn new(inner: &'a dyn crate::cloud::CloudHttpTransport) -> Self {
         Self { inner }
     }
-}
-
-impl crate::cloud::CloudHttpTransport for RetryingShareReadTransport<'_> {
-    fn send(
-        &self,
-        request: crate::cloud::CloudHttpRequest,
-    ) -> Result<crate::cloud::CloudHttpResponse, QuarkError> {
+    fn retry<T>(&self, mut work: impl FnMut() -> Result<T, QuarkError>) -> Result<T, QuarkError> {
         for attempt in 0..Self::ATTEMPTS {
-            match self.inner.send(request.clone()) {
+            match work() {
                 Ok(response) => return Ok(response),
                 Err(QuarkError::Transport(_)) if attempt + 1 < Self::ATTEMPTS => {
                     std::thread::sleep(std::time::Duration::from_millis(
@@ -106,6 +107,22 @@ impl crate::cloud::CloudHttpTransport for RetryingShareReadTransport<'_> {
             }
         }
         unreachable!("a bounded retry loop always returns")
+    }
+}
+
+impl crate::cloud::CloudHttpTransport for RetryingShareReadTransport<'_> {
+    fn send(
+        &self,
+        request: crate::cloud::CloudHttpRequest,
+    ) -> Result<crate::cloud::CloudHttpResponse, QuarkError> {
+        self.retry(|| self.inner.send(request.clone()))
+    }
+
+    fn send_with_cookie_snapshot(
+        &self,
+        request: crate::cloud::CloudHttpRequest,
+    ) -> Result<(crate::cloud::CloudHttpResponse, Option<String>), QuarkError> {
+        self.retry(|| self.inner.send_with_cookie_snapshot(request.clone()))
     }
 
     fn check_transfer(&self) -> Result<(), QuarkError> {

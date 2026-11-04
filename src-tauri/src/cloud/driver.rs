@@ -314,6 +314,12 @@ impl CloudHttpTransport for HttpRef<'_> {
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, CloudError> {
         self.0.send(request)
     }
+    fn send_with_cookie_snapshot(
+        &self,
+        request: CloudHttpRequest,
+    ) -> Result<(CloudHttpResponse, Option<String>), CloudError> {
+        self.0.send_with_cookie_snapshot(request)
+    }
     fn isolated_session(&self) -> Result<Option<Box<dyn CloudHttpTransport>>, CloudError> {
         self.0.isolated_session()
     }
@@ -332,6 +338,12 @@ impl CloudHttpTransport for UploadHttpRef<'_> {
     }
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, CloudError> {
         self.0.send(request)
+    }
+    fn send_with_cookie_snapshot(
+        &self,
+        request: CloudHttpRequest,
+    ) -> Result<(CloudHttpResponse, Option<String>), CloudError> {
+        self.0.send_with_cookie_snapshot(request)
     }
     fn isolated_session(&self) -> Result<Option<Box<dyn CloudHttpTransport>>, CloudError> {
         self.0.isolated_session()
