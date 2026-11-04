@@ -4,6 +4,10 @@ use thiserror::Error;
 
 const LINUX_X86_64_SHA256: &str =
     "ca0bfc952f15d5aa79afa73189f6665694a61b6ed0f55d44009389f8f08cc6db";
+const MACOS_AARCH64_SHA256: &str =
+    "be6e8ee76a8124fca03d20fa2a8446bac35ea0f24df7e159aa9206106bcfe47c";
+const MACOS_X86_64_SHA256: &str =
+    "68b4c64c338b27b2bf929b9110393420908f79de4e33e6037973b38577b715a5";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EngineBinary {
@@ -39,6 +43,14 @@ impl EngineBinary {
             ("linux", "x86_64") => Ok(Self {
                 resource_name: "aria2-next-x86_64-unknown-linux-gnu",
                 sha256: Some(LINUX_X86_64_SHA256),
+            }),
+            ("macos", "aarch64") => Ok(Self {
+                resource_name: "aria2-next-aarch64-apple-darwin",
+                sha256: Some(MACOS_AARCH64_SHA256),
+            }),
+            ("macos", "x86_64") => Ok(Self {
+                resource_name: "aria2-next-x86_64-apple-darwin",
+                sha256: Some(MACOS_X86_64_SHA256),
             }),
             _ => Err(EngineBinaryError::UnsupportedTarget {
                 os: os.into(),

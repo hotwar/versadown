@@ -20,6 +20,23 @@ pub(crate) const TRAY_ID: &str = "manager-tray";
 const EXIT_TRAY_REMOVE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
 const EXIT_ARIA2_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(7);
 
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_application_menu(app: &AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
+    let menu = Menu::default(app)?;
+    if let Some(tauri::menu::MenuItemKind::Submenu(application)) = menu.items()?.first() {
+        let items = application.items()?;
+        if let Some(tauri::menu::MenuItemKind::Predefined(quit)) = items.last() {
+            // The default AppKit Quit selector terminates immediately. Keep
+            // its system-localized label but route Cmd-Q through our engine
+            // shutdown instead, so active downloads save their session first.
+            let label = quit.text()?;
+            application.remove(quit)?;
+            application.append(&MenuItem::with_id(app, QUIT, label, true, Some("CmdOrCtrl+Q"))?)?;
+        }
+    }
+    Ok(menu)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LauncherInteractionSnapshot {
@@ -172,7 +189,7 @@ pub fn setup_manager_tray(app: &AppHandle) -> Result<(), String> {
         .icon(crate::window_icon::icon_image("mint"))
         .tooltip("万能下载")
         .menu(&menu)
-        .show_menu_on_left_click(false)
+        .show_menu_on_left_click(cfg!(target_os = "macos"))
         .on_tray_icon_event(|tray, event| {
             if matches!(
                 event,
@@ -283,13 +300,8 @@ pub fn set_launcher_window_visible(
         return Ok(());
     }
     if visible {
-        // macOS does not yet have a shaped-input adapter. Linux must not use
-        // Tao's generic cursor toggle here: it replaces the X11 input shape
-        // with a full-window region.
-        #[cfg(target_os = "macos")]
-        window
-            .set_ignore_cursor_events(false)
-            .map_err(|error| error.to_string())?;
+        // The platform input monitor owns click-through; showing a macOS
+        // launcher must not reset its last known pointer state.
         window.show().map_err(|error| error.to_string())
     } else {
         // The X11 shape remains installed while a Linux launcher is hidden.
@@ -460,6 +472,24 @@ fn begin_application_exit(app: &AppHandle) {
         let remove_tray_app = app.clone();
         let remove_tray = async move {
             tokio::time::sleep(EXIT_TRAY_REMOVE_DELAY).await;
+            #[cfg(target_os = "macos")]
+            {
+                // Removing the registry entry returns the final TrayIcon.
+                // Its Drop calls AppKit, so both removal AND destruction
+                // must happen on the main thread before the event loop ends.
+                let target = remove_tray_app.clone();
+                let (sender, receiver) = tokio::sync::oneshot::channel();
+                if remove_tray_app
+                    .run_on_main_thread(move || {
+                        drop(target.remove_tray_by_id(TRAY_ID));
+                        let _ = sender.send(());
+                    })
+                    .is_ok()
+                {
+                    let _ = receiver.await;
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
             let _ = remove_tray_app.remove_tray_by_id(TRAY_ID);
         };
         let shutdown = runtime.shutdown(EXIT_ARIA2_SHUTDOWN_TIMEOUT);

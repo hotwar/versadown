@@ -1,6 +1,10 @@
 use serde::Deserialize;
 use tauri::{State, WebviewWindow};
 
+#[cfg(target_os = "macos")]
+#[path = "launcher_input_macos.rs"]
+pub(crate) mod macos;
+
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LauncherInputRegion {
@@ -212,7 +216,13 @@ pub async fn set_launcher_input_regions(
         interaction.record_input_region_update();
         Ok(())
     }
-    #[cfg(any(target_os = "macos", all(not(unix), not(windows))))]
+    #[cfg(target_os = "macos")]
+    {
+        macos::install(window, physical)?;
+        interaction.record_input_region_update();
+        Ok(())
+    }
+    #[cfg(all(not(unix), not(windows)))]
     {
         let _ = (window, regions, interaction);
         Err("当前平台尚未安装悬浮窗输入区域适配器".to_string())

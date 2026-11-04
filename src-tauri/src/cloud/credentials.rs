@@ -65,6 +65,22 @@ pub struct SystemCredentialStore {
     test_key: Option<[u8; 32]>,
 }
 
+// Native UI regression binaries must not access the developer's real
+// credential storage. This adapter is excluded from shipped application builds and
+// enabled only by the isolated native-smoke harness.
+#[cfg(feature = "native-smoke")]
+fn native_smoke_credentials() -> Option<&'static MemoryCredentialStore> {
+    if std::env::var("VERSADOWN_NATIVE_SMOKE").as_deref() != Ok("1")
+        || std::env::var("VERSADOWN_BACKGROUND_UI_TEST").as_deref() != Ok("1")
+        || std::env::var_os("VERSADOWN_TEST_DATA_DIR").is_none()
+    {
+        return None;
+    }
+    static STORE: std::sync::LazyLock<MemoryCredentialStore> =
+        std::sync::LazyLock::new(MemoryCredentialStore::default);
+    Some(&STORE)
+}
+
 #[cfg(not(target_os = "macos"))]
 fn credential_error(
     _operation: &str,
@@ -205,6 +221,10 @@ impl SystemCredentialStore {
 }
 impl CredentialStore for SystemCredentialStore {
     fn save(&self, k: &str, v: &[u8]) -> Result<(), QuarkError> {
+        #[cfg(feature = "native-smoke")]
+        if let Some(store) = native_smoke_credentials() {
+            return store.save(&format!("{}:{k}", self.service), v);
+        }
         #[cfg(windows)]
         if windows::handles(k) {
             return windows::save(
@@ -228,6 +248,10 @@ impl CredentialStore for SystemCredentialStore {
             .map_err(|error| credential_error("save", k, error, Some(v.len())))
     }
     fn load(&self, k: &str) -> Result<Option<Vec<u8>>, QuarkError> {
+        #[cfg(feature = "native-smoke")]
+        if let Some(store) = native_smoke_credentials() {
+            return store.load(&format!("{}:{k}", self.service));
+        }
         #[cfg(windows)]
         if windows::handles(k) {
             return windows::load(
@@ -256,6 +280,10 @@ impl CredentialStore for SystemCredentialStore {
         }
     }
     fn remove(&self, k: &str) -> Result<(), QuarkError> {
+        #[cfg(feature = "native-smoke")]
+        if let Some(store) = native_smoke_credentials() {
+            return store.remove(&format!("{}:{k}", self.service));
+        }
         #[cfg(windows)]
         if windows::handles(k) {
             return windows::remove(&self.root, k);
@@ -281,6 +309,15 @@ fn share_protector_entry() -> Result<Entry, QuarkError> {
 }
 
 fn share_protection_key(create: bool) -> Result<[u8; 32], QuarkError> {
+    #[cfg(feature = "native-smoke")]
+    if native_smoke_credentials().is_some() {
+        static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+        return Ok(*KEY.get_or_init(|| {
+            let mut key = [0; 32];
+            OsRng.fill_bytes(&mut key);
+            key
+        }));
+    }
     #[cfg(target_os = "macos")]
     {
         return macos::MASTER_KEY.get(|| read_share_protection_key(create));

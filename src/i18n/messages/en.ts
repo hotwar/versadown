@@ -4,6 +4,11 @@ const messages = {
   'cloud.verification.xunlei.metadataExpired': 'The Xunlei verification data saved by VersaDown exceeded its local reuse limit. Reauthorize in the browser, then retry this operation. [XL-LOCAL-EXPIRED]',
   'cloud.verification.xunlei.timestampInvalid': 'The Xunlei verification timestamp is invalid or ahead of the system clock. The current request was not sent. Check the system time. [XL-LOCAL-TIME]',
   'cloud.verification.xunlei.unavailable': 'VersaDown cannot prepare verification for this Xunlei operation. Use the official website for now. [XL-LOCAL]',
+  'macos.links.registrationFailed': 'Unable to update macOS download link associations. Please try again.',
+  'macos.links.storageFailed': 'Unable to save download link associations. Check access to the application data directory.',
+  'macos.links.bundleRequired': 'Install and open VersaDown.app before changing link associations.',
+  'macos.links.chooseAlternative': 'No alternative application can handle this link type. Choose another default application before disabling the association.',
+
   'startup.credentialsUnavailable': 'System credential storage is unavailable. Standard downloads remain available; cloud accounts and private tasks stay protected. Unlock your login keychain and restart VersaDown.',
   'app.title': 'VersaDown Universal Downloader',
   'app.brand': 'VersaDown',

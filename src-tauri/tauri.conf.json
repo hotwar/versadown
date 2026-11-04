@@ -10,6 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       { "label": "main", "title": "VersaDown", "width": 960, "height": 640, "minWidth": 960, "minHeight": 640, "decorations": false, "shadow": true, "visible": false },
       { "label": "launcher", "title": "", "width": 756, "height": 720, "resizable": false, "decorations": false, "transparent": true, "shadow": false, "alwaysOnTop": true, "skipTaskbar": true, "dragDropEnabled": false, "visible": false }

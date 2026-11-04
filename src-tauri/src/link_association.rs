@@ -9,6 +9,10 @@
 
 use std::path::Path;
 
+#[cfg(target_os = "macos")]
+#[path = "link_association_macos.rs"]
+mod macos;
+
 pub const SCHEMES: [&str; 3] = ["magnet", "thunder", "ed2k"];
 
 /// The record of version 1 meant a hidden handler file; version 2 uses the
@@ -20,6 +24,9 @@ static SYNC: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub fn sync(enabled: bool, data_dir: &Path) -> Result<(), String> {
     let _guard = SYNC.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    #[cfg(target_os = "macos")]
+    return macos::sync(enabled, data_dir);
+    #[cfg(not(target_os = "macos"))]
     sync_with(
         enabled,
         data_dir,

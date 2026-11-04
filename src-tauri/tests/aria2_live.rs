@@ -1,8 +1,9 @@
-#![cfg(windows)]
+#![cfg(any(windows, target_os = "macos", target_os = "linux"))]
 
 use versadown_lib::aria2::{
     Aria2Api, Aria2LaunchConfig, Aria2Process, Aria2RpcClient, Aria2Status,
 };
+use versadown_lib::engine_binary::EngineBinary;
 use versadown_lib::{DownloadService, NewTask, TaskStatus, TaskStore, UriSubmissionOptions};
 use axum::{
     body::{Body, Bytes},
@@ -340,9 +341,13 @@ impl LiveAria2Fixture {
         aria2.rpc_port = listener.local_addr().unwrap().port();
         aria2.rpc_token = format!("aria2-live-test-{}", aria2.rpc_port);
         drop(listener);
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let binary = EngineBinary::for_current_target()
+            .unwrap()
+            .resolve(&manifest_dir, &manifest_dir)
+            .unwrap();
         let config = Aria2LaunchConfig {
-            binary: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
+            binary,
             data_dir: root.path().join("data"),
             download_dir: root.path().join("downloads"),
             parent_pid: std::process::id(),

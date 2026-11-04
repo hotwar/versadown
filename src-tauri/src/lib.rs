@@ -22,6 +22,8 @@ mod link_association;
 mod local_upload_picker;
 mod magnet_metadata;
 mod models;
+#[cfg(all(target_os = "macos", feature = "native-smoke"))]
+mod native_smoke;
 mod output_path;
 mod parser;
 mod policy;
@@ -261,6 +263,8 @@ pub fn run() {
             }
         })
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.manage(std::sync::Arc::new(launcher_input::macos::InputMonitor::default()));
             app.manage(window_icon::TaskbarIconState::default());
             let lifecycle = std::sync::Arc::new(ApplicationLifecycle::new());
             app.manage(std::sync::Arc::clone(&lifecycle));
@@ -325,10 +329,19 @@ pub fn run() {
                     .map(std::path::PathBuf::from)
                     .unwrap_or_else(|| data_dir.join("downloads"))
             } else {
-                std::env::var_os("USERPROFILE")
-                    .map(std::path::PathBuf::from)
-                    .map(|path| path.join("Downloads"))
-                    .unwrap_or_else(|| data_dir.join("downloads"))
+                #[cfg(target_os = "macos")]
+                {
+                    app.path()
+                        .download_dir()
+                        .unwrap_or_else(|_| data_dir.join("downloads"))
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    std::env::var_os("USERPROFILE")
+                        .map(std::path::PathBuf::from)
+                        .map(|path| path.join("Downloads"))
+                        .unwrap_or_else(|| data_dir.join("downloads"))
+                }
             };
             let settings_path = data_dir.join("settings.json");
             let mut settings: AppSettings = std::fs::read(&settings_path)
@@ -431,6 +444,8 @@ pub fn run() {
                 baidu_range_gateway,
                 xunlei_native_backend,
             });
+            #[cfg(target_os = "macos")]
+            app.set_menu(launcher::macos_application_menu(app.handle())?)?;
             app.manage(launcher::LauncherInteractionState::new(
                 background_ui_test.as_deref() == Some("1"),
             ));
@@ -534,6 +549,8 @@ pub fn run() {
                 app.handle(),
                 external_links::links_from_args(std::env::args_os().skip(1)),
             );
+            #[cfg(all(target_os = "macos", feature = "native-smoke"))]
+            native_smoke::schedule(app.handle())?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -623,12 +640,28 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building VersaDown")
         .run(|app, event| {
+            #[cfg(target_os = "macos")]
+            match &event {
+                tauri::RunEvent::Opened { urls } => {
+                    let links = external_links::links_from_args(urls.iter().map(|url| url.as_str()));
+                    external_links::deliver(app, links);
+                }
+                tauri::RunEvent::Reopen { .. } => launcher::reveal_manager(app, None),
+                _ => {}
+            }
             if let tauri::RunEvent::ExitRequested { code, api, .. } = event {
                 let application_exiting = app
                     .try_state::<std::sync::Arc<ApplicationLifecycle>>()
                     .is_some_and(|lifecycle| lifecycle.is_exiting());
                 if should_prevent_implicit_exit(application_exiting, code) {
                     api.prevent_exit();
+                    // Cmd-Q and the native application menu are explicit quit
+                    // requests on macOS; use the same bounded engine shutdown
+                    // as the tray instead of trapping the user in the app.
+                    #[cfg(target_os = "macos")]
+                    if code == Some(0) {
+                        launcher::handle_launcher_menu_action(app, launcher::QUIT);
+                    }
                 }
             }
         });

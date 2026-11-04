@@ -13,7 +13,7 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-clipboard-manager = "2"
@@ -62,12 +62,22 @@ webview2-com = "0.38.2"
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Controls", "Win32_UI_Shell"] }
 winreg = "0.55"
 
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]
+native-smoke = ["custom-protocol"]
 report-debug-tool = []
 # Quick Windows builds use this explicitly so their runnable artifact matches
 # the release executable and does not allocate a console window.
 gui-subsystem = []
+
+[[test]]
+name = "macos_native_smoke"
+path = "tests/macos_native_smoke.rs"
+harness = false
+required-features = ["native-smoke"]
 
 # 日常可运行验证使用的中间配置。它与正式发布目标隔离，保留
 # 增量编译，并以较低优化级别缩短 Rust 与链接阶段的耗时。

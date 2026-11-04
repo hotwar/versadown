@@ -1,4 +1,4 @@
-#![cfg(windows)]
+#![cfg(any(windows, target_os = "macos", target_os = "linux"))]
 
 use versadown_lib::{
     aria2::{Aria2GlobalStat, Aria2RpcClient, EventSink, RpcSecret},
@@ -6,6 +6,12 @@ use versadown_lib::{
     TaskStore,
 };
 use std::{path::PathBuf, sync::Arc, time::Duration};
+
+fn bundled_engine() -> PathBuf {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    versadown_lib::engine_binary::EngineBinary::for_current_target()
+        .unwrap().resolve(root, root).unwrap()
+}
 
 #[derive(Default)]
 struct Events {
@@ -101,8 +107,7 @@ async fn concurrent_manual_retries_start_one_engine_and_shutdown_cleanly() {
     ));
     assert!(!runtime.initialize().await.available);
     std::fs::copy(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe"),
+        bundled_engine(),
         staged_binary,
     )
     .unwrap();
@@ -124,8 +129,7 @@ async fn concurrent_manual_retries_start_one_engine_and_shutdown_cleanly() {
 #[tokio::test]
 async fn runtime_reconfigures_to_the_saved_rpc_port_and_token_immediately() {
     let root = tempfile::tempdir().unwrap();
-    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe");
+    let binary = bundled_engine();
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let events = Arc::new(Events::default());
     let runtime = EngineRuntime::new(
@@ -165,8 +169,7 @@ async fn runtime_reconfigures_to_the_saved_rpc_port_and_token_immediately() {
 #[tokio::test]
 async fn failed_reconfiguration_restores_the_previous_running_engine() {
     let root = tempfile::tempdir().unwrap();
-    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe");
+    let binary = bundled_engine();
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let events = Arc::new(Events::default());
     let runtime = EngineRuntime::new(
@@ -190,8 +193,7 @@ async fn failed_reconfiguration_restores_the_previous_running_engine() {
 #[tokio::test]
 async fn monitor_restarts_an_exited_owned_engine_once_without_exposing_the_old_service() {
     let root = tempfile::tempdir().unwrap();
-    let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("binaries/aria2-next-x86_64-pc-windows-msvc.exe");
+    let binary = bundled_engine();
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let events = Arc::new(Events::default());
     let runtime = Arc::new(EngineRuntime::new(
