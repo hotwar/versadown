@@ -42,7 +42,9 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
         QuarkError::WebAuthorizationRequired => {
             "此登录方式需要网页验证，请点击网页授权完成登录".into()
         }
-        QuarkError::XunleiVerificationUnavailable(reason) => (*reason).into(),
+        QuarkError::XunleiVerificationUnavailable(reason) => {
+            crate::cloud::xunlei_verification_text(reason).into()
+        }
         QuarkError::CaptchaRequired => "网盘要求完成官方操作验证后重试".into(),
         QuarkError::PikpakOperationVerificationRequired(_) => {
             "PikPak 需要官方操作验证，请在我的网盘中完成验证后重试".into()
@@ -62,7 +64,8 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
         QuarkError::Storage => "安全凭据存储不可用".into(),
         QuarkError::DownloadCheckpointInvalid
         | QuarkError::DownloadEngineUnavailable
-        | QuarkError::DownloadSubmissionFailed => error.to_string(),
+        | QuarkError::DownloadSubmissionFailed
+        | QuarkError::BaiduTransferPending => error.to_string(),
         QuarkError::Transport(message)
             if matches!(
                 message.as_str(),
@@ -102,6 +105,7 @@ pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
         QuarkError::DownloadCheckpointInvalid => "download_checkpoint_invalid",
         QuarkError::DownloadEngineUnavailable => "download_engine_unavailable",
         QuarkError::DownloadSubmissionFailed => "download_submission_failed",
+        QuarkError::BaiduTransferPending => "baidu_transfer_pending",
         QuarkError::InvalidResponse => "invalid_response",
         QuarkError::Storage => "credential_storage_error",
         QuarkError::Transport(_) => "network_error",

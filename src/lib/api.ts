@@ -3,6 +3,7 @@ import { Channel, invoke } from '@tauri-apps/api/core';
 import { version as appVersion } from '../../src-tauri/tauri.conf.json';
 import type { ThemeId } from './theme';
 import { t, type TranslationKey } from '../i18n';
+import { isXunleiVerificationFailure, isXunleiVerificationReason, xunleiVerificationMessage } from './xunleiVerification';
 
 function fileNameFrom(value: string) {
   if (/^ed2k:\/\/\|file\|/i.test(value)) {
@@ -92,8 +93,8 @@ export async function parseDownload(input: string, accessCode?: string, requireC
   if (!isTauriRuntime()) return parseLocally(input);
   const result = await invoke<NativeParseOutcome>('parse_download', { input, accessCode, ...(requireConfirmation ? { requireConfirmation } : {}) })
     .catch((error: unknown) => {
-      if (error === 'xunlei_share_profile_unsupported') {
-        throw new Error(t('cloud.verification.xunlei.shareProfileUnsupported'));
+      if (isXunleiVerificationReason(error) || isXunleiVerificationFailure(error)) {
+        throw new Error(xunleiVerificationMessage(typeof error === 'string' ? error : (error as { message?: unknown }).message));
       }
       throw error;
     });

@@ -298,3 +298,20 @@ it('passes one shared post-processing note to native and cloud confirmations', a
     postProcessingNote: '密码 88in\n完成后拼接', onCreated: expect.any(Object)
   });
 });
+
+it.each([
+  ['metadata_expired', /XL-LOCAL-EXPIRED/],
+  ['metadata_missing', /XL-LOCAL-MISSING/],
+  ['timestamp_invalid', /XL-LOCAL-TIME/],
+  ['xunlei_share_profile_unsupported', /XL-SHARE-PROFILE/],
+  ['brand_new_reason', /XL-LOCAL\]/]
+])('localizes the Xunlei verification code %s instead of showing it', async (code, expected) => {
+  native.invoke.mockRejectedValueOnce(code === 'brand_new_reason' ? { code: 'xunlei_verification_unavailable', message: code } : code);
+  const { parseDownload } = await import('./api');
+
+  const failure = await parseDownload('https://pan.xunlei.com/s/abc').catch((error: Error) => error);
+
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).not.toContain(code);
+  expect((failure as Error).message).toMatch(expected);
+});

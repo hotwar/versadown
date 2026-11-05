@@ -61,6 +61,8 @@ export interface CloudSessionPersistenceWarning { provider: CloudProvider; opera
 export interface CloudFile { id: string; parentId: string; name: string; kind: 'file' | 'folder'; size?: number; modifiedAt?: string; shareId?: string; shareUrl?: string; sharePassCode?: string; }
 export interface CloudDirectory { id: string; items: CloudFile[]; }
 export interface CloudShareOptions { name: string; passCode?: string; generatePassCode?: boolean; expiresInDays?: number; }
+export interface CloudShareCancelFailure { id: string; code: string; message: string; }
+export interface CloudShareCancelOutcome { cancelled: readonly string[]; failures: readonly CloudShareCancelFailure[]; }
 export interface CloudShare { id: string; url: string; name: string; kind: 'file' | 'folder'; sourceFileIds: readonly string[]; passCode?: string; createdAt?: string; expiresAt?: string; }
 export interface CloudUploadFailure { inputIndex?: number; itemName: string; code: string; message: string; }
 export interface CloudUploadOutcome {

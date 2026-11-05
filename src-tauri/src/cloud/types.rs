@@ -348,7 +348,7 @@ pub enum CloudError {
     SessionRenewedRetryOperation,
     #[error("此登录方式需要网页验证，请点击网页授权完成登录")]
     WebAuthorizationRequired,
-    #[error("{0}")]
+    #[error("{}", xunlei_verification_text(.0))]
     XunleiVerificationUnavailable(&'static str),
     #[error("网盘要求完成官方操作验证后重试")]
     CaptchaRequired,
@@ -368,6 +368,8 @@ pub enum CloudError {
     DownloadEngineUnavailable,
     #[error("本地下载引擎未能接受任务，请重试；若持续失败请检查下载目录和引擎日志")]
     DownloadSubmissionFailed,
+    #[error("百度转存仍在进行或结果未知，请稍后在网盘中查看，确认后再重试")]
+    BaiduTransferPending,
     #[error("云盘响应无效，请刷新后重试")]
     InvalidResponse,
     #[error("安全凭据存储不可用")]
@@ -384,6 +386,76 @@ pub enum CloudError {
     ProviderUnsupported,
 }
 pub use CloudError as QuarkError;
+
+/// User-readable Chinese text for a Xunlei verification reason code. The code
+/// itself stays the stable wire value; it must never be shown to the user.
+pub(crate) fn xunlei_verification_text(reason: &str) -> &'static str {
+    match reason {
+        "metadata_missing" => "缺少迅雷操作验证信息，请重新网页授权后重试",
+        "metadata_expired" => "迅雷分享信息已过期，请重新打开分享链接或重新网页授权",
+        "timestamp_invalid" => "迅雷验证信息的时间戳无效，请检查系统时间后重试",
+        "xunlei_share_profile_unsupported" => {
+            "当前迅雷网页版本暂不支持解析此分享，请在迅雷官网打开该分享"
+        }
+        _ => "暂时无法准备迅雷操作所需的验证信息，请稍后重试",
+    }
+}
+
+/// Outcome of cancelling several shares one by one. Already-deleted ids are
+/// reported as cancelled so a retry only needs to carry the failed ones.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudShareCancelOutcome {
+    pub cancelled: Vec<String>,
+    pub failures: Vec<CloudShareCancelFailure>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudShareCancelFailure {
+    pub id: String,
+    pub code: String,
+    pub message: String,
+}
+
+impl CloudShareCancelOutcome {
+    pub fn all_cancelled(ids: &[String]) -> Self {
+        Self { cancelled: ids.to_vec(), failures: Vec::new() }
+    }
+}
+
+impl CloudShareCancelFailure {
+    pub fn from_error(id: &str, error: &CloudError) -> Self {
+        let message = match error {
+            CloudError::Provider(_) => "迅雷取消分享请求失败，请稍后重试".to_owned(),
+            CloudError::Transport(_) => "网络请求失败，请检查网络后重试".to_owned(),
+            other => other.to_string(),
+        };
+        let code = serde_json::to_value(error)
+            .ok()
+            .and_then(|value| value["code"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| "provider_error".into());
+        Self { id: id.to_owned(), code, message }
+    }
+}
+
+impl CloudError {
+    /// Errors about the whole session rather than one item: continuing the
+    /// batch would only repeat the same failure.
+    pub fn is_session_level(&self) -> bool {
+        matches!(
+            self,
+            Self::NotAuthorized
+                | Self::AccountMismatch
+                | Self::AuthorizationExpired
+                | Self::SessionRenewedRetryOperation
+                | Self::WebAuthorizationRequired
+                | Self::CaptchaRequired
+                | Self::XunleiVerificationUnavailable(_)
+                | Self::Storage
+        )
+    }
+}
 
 impl Serialize for CloudError {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -405,6 +477,7 @@ impl Serialize for CloudError {
             Self::DownloadCheckpointInvalid => "download_checkpoint_invalid",
             Self::DownloadEngineUnavailable => "download_engine_unavailable",
             Self::DownloadSubmissionFailed => "download_submission_failed",
+            Self::BaiduTransferPending => "baidu_transfer_pending",
             Self::Storage => "credential_storage_error",
             Self::InvalidResponse => "invalid_response",
             Self::Transport(_) => "network_error",
@@ -413,7 +486,13 @@ impl Serialize for CloudError {
             Self::UploadUnavailable => "provider_unsupported",
             Self::ProviderUnsupported => "provider_unsupported",
         };
-        serde_json::json!({"code":code,"message":self.to_string()}).serialize(s)
+        // Xunlei verification keeps its stable reason on the wire so the
+        // frontend can localize it; Display stays human-readable.
+        let message = match self {
+            Self::XunleiVerificationUnavailable(reason) => (*reason).to_owned(),
+            other => other.to_string(),
+        };
+        serde_json::json!({"code":code,"message":message}).serialize(s)
     }
 }
 

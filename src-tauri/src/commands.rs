@@ -628,6 +628,15 @@ pub fn stage_dropped_torrent(
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// Xunlei verification failures cross the IPC boundary as their stable reason
+/// code so the frontend can localize them; everything else keeps its message.
+pub(crate) fn parse_share_error_string(error: crate::cloud::QuarkError) -> String {
+    match error {
+        crate::cloud::QuarkError::XunleiVerificationUnavailable(reason) => reason.to_owned(),
+        other => other.to_string(),
+    }
+}
+
 #[tauri::command]
 pub async fn parse_download(
     app: AppHandle,
@@ -643,7 +652,7 @@ pub async fn parse_download(
         let provider = candidate.provider;
         return match crate::cloud::commands::inspect_cloud_share(app.clone(), candidate)
             .await
-            .map_err(|error| error.to_string())?
+            .map_err(parse_share_error_string)?
         {
             crate::cloud::share::ShareConfirmationOutcome::Confirmation(plan) => {
                 Ok(ParseDownloadOutcome::ShareConfirmation(plan))

@@ -13,7 +13,9 @@ pub(crate) fn cookie_for_download(web_cookie: &str, response_cookies: &[String])
     for response_cookie in response_cookies {
         if let Some((name, pair)) = cookie_pair(response_cookie) {
             cookies.retain(|(current, _)| current != name);
-            cookies.push((name.to_owned(), pair.to_owned()));
+            if !cookie_is_expired(response_cookie) {
+                cookies.push((name.to_owned(), pair.to_owned()));
+            }
         }
     }
     cookies
@@ -21,6 +23,27 @@ pub(crate) fn cookie_for_download(web_cookie: &str, response_cookies: &[String])
         .map(|(_, pair)| pair)
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// Whether a Set-Cookie value is a deletion instruction (`Max-Age<=0` or an
+/// `Expires` date in the past). `Max-Age` takes precedence over `Expires`.
+fn cookie_is_expired(set_cookie: &str) -> bool {
+    let attribute = |wanted: &str| {
+        set_cookie.split(';').skip(1).find_map(|part| {
+            let (name, value) = part.split_once('=')?;
+            name.trim()
+                .eq_ignore_ascii_case(wanted)
+                .then(|| value.trim())
+        })
+    };
+    if let Some(max_age) = attribute("max-age") {
+        if let Ok(seconds) = max_age.parse::<i64>() {
+            return seconds <= 0;
+        }
+    }
+    attribute("expires")
+        .and_then(|value| httpdate::parse_http_date(value).ok())
+        .is_some_and(|expires| expires <= std::time::SystemTime::now())
 }
 
 pub(crate) fn cookie_pair(value: &str) -> Option<(&str, &str)> {

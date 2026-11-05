@@ -18,6 +18,17 @@ fn unavailable_credential_storage_does_not_reset_or_delete_saved_accounts() {
     assert!(matches!(supervisor.restore(&Unavailable, CloudProvider::Quark), Err(QuarkError::Storage)));
 }
 
+// An unusable credential directory must degrade to "credentials unavailable"
+// instead of aborting application startup.
+#[test]
+fn credential_store_init_failure_degrades_instead_of_aborting_startup() {
+    let root = tempfile::tempdir().unwrap();
+    let blocker = root.path().join("sessions");
+    std::fs::write(&blocker, b"a file where a directory is required").unwrap();
+    let state = CloudState::new(blocker).expect("startup must not abort");
+    assert!(state.credential_restore_failed);
+}
+
 fn test_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()

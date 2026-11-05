@@ -412,32 +412,93 @@ fn extract_raw_candidates(text: &str) -> Vec<String> {
         r#"(?i)(ed2k:[^\s<>；]*?\|/|magnet:[^\s<>；]*|thunder://[^\s<>；]*|ftp:[^\s<>；]+|https?://[^\s<>；]+|file://[^\s<>；]+|"/[^"\r\n]+\.torrent"|'/[^'\r\n]+\.torrent'|[a-z]:\\[^\r\n<>]*?\.torrent|/[^\s<>；"']+\.torrent)"#,
     )
     .expect("static candidate pattern");
-    // Native file drops and staged torrents are one absolute path per line.
-    // Application Support and user filenames often contain spaces; applying
-    // the mixed-text regex first would silently truncate such paths.
     text.lines()
-        .flat_map(|line| {
-            let source = line.trim();
-            if std::path::Path::new(source).is_absolute()
-                && source.to_ascii_lowercase().ends_with(".torrent")
-            {
-                vec![source.to_string()]
-            } else {
-                pattern
-                    .find_iter(line)
-                    .map(|match_| {
-                        let raw = match_.as_str();
-                        let candidate = if raw.starts_with("\"/") || raw.starts_with("'/") {
-                            &raw[1..raw.len() - 1]
-                        } else {
-                            raw
-                        };
-                        trim_extracted_candidate(candidate)
-                    })
-                    .collect()
-            }
+        .flat_map(|line| match local_torrent_paths_in_line(line) {
+            Some(paths) => paths,
+            None => pattern
+                .find_iter(line)
+                .filter(|match_| !is_url_like_path_start(line, match_))
+                .map(|match_| {
+                    let raw = match_.as_str();
+                    let candidate = if raw.starts_with("\"/") || raw.starts_with("'/") {
+                        &raw[1..raw.len() - 1]
+                    } else {
+                        raw
+                    };
+                    trim_extracted_candidate(candidate)
+                })
+                .collect(),
         })
         .collect()
+}
+
+fn ends_with_torrent(value: &str) -> bool {
+    value.to_ascii_lowercase().ends_with(".torrent")
+}
+
+/// A `/` directly after a host-like character (`example.com/x.torrent`) is a
+/// URL path, not the start of a local absolute path.
+fn is_url_like_path_start(line: &str, match_: &regex::Match<'_>) -> bool {
+    match_.as_str().starts_with('/')
+        && line[..match_.start()]
+            .chars()
+            .next_back()
+            .is_some_and(|previous| previous.is_ascii_alphanumeric() || "-.:/".contains(previous))
+}
+
+/// Splits a line of absolute unix paths at each whitespace-preceded `/`.
+fn split_at_path_starts(line: &str) -> Vec<&str> {
+    let starts: Vec<usize> = line
+        .char_indices()
+        .filter(|(index, character)| {
+            *character == '/'
+                && line[..*index]
+                    .chars()
+                    .next_back()
+                    .is_none_or(char::is_whitespace)
+        })
+        .map(|(index, _)| index)
+        .collect();
+    starts
+        .iter()
+        .enumerate()
+        .map(|(position, start)| {
+            let end = starts.get(position + 1).copied().unwrap_or(line.len());
+            line[*start..end].trim()
+        })
+        .collect()
+}
+
+/// Native drops and staged torrents are absolute paths that may contain
+/// spaces. A whole line that exists, or has no second path start, is a single
+/// candidate; several `/...torrent` fragments are split. `None` defers to the
+/// mixed-text scanner.
+fn local_torrent_paths_in_line(line: &str) -> Option<Vec<String>> {
+    let trimmed = line.trim();
+    let source = trimmed
+        .strip_prefix('"')
+        .and_then(|value| value.strip_suffix('"'))
+        .or_else(|| {
+            trimmed
+                .strip_prefix('\'')
+                .and_then(|value| value.strip_suffix('\''))
+        })
+        .unwrap_or(trimmed);
+    let absolute = source.starts_with('/') || std::path::Path::new(source).is_absolute();
+    if !absolute || !ends_with_torrent(source) {
+        return None;
+    }
+    if std::path::Path::new(source).exists() || !source.starts_with('/') {
+        return Some(vec![source.to_string()]);
+    }
+    let parts = split_at_path_starts(source);
+    match parts.as_slice() {
+        [_] => Some(vec![source.to_string()]),
+        _ if parts.iter().all(|part| ends_with_torrent(part)) => {
+            Some(parts.iter().map(|part| part.to_string()).collect())
+        }
+        _ => None,
+    }
 }
 
 fn trim_extracted_candidate(value: &str) -> String {
@@ -685,10 +746,14 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn scan_preserves_quoted_local_torrent_paths_with_spaces_and_unicode() {
-        let values = scan_download_inputs("下载 \"/Users/example/下载文件/My release.torrent\" 完成");
+        let values =
+            scan_download_inputs("下载 \"/Users/example/下载文件/My release.torrent\" 完成");
         assert_eq!(values.len(), 1);
         assert!(values[0].valid);
-        assert_eq!(values[0].input, "/Users/example/下载文件/My release.torrent");
+        assert_eq!(
+            values[0].input,
+            "/Users/example/下载文件/My release.torrent"
+        );
     }
 
     #[test]
@@ -709,6 +774,74 @@ mod tests {
             assert!(value.valid);
             assert_eq!(value.input, line);
         }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scan_splits_multiple_absolute_torrent_paths_on_one_line() {
+        let values = scan_download_inputs("/Users/me/a.torrent /Users/me/b.torrent");
+        let inputs: Vec<_> = values.iter().map(|value| value.input.as_str()).collect();
+        assert_eq!(inputs, ["/Users/me/a.torrent", "/Users/me/b.torrent"]);
+        assert!(values.iter().all(|value| value.valid));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scan_splits_paths_with_spaces_and_unicode_on_one_line() {
+        let values = scan_download_inputs("/Users/me/测试 file.torrent /Users/me/My dir/b.torrent");
+        let inputs: Vec<_> = values.iter().map(|value| value.input.as_str()).collect();
+        assert_eq!(
+            inputs,
+            ["/Users/me/测试 file.torrent", "/Users/me/My dir/b.torrent"]
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scan_keeps_a_single_path_with_spaces_and_chinese_whole() {
+        let line = "/Users/me/Application Support/测试 file.torrent";
+        let values = scan_download_inputs(line);
+        assert_eq!(values.len(), 1);
+        assert!(values[0].valid);
+        assert_eq!(values[0].input, line);
+    }
+
+    #[test]
+    fn scan_ignores_url_like_text_ending_in_torrent() {
+        let values = scan_download_inputs("see example.com/files/x.torrent");
+        assert!(values.iter().all(|value| value.input != "/files/x.torrent"));
+        let values = scan_download_inputs("see sub-host.example.org/a/b/x.torrent here");
+        assert!(values.iter().all(|value| !value.input.starts_with('/')));
+    }
+
+    #[test]
+    fn scan_keeps_windows_torrent_paths_with_spaces() {
+        let values = scan_download_inputs(r"C:\Users\x\a b.torrent");
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].input, r"C:\Users\x\a b.torrent");
+    }
+
+    #[test]
+    fn scan_leaves_magnet_and_http_links_unaffected_in_multiline_input() {
+        let magnet = "magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567";
+        let input =
+            format!("{magnet}\nhttps://example.test/dir/x.torrent\nhttps://example.test/a.zip");
+        let values = scan_download_inputs(&input);
+        assert_eq!(values.len(), 3);
+        assert_eq!(values[0].input, magnet);
+        assert_eq!(values[1].input, "https://example.test/dir/x.torrent");
+        assert!(values.iter().all(|value| value.valid));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scan_handles_multiline_mix_of_paths() {
+        let values = scan_download_inputs("/a/x.torrent /b/y.torrent\n/c/with space.torrent");
+        let inputs: Vec<_> = values.iter().map(|value| value.input.as_str()).collect();
+        assert_eq!(
+            inputs,
+            ["/a/x.torrent", "/b/y.torrent", "/c/with space.torrent"]
+        );
     }
 
     #[test]

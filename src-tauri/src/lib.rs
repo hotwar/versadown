@@ -17,6 +17,8 @@ mod ftp;
 mod launcher;
 mod launcher_drag;
 mod launcher_input;
+#[cfg(any(test, target_os = "macos"))]
+mod launcher_poll;
 mod launcher_window;
 mod link_association;
 mod local_upload_picker;
@@ -306,7 +308,7 @@ pub fn run() {
                 }
             }
             let startup_store = std::sync::Arc::clone(&store);
-            let ai_secrets = cloud::SystemCredentialStore::new(data_dir.join("ai-secrets"))?;
+            let ai_secrets = cloud::SystemCredentialStore::new_or_degraded(data_dir.join("ai-secrets")).0;
             // Webviews can invoke cloud commands while setup is still creating the
             // download runtime. Register this state immediately so those early
             // calls cannot race a later `manage` call.

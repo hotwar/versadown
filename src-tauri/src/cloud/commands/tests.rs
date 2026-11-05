@@ -690,6 +690,28 @@ fn share_resolution_errors_keep_actionable_types_without_echoing_provider_secret
 }
 
 #[test]
+fn xunlei_verification_messages_never_expose_internal_reason_codes() {
+    let reasons = [
+        "metadata_expired",
+        "metadata_missing",
+        "timestamp_invalid",
+        "xunlei_share_profile_unsupported",
+        "some_future_reason",
+    ];
+    for reason in reasons {
+        let error = QuarkError::XunleiVerificationUnavailable(reason);
+        for text in [error.to_string(), super::share_resolution_failure_message(&error)] {
+            assert!(!text.contains(reason), "{text}");
+            assert!(!text.contains('_'), "{text}");
+            assert!(text.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)));
+        }
+    }
+    let wire = serde_json::to_value(QuarkError::XunleiVerificationUnavailable("metadata_expired"))
+        .unwrap();
+    assert_eq!(wire["code"], "xunlei_verification_unavailable");
+}
+
+#[test]
 fn cloud_download_local_failures_keep_distinct_codes_in_every_error_surface() {
     use crate::aria2::service::DownloadServiceError;
     let cases = [

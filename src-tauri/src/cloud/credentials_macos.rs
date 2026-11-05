@@ -5,68 +5,51 @@ use chacha20poly1305::aead::Payload;
 use rusqlite::{params, Connection, OptionalExtension};
 use zeroize::Zeroizing;
 
-#[derive(Default)]
-pub(super) struct MasterKeyCache(Mutex<Option<Result<Zeroizing<[u8; 32]>, ()>>>);
-impl MasterKeyCache {
-    pub(super) fn get(
-        &self,
-        read: impl FnOnce() -> Result<[u8; 32], QuarkError>,
-    ) -> Result<[u8; 32], QuarkError> {
-        let mut state = self.0.lock().map_err(|_| QuarkError::Storage)?;
-        if state.is_none() {
-            *state = Some(read().map(Zeroizing::new).map_err(|_| ()));
+use crate::cloud::credential_recovery::{
+    is_corruption, quarantine_database, undecryptable_names, MasterKeyCache,
+};
+pub(super) static MASTER_KEY: MasterKeyCache = MasterKeyCache::new();
+
+fn open_once(root: &Path) -> rusqlite::Result<Connection> {
+    let db = Connection::open(root.join("credentials-v2.sqlite"))?;
+    db.busy_timeout(std::time::Duration::from_secs(5))?;
+    db.execute_batch("PRAGMA secure_delete=ON; CREATE TABLE IF NOT EXISTS credentials (name TEXT PRIMARY KEY, payload BLOB NOT NULL);")?;
+    Ok(db)
+}
+// A damaged file is backed up and rebuilt; locked/busy files are left alone.
+fn open(root: &Path) -> Result<Connection, QuarkError> {
+    match open_once(root) {
+        Ok(db) => Ok(db),
+        Err(error) if is_corruption(&error) => {
+            quarantine_database(&root.join("credentials-v2.sqlite"))?;
+            open_once(root).map_err(|_| QuarkError::Storage)
         }
-        match state.as_ref().unwrap() {
-            Ok(key) => Ok(**key),
-            Err(()) => Err(QuarkError::Storage),
-        }
+        Err(_) => Err(QuarkError::Storage),
     }
 }
-pub(super) static MASTER_KEY: MasterKeyCache = MasterKeyCache(Mutex::new(None));
-
-// If encrypted data already exists, a missing Keychain key is data loss,
-// never permission to generate a replacement and overwrite credentials.
-pub(super) static KEY_REQUIRED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-pub(super) fn register_existing_data(root: &Path) -> Result<(), QuarkError> {
-    for (file, table) in [
-        ("credentials-v2.sqlite", "credentials"),
-        ("cloud-share-plans.sqlite", "share_plans"),
-    ] {
-        let path = root.join(file);
-        if !path.exists() {
-            continue;
-        }
-        let db = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+// After a lost Keychain key is replaced, rows the new key cannot
+// authenticate are unrecoverable; removing them restores the store.
+pub(super) fn purge_undecryptable(
+    root: &Path,
+    service: &str,
+    key: [u8; 32],
+) -> Result<(), QuarkError> {
+    let db = open(root)?;
+    let mut statement = db
+        .prepare("SELECT name, payload FROM credentials")
+        .map_err(|_| QuarkError::Storage)?;
+    let rows = statement
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))
+        .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+        .map_err(|_| QuarkError::Storage)?;
+    drop(statement);
+    for name in undecryptable_names(&rows, |name, payload| {
+        decrypt(service, name, payload, key).is_ok()
+    }) {
+        db.execute("DELETE FROM credentials WHERE name=?1", [name])
             .map_err(|_| QuarkError::Storage)?;
-        let exists: bool = db
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
-                [table],
-                |r| r.get(0),
-            )
-            .map_err(|_| QuarkError::Storage)?;
-        if exists {
-            let has_rows: bool = db
-                .query_row(&format!("SELECT EXISTS(SELECT 1 FROM {table})"), [], |r| {
-                    r.get(0)
-                })
-                .map_err(|_| QuarkError::Storage)?;
-            if has_rows {
-                KEY_REQUIRED.store(true, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
     }
     Ok(())
-}
-
-fn open(root: &Path) -> Result<Connection, QuarkError> {
-    let db =
-        Connection::open(root.join("credentials-v2.sqlite")).map_err(|_| QuarkError::Storage)?;
-    db.busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|_| QuarkError::Storage)?;
-    db.execute_batch("PRAGMA secure_delete=ON; CREATE TABLE IF NOT EXISTS credentials (name TEXT PRIMARY KEY, payload BLOB NOT NULL);").map_err(|_| QuarkError::Storage)?;
-    Ok(db)
 }
 pub(super) fn payload(root: &Path, name: &str) -> Result<Option<Vec<u8>>, QuarkError> {
     open(root)?
@@ -175,7 +158,7 @@ mod tests {
         assert!(reopened.load("unknown").is_err());
     }
     #[test]
-    fn concurrent_consumers_unlock_once_and_denial_is_not_retried() {
+    fn concurrent_consumers_unlock_once_and_failures_are_retried() {
         for succeeds in [true, false] {
             let cache = Arc::new(MasterKeyCache::default());
             let calls = Arc::new(AtomicUsize::new(0));
@@ -184,24 +167,37 @@ mod tests {
                     let cache = cache.clone();
                     let calls = calls.clone();
                     scope.spawn(move || {
-                        assert_eq!(
-                            cache
-                                .get(|| {
-                                    calls.fetch_add(1, Ordering::SeqCst);
-                                    if succeeds {
-                                        Ok([7; 32])
-                                    } else {
-                                        Err(QuarkError::Storage)
-                                    }
-                                })
-                                .is_ok(),
-                            succeeds
-                        );
+                        let read = || {
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            if succeeds {
+                                Ok([7; 32])
+                            } else {
+                                Err(QuarkError::Storage)
+                            }
+                        };
+                        assert_eq!(cache.get(read).is_ok(), succeeds);
                     });
                 }
             });
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(calls.load(Ordering::SeqCst), if succeeds { 1 } else { 24 });
         }
+    }
+    #[test]
+    fn replacing_a_lost_key_purges_only_undecryptable_rows() {
+        let root = tempfile::tempdir().unwrap();
+        save(root.path(), "cloud", "quark", b"old", [1; 32]).unwrap();
+        save(root.path(), "cloud", "baidu", b"new", [2; 32]).unwrap();
+        purge_undecryptable(root.path(), "cloud", [2; 32]).unwrap();
+        assert!(payload(root.path(), "quark").unwrap().is_none());
+        assert!(payload(root.path(), "baidu").unwrap().is_some());
+    }
+    #[test]
+    fn corrupt_credential_file_is_backed_up_and_rebuilt() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("credentials-v2.sqlite"), vec![b'z'; 4096]).unwrap();
+        save(root.path(), "cloud", "quark", b"v", [3; 32]).unwrap();
+        assert!(payload(root.path(), "quark").unwrap().is_some());
+        assert!(root.path().join("credentials-v2.sqlite.corrupt-0").exists());
     }
     #[test]
     fn encrypted_rows_reopen_bind_to_namespace_and_detect_tampering() {
