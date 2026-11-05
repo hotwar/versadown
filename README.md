@@ -2,15 +2,81 @@
 
 本地优先的桌面下载客户端。它把标准下载链接、磁力/种子、迅雷链接、网盘分享链接和复杂文本放入统一任务流程，并使用小型悬浮输入窗与下载管理器显示进度。
 
+## 下载与安装
+
+前往 [GitHub Releases 下载最新版](https://github.com/liuwenhuan/versadown/releases/latest)，按系统和处理器架构选择安装包。发布页同时提供 SHA-256 校验文件。
+
+| 平台 | 架构 | 发布包 |
+| --- | --- | --- |
+| Windows 10/11 | x86_64 | `.exe` 安装包，需要 WebView2 runtime |
+| macOS 12+ | Apple Silicon（ARM64）/ Intel（x86_64） | `.dmg` / `.app.zip`，请选择对应架构 |
+| Linux | x86_64 | `.deb` / `.rpm` / `.AppImage` |
+
 ## 当前可运行能力
 
-- Tauri 2 + WebView2 Windows 桌面壳；没有 Electron/Chromium 捆绑包。
+- 基于 Tauri 2 的 Windows、macOS 与 Linux 桌面应用，使用系统 WebView；没有 Electron/Chromium 捆绑包。
 - HTTP/HTTPS、FTP、ED2K、HLS `.m3u8`、MPEG-DASH `.mpd`、magnet、`.torrent`、Thunder 和网盘分享地址的规则分类；直链自动进入下载状态，多文件类型先进入确认窗口。
 - 本地 SQLite 任务状态、恢复时读取的任务列表、暂停/继续/取消状态操作，以及目录父子任务界面。
-- Aria2 Next Windows sidecar 已随包配置，负责 HTTP、BT、ED2K 以及原生 HLS/DASH 下载；任务状态、续传信息和媒体清单均由 aria2-next 统一持久化。FTP 仍由进程内纯 Rust 引擎下载并支持断点续传。
+- 各平台均随包提供对应的 aria2-next 引擎，负责 HTTP、BT、ED2K 以及原生 HLS/DASH 下载；任务状态、续传信息和媒体清单均由 aria2-next 统一持久化。FTP 仍由进程内纯 Rust 引擎下载并支持断点续传。
 - 安全的后处理计划模型：只允许解压、合并、改名、校验；拒绝程序执行和路径穿越。页面中取得的密码仅存为受保护引用，不写入调试对象。
-- 自绘的夸克/PikPak 文件管理界面、连接器能力契约与可测试 mock 连接器。账号登录、文件 API、上传与真实云端目录操作必须经过用户授权并受服务商接口/条款限制。
+- 已接入夸克、PikPak、百度网盘、阿里云盘、迅雷网盘和 UC 网盘，提供应用内文件管理、上传下载、回收站和分享管理入口。各网盘的具体能力及授权要求存在差异，以应用界面和服务商限制为准。
 - 可选的 Beta 调试报告开关默认关闭；关闭时不应收集详细链路数据。
+
+## 界面预览
+
+以下截图采自 macOS 上实际运行的 VersaDown，账号信息已遮挡；不同版本和平台的外观可能略有差异。
+
+### 下载管理
+
+在统一列表中查看任务进度并管理下载。
+
+![VersaDown 下载管理界面](docs/screenshots/downloads.png)
+
+### 新建下载
+
+查看已识别的下载信息，确认后创建单个下载任务。
+
+![VersaDown 新建下载界面](docs/screenshots/new-download.png)
+
+### 网盘文件
+
+在夸克网盘目录中浏览文件，并使用上传、新建目录、回收站和「我的分享」入口。
+
+![VersaDown 夸克网盘文件管理界面](docs/screenshots/cloud-files.png)
+
+<details>
+<summary>更多界面：网盘授权与任务搜索</summary>
+
+### 网盘授权
+
+集中管理夸克、PikPak、百度网盘、阿里云盘、迅雷网盘和 UC 网盘的授权。
+
+![VersaDown 网盘授权管理界面](docs/screenshots/cloud-accounts.png)
+
+### 任务搜索
+
+按关键词查找已有下载任务。
+
+![VersaDown 任务搜索界面](docs/screenshots/task-search.png)
+
+</details>
+
+<details>
+<summary>更多界面：网络与隐私设置</summary>
+
+### 网络设置
+
+配置网络代理和下载限速。
+
+![VersaDown 网络代理与下载限速设置界面](docs/screenshots/network-settings.png)
+
+### 隐私设置
+
+管理隐私模式等高级设置。隐私任务解锁后才显示，下载文件本身不加密。
+
+![VersaDown 高级与隐私设置界面](docs/screenshots/privacy-settings.png)
+
+</details>
 
 ## 明确的安全边界
 
@@ -108,6 +174,10 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke-download.ps1
 
 默认下载目录为当前 Windows 用户的 `Downloads`。任务数据库位于 Windows 应用数据目录中的 `VersaDown/tasks.sqlite`；不要手动复制其中可能关联授权会话的信息。
 
-## 关于夸克与 PikPak
+## 网盘授权与分享下载
 
-应用的连接器边界与文件管理界面已经固定为“用户自身授权、凭据本机保护、应用自绘目录”。真实连接器不能依赖未审查的 Cookie 导入或规避服务商限制。下一步集成只能选择许可兼容、经安全审查的开源实现或服务商正式接口，并用用户本人完成的授权会话进行验证。没有真实账户授权时，自动化测试使用 mock 连接器而不是伪造云端成功结果。
+网盘操作使用用户自身授权的会话，凭据在本机保护，目录由应用自绘。账号登录、文件访问和上传下载受服务商接口、账号权限及条款限制，不能依赖未审查的 Cookie 导入或规避服务商限制。
+
+分享链接可能需要登录、输入提取码，或先转存到自己的网盘后才能下载；不保证免登录或免转存，也不保证所有网盘提供相同能力。天翼云盘当前未启用。
+
+没有真实账户授权时，自动化测试使用 mock 连接器，不将测试数据当作真实云端操作结果。
