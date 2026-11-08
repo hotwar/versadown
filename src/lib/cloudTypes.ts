@@ -1,5 +1,12 @@
 import type { TaskActionResult } from './types';
 
+export interface XunleiMembership {
+  accountId: string;
+  kind: 'none' | 'vip' | 'platinum' | 'svip' | 'cloud';
+  level: number | null;
+  nativeVipType: number;
+}
+
 export type CloudProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc';
 export type CloudAuthMethod = 'web' | 'password';
 

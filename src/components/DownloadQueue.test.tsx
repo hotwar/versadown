@@ -1477,3 +1477,13 @@ it('emits details only after its right-click menu item is selected', async () =>
   expect(onCommand).toHaveBeenCalledTimes(1);
   expect(onCommand).toHaveBeenCalledWith('task-1', 'details');
 });
+
+it.each([
+  ['download.xunlei.native', '迅雷原生通道'],
+  ['download.xunlei.accelerating', '迅雷会员通道'],
+])('localizes the Mac native channel status %s', (statusMessage, label) => {
+  render(<DownloadQueue tasks={[{ id: 'native', name: 'file.bin', source: 'cloud://xunlei/file', kind: 'cloud', status: 'downloading', progress: 20, statusMessage }]}
+    selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);
+  expect(screen.getByText(label)).toBeVisible();
+  expect(screen.queryByText(statusMessage)).not.toBeInTheDocument();
+});

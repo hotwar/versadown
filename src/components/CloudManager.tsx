@@ -25,6 +25,7 @@ export interface CloudManagerClient {
   loginCloudWithPassword(provider: CloudProvider, credentials: CloudCredentials): Promise<CloudAccount>;
   getSavedCloudCredentials?(provider: CloudProvider): Promise<import('../lib/cloudTypes').SavedCloudCredentialInfo | null>;
   getCloudAccount(provider: CloudProvider): Promise<CloudAccount>;
+  getXunleiMembership?(): Promise<import('../lib/cloudTypes').XunleiMembership>;
   getCloudAccountCapacity?(provider: CloudProvider): Promise<import('../lib/cloudTypes').CloudAccountCapacity>;
   subscribeCloudCapacityInvalidated?(provider: CloudProvider, receive: (event: CloudCapacityInvalidated) => void): Promise<() => void>;
   listCloudDirectory(provider: CloudProvider, parentId?: string): Promise<CloudDirectory>;
@@ -643,6 +644,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const rootId = descriptor.rootDirectoryId;
   const [activeAccount, setActiveAccount] = useState<CloudAccount | null>(initialAccount?.provider === provider ? initialAccount : null);
   const [accountCapacity, setAccountCapacity] = useState<CloudCapacityViewState>();
+  const [xunleiMembership, setXunleiMembership] = useState<import('../lib/cloudTypes').XunleiMembership | null>();
   const capacityControllerRef = useRef<CloudCapacityController | null>(null);
   if (!capacityControllerRef.current) capacityControllerRef.current = new CloudCapacityController();
   const capacityController = capacityControllerRef.current;
@@ -857,6 +859,18 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }, [activeAccount?.id, authorizationOnly, capacityController, client, provider]);
 
   useEffect(() => () => capacityController.dispose(), [capacityController]);
+
+  useEffect(() => {
+    setXunleiMembership(undefined);
+    const accountId = activeAccount?.id;
+    if (!authorizationOnly || provider !== 'xunlei' || !accountId) return;
+    if (!client.getXunleiMembership) { setXunleiMembership(null); return; }
+    let active = true;
+    client.getXunleiMembership().then(value => {
+      if (active) setXunleiMembership(value.accountId === accountId ? value : null);
+    }).catch(() => { if (active) setXunleiMembership(null); });
+    return () => { active = false; };
+  }, [activeAccount?.id, authorizationOnly, client, provider]);
 
   async function loadDirectory(account: CloudAccount, parentId: string, nextBreadcrumbs: readonly Breadcrumb[]) {
     setDirectoryState('loading');
@@ -1629,6 +1643,9 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     return <section className={`cloud-manager cloud-authorization cloud-connected-account cloud-provider-${provider}${authorizationCardDrag?.dragging ? ' cloud-provider-dragging' : ''}${authorizationCardDrag?.dropTarget ? ' cloud-provider-drop-target' : ''}`} data-cloud-provider={authorizationCardDrag ? provider : undefined} aria-label={t('cloud.accountAuthorization', { name: label })}>
       <header className="cloud-heading cloud-authorization-drag-handle" onPointerDown={authorizationCardDrag?.onPointerDown}><h2>{t('cloud.providerDrive', { name: label })} <span className="cloud-account-name">· {activeAccount?.displayName}</span></h2><button type="button" onPointerDown={(event) => event.stopPropagation()} className="cloud-provider-info-button" aria-label={providerInfoOpen ? t('cloud.closeProviderInfo', { name: label }) : t('cloud.viewProviderInfo', { name: label })} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
       {!providerInfoOpen && <p className="cloud-account-capacity" aria-live="polite">{capacityText}{accountCapacity?.value && accountCapacity.refreshFailed && <span> · {t('cloud.capacityRefreshFailed')}</span>}</p>}
+      {!providerInfoOpen && provider === 'xunlei' && <p className="cloud-account-capacity" aria-live="polite">{xunleiMembership
+        ? t(`cloud.xunlei.membership.${xunleiMembership.kind}`, { level: xunleiMembership.level ?? '' })
+        : t(xunleiMembership === null ? 'cloud.xunlei.membership.unavailable' : 'cloud.xunlei.membership.loading')}</p>}
       {providerInfoOpen ? <CloudProviderInfo provider={provider} label={label} officialUrl={descriptor.authorizationUrl} /> : <>{sessionActions()}{logoutConfirmation()}{operationStatus()}</>}
     </section>;
   }

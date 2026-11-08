@@ -156,6 +156,8 @@ impl DownloadOps for XunleiDriver<'_> {
                 headers.push(("Referer".into(), "https://pan.xunlei.com/".into()));
             }
             headers.extend(xunlei::xunlei_native_identity_markers(&session));
+            #[cfg(target_os = "macos")]
+            headers.extend(client.native_membership_markers());
             append_native_download_markers(&mut headers, &download);
             Ok(ResolvedCloudDownload {
                 url: download.url,

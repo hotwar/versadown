@@ -42,6 +42,7 @@ export const reauthorizeFailedCloudTask = (taskId: string) => invoke<CloudAuthor
 export const loginCloudWithPassword = (provider: CloudProvider, credentials: CloudCredentials) => invoke<CloudAccount>('cloud_login_password', { provider, ...credentials });
 export const getSavedCloudCredentials = (provider: CloudProvider) => invoke<import('./cloudTypes').SavedCloudCredentialInfo | null>('cloud_saved_password_credentials', { provider });
 export const getCloudAccount = (provider: CloudProvider) => invoke<CloudAccount>('cloud_account', { provider });
+export const getXunleiMembership = () => invoke<import('./cloudTypes').XunleiMembership>('cloud_xunlei_membership');
 export const getCloudAccountCapacity = (provider: CloudProvider) => invoke<CloudAccountCapacity>('cloud_account_capacity', { provider });
 const capacitySubscribers = new Set<{ provider: CloudProvider; receive: (event: CloudCapacityInvalidated) => void }>();
 let capacityListener: Promise<() => void> | null = null;

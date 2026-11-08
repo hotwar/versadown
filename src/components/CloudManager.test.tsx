@@ -2732,3 +2732,17 @@ it('keeps the Xunlei file list and offers explicit authorization when operation 
   expect(client.beginCloudAuthorization).toHaveBeenCalledWith('xunlei');
   expect(client.logoutCloud).not.toHaveBeenCalled();
 });
+
+it('shows the actual Xunlei download membership level on the authorization card', async () => {
+  const client = createCloudFake({ getXunleiMembership: vi.fn().mockResolvedValue({ accountId: 'xl', kind: 'svip', level: 1, nativeVipType: 5 }) });
+  render(<CloudManager provider="xunlei" client={client} authorizationOnly initialAccount={{ id: 'xl', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} />);
+  expect(await screen.findByText('SVIP1')).toBeVisible();
+});
+
+it('does not mislabel an unavailable or mismatched Xunlei membership as a nonmember', async () => {
+  const client = createCloudFake({ getXunleiMembership: vi.fn().mockResolvedValue({ accountId: 'another', kind: 'svip', level: 8, nativeVipType: 5 }) });
+  render(<CloudManager provider="xunlei" client={client} authorizationOnly initialAccount={{ id: 'xl', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} />);
+  expect(await screen.findByText(t('cloud.xunlei.membership.unavailable'))).toBeVisible();
+  expect(screen.queryByText('SVIP8')).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '已经完成授权' })).toBeVisible();
+});

@@ -673,6 +673,18 @@ pub async fn queue_cloud_dispatch(
                                         true,
                                     )?;
                             }
+                            #[cfg(target_os = "macos")]
+                            Err(crate::xunlei_native::NativeSubmitError::Failed(message))
+                                if message == "download.xunlei.submitFailed" =>
+                            {
+                                return Err(QuarkError::DownloadSubmissionFailed);
+                            }
+                            #[cfg(target_os = "macos")]
+                            Err(crate::xunlei_native::NativeSubmitError::Failed(message))
+                                if message == "download.xunlei.proxyCheckpoint" =>
+                            {
+                                return Err(QuarkError::InvalidInput(message));
+                            }
                             Err(error) => {
                                 return Err(QuarkError::Transport(error.user_message()));
                             }
@@ -1023,6 +1035,8 @@ pub(crate) fn directory_download_failure_fields(
         QuarkError::Provider(_) => ("provider_error", "网盘拒绝下载请求"),
         QuarkError::InvalidResponse => ("invalid_response", "网盘返回无效下载数据"),
         QuarkError::Storage => ("credential_storage_error", "本机凭据或任务存储不可用"),
+        QuarkError::InvalidInput(message) if message == "download.xunlei.proxyCheckpoint" =>
+            ("proxy_checkpoint_conflict", "download.xunlei.proxyCheckpoint"),
         QuarkError::InvalidInput(_) => ("invalid_input", "下载参数无效"),
         QuarkError::AuthorizationPending => ("authorization_pending", "网页授权尚未完成"),
         QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => {
@@ -1852,6 +1866,7 @@ impl ResolvedCloudDownload {
                         )
                         && !name.eq_ignore_ascii_case(crate::xunlei_native::CID_MARKER_HEADER)
                         && !name.eq_ignore_ascii_case(crate::xunlei_native::GCID_MARKER_HEADER)
+                        && !name.eq_ignore_ascii_case(crate::xunlei_native::VIP_TYPE_MARKER_HEADER)
                 })
                 .collect(),
             ..Default::default()

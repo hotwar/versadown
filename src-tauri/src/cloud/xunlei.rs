@@ -5,6 +5,10 @@
 //! identity, device id, and short-lived security state; it never accepts or
 //! stores an account password.
 
+#[path = "xunlei_membership.rs"]
+mod membership;
+pub use membership::XunleiMembership;
+
 use super::{
     http::response_json,
     types::{download_source_missing_from_http_404, encoded, required},
@@ -1146,6 +1150,8 @@ impl XunleiShareAdapter<'_> {
         let download = result?;
         let mut headers = xunlei_cdn_headers(&client.session().profile.user_agent);
         headers.extend(xunlei_native_identity_markers(&client.session()));
+        #[cfg(target_os = "macos")]
+        headers.extend(client.native_membership_markers());
         if let Some(token) = download.acceleration_token {
             headers.push((
                 crate::xunlei_native::ACCELERATION_TOKEN_MARKER_HEADER.into(),

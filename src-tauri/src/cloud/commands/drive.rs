@@ -78,6 +78,19 @@ pub async fn cloud_account(
 }
 
 #[tauri::command]
+pub async fn cloud_xunlei_membership(
+    app: AppHandle,
+) -> Result<xunlei::XunleiMembership, QuarkError> {
+    run_session_work(
+        app,
+        CloudProvider::Xunlei,
+        SessionWorkKind::Read,
+        move |state, http| with_xunlei_client(&state.store, http, |client| client.membership()),
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn cloud_account_capacity(
     app: AppHandle,
     provider: CloudProvider,

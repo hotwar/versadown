@@ -245,11 +245,13 @@ function cloudTaskSubtitle(source: string | undefined): string | undefined {
 }
 
 function taskSubtitle(task: QueueTask): string | undefined {
+  if (task.error === 'download.xunlei.submitFailed' || task.error === 'download.xunlei.proxyCheckpoint') return t(task.error);
   if (task.error) return task.error;
   const cloudSubtitle = cloudTaskSubtitle(task.source);
   if (task.source?.toLowerCase().startsWith('cloud://xunlei/') && task.statusMessage === '正在使用迅雷svip加速') {
     return t('download.cloudTaskSvip', { name: t('cloud.provider.xunlei') });
   }
+  if (task.statusMessage === 'download.xunlei.native' || task.statusMessage === 'download.xunlei.accelerating') return t(task.statusMessage);
   if (task.statusMessage) return task.statusMessage;
   const hasTransferData = task.progress > 0 || (task.completed_length ?? 0) > 0 || (task.total_length ?? 0) > 0;
   if (task.kind === 'magnet') return hasTransferData ? t('download.kind.magnet') : t('download.kind.magnetMetadata');

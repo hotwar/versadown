@@ -2,7 +2,7 @@
 //! client. Each platform adapter stays isolated, while task ownership and
 //! progress handling are shared by this backend.
 
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use std::collections::BTreeMap;
 use std::{path::PathBuf, sync::Arc};
 use tauri::{AppHandle, Manager};
@@ -16,9 +16,11 @@ use crate::{
 mod engine;
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(any(windows, target_os = "linux"))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(any(windows, target_os = "linux", target_os = "macos"))]
 use engine::native_gid;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use engine::NativeEngine;
 use engine::{
     parse_native_gid, NativeEngineSession, NativeProgress, NativeSubmission, NativeTaskHandle,
@@ -39,6 +41,7 @@ pub(crate) const PEER_ID_MARKER_HEADER: &str = "X-Downloader-Xunlei-Peer-Id";
 pub(crate) const CONTENT_LENGTH_MARKER_HEADER: &str = "X-Downloader-Xunlei-Content-Length";
 pub(crate) const CID_MARKER_HEADER: &str = "X-Downloader-Xunlei-Cid";
 pub(crate) const GCID_MARKER_HEADER: &str = "X-Downloader-Xunlei-Gcid";
+pub(crate) const VIP_TYPE_MARKER_HEADER: &str = "X-Downloader-Xunlei-Vip-Type";
 pub(crate) const PLUGIN_UPDATE_MESSAGE: &str = "迅雷云盘插件需要更新";
 pub(crate) const NATIVE_RESUME_BACKEND_UNAVAILABLE_MESSAGE: &str =
     "迅雷原生下载后端不可用，当前断点无法由普通下载继续；请安装或更新迅雷后重试，或选择重新下载";
@@ -56,11 +59,13 @@ pub struct XunleiNativeBackend {
     engine_session: NativeEngineSession,
     #[cfg(windows)]
     api: std::sync::Mutex<Option<WindowsApi>>,
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     vip_tokens: std::sync::Mutex<BTreeMap<u32, String>>,
     #[cfg(target_os = "linux")]
     linux_engine: std::sync::Mutex<Option<linux::LinuxWorkerEngine>>,
-    #[cfg(windows)]
+    #[cfg(target_os = "macos")]
+    macos_engine: std::sync::Mutex<Option<macos::MacWorkerEngine>>,
+    #[cfg(any(windows, target_os = "macos"))]
     plugin_config_path: Option<PathBuf>,
 }
 
@@ -70,11 +75,13 @@ impl Default for XunleiNativeBackend {
             engine_session: NativeEngineSession::new(),
             #[cfg(windows)]
             api: std::sync::Mutex::new(None),
-            #[cfg(any(windows, target_os = "linux"))]
+            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
             vip_tokens: std::sync::Mutex::new(BTreeMap::new()),
             #[cfg(target_os = "linux")]
             linux_engine: std::sync::Mutex::new(None),
-            #[cfg(windows)]
+            #[cfg(target_os = "macos")]
+            macos_engine: std::sync::Mutex::new(None),
+            #[cfg(any(windows, target_os = "macos"))]
             plugin_config_path: None,
         }
     }
@@ -86,11 +93,13 @@ impl XunleiNativeBackend {
             engine_session: NativeEngineSession::new(),
             #[cfg(windows)]
             api: std::sync::Mutex::new(None),
-            #[cfg(any(windows, target_os = "linux"))]
+            #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
             vip_tokens: std::sync::Mutex::new(BTreeMap::new()),
             #[cfg(target_os = "linux")]
             linux_engine: std::sync::Mutex::new(None),
-            #[cfg(windows)]
+            #[cfg(target_os = "macos")]
+            macos_engine: std::sync::Mutex::new(None),
+            #[cfg(any(windows, target_os = "macos"))]
             plugin_config_path: Some(plugin_config_path),
         }
     }
@@ -130,20 +139,33 @@ impl XunleiNativeBackend {
         resolved: &ResolvedCloudDownload,
         options: &UriSubmissionOptions,
     ) -> Result<Option<DownloadTask>, NativeSubmitError> {
+        // Existing aria2 checkpoints must stay with aria2 after installing or
+        // upgrading the Mac native adapter. Only new tasks may select an engine.
+        #[cfg(target_os = "macos")]
+        if options.proxy.is_some() && is_native_gid(options.native_resume_gid.as_deref()) {
+            return Err(NativeSubmitError::Failed("download.xunlei.proxyCheckpoint".into()));
+        }
+        #[cfg(target_os = "macos")]
+        let legacy_checkpoint = options.continue_download && store.find(task_id).is_ok_and(|task|
+            crate::aria2::native_resume::has_legacy_control(store, &task));
+        #[cfg(target_os = "macos")]
+        if !macos_can_select_native(options, legacy_checkpoint) {
+            return Ok(None);
+        }
         let Some((user_id, peer_id, vip_token)) = native_vip_credentials(resolved) else {
             return Ok(None);
         };
         let vip_token = Some(vip_token.to_owned());
 
-        #[cfg(all(not(windows), not(target_os = "linux")))]
+        #[cfg(all(not(windows), not(target_os = "linux"), not(target_os = "macos")))]
         {
             let _ = (app, store, task_id, resolved, options, user_id, peer_id);
             return Ok(None);
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            return self.submit_linux(
+            return self.submit_unix(
                 app, store, task_id, resolved, options, user_id, peer_id, vip_token,
             );
         }
@@ -305,8 +327,8 @@ impl XunleiNativeBackend {
         }
     }
 
-    #[cfg(target_os = "linux")]
-    fn submit_linux(
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn submit_unix(
         self: &Arc<Self>,
         app: &AppHandle,
         store: &Arc<TaskStore>,
@@ -342,12 +364,14 @@ impl XunleiNativeBackend {
             .and_then(|name| name.to_str())
             .ok_or_else(|| NativeSubmitError::Failed("迅雷原生下载文件名无效".into()))?
             .to_owned();
+        #[cfg(target_os = "linux")]
         prepare_native_output(
             &output_path,
             options.allow_overwrite,
             options.continue_download,
         )?;
 
+        #[cfg(target_os = "linux")]
         let native_handle = {
             let mut engine = self
                 .linux_engine
@@ -385,6 +409,64 @@ impl XunleiNativeBackend {
                 .map_err(|_| NativeSubmitError::Incompatible)?
         };
 
+        #[cfg(target_os = "macos")]
+        let native_handle = {
+            let mut engine = self
+                .macos_engine
+                .lock()
+                .map_err(|_| NativeSubmitError::Incompatible)?;
+            if engine.is_none() {
+                let root = self
+                    .plugin_config_path
+                    .as_deref()
+                    .and_then(|path| path.parent())
+                    .ok_or(NativeSubmitError::Incompatible)?
+                    .join("xunlei-macos");
+                match macos::MacWorkerEngine::start(&root, self.engine_session, peer_id) {
+                    Ok(started) => *engine = Some(started),
+                    Err(engine::NativeEngineError::Unavailable) => return Ok(None),
+                    Err(_) => return Err(NativeSubmitError::Incompatible),
+                }
+            }
+            let engine = engine.as_mut().ok_or(NativeSubmitError::Incompatible)?;
+            let settings = app
+                .state::<crate::commands::AppState>()
+                .settings
+                .lock()
+                .map_err(|_| NativeSubmitError::Incompatible)?
+                .aria2
+                .clone();
+            engine
+                .set_limits(settings.overall_download_limit, settings.p2p_upload_limit)
+                .map_err(|_| NativeSubmitError::Incompatible)?;
+            engine
+                .submit_with_options(
+                    NativeSubmission {
+                        url: resolved.url.clone(),
+                        headers: resolved
+                            .headers
+                            .iter()
+                            .filter(|(name, _)| !name.starts_with("X-Downloader-Xunlei-"))
+                            .cloned()
+                            .collect(),
+                        output_path: output_path.clone(),
+                        output_name: output_name.clone(),
+                        user_id: user_id.to_owned(),
+                        peer_id: peer_id.to_owned(),
+                        acceleration_token: vip_token.clone(),
+                        cid: marker_header(resolved, CID_MARKER_HEADER).map(str::to_owned),
+                        gcid: marker_header(resolved, GCID_MARKER_HEADER).map(str::to_owned),
+                        total_length: resolved.size_hint(),
+                    },
+                    marker_header(resolved, VIP_TYPE_MARKER_HEADER)
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0),
+                    options.allow_overwrite,
+                    options.continue_download && options.native_resume_gid.is_some(),
+                )
+                .map_err(|_| NativeSubmitError::Failed("download.xunlei.submitFailed".into()))?
+        };
+
         let mut task = store
             .find(task_id)
             .map_err(|_| NativeSubmitError::Failed("下载任务已不存在".into()))?;
@@ -403,15 +485,22 @@ impl XunleiNativeBackend {
         task.followed_by_gid = None;
         task.status = TaskStatus::Downloading;
         task.error = None;
-        task.status_message = if self
-            .vip_tokens
-            .lock()
-            .is_ok_and(|tokens| tokens.contains_key(&native_handle.task_id))
+        #[cfg(target_os = "linux")]
         {
-            Some("正在启用迅雷加速".into())
-        } else {
-            Some("迅雷SVIP加速凭据不可用，正在使用普通通道".into())
-        };
+            task.status_message = if self
+                .vip_tokens
+                .lock()
+                .is_ok_and(|tokens| tokens.contains_key(&native_handle.task_id))
+            {
+                Some("正在启用迅雷加速".into())
+            } else {
+                Some("迅雷SVIP加速凭据不可用，正在使用普通通道".into())
+            };
+        }
+        #[cfg(target_os = "macos")]
+        {
+            task.status_message = Some("download.xunlei.native".into());
+        }
         task.failure_code = None;
         task.aria_error_code = None;
         task.total_length = resolved.size_hint();
@@ -453,15 +542,18 @@ impl XunleiNativeBackend {
             return Err(NATIVE_RESUME_BACKEND_UNAVAILABLE_MESSAGE.into());
         }
         let native_id = native_handle.task_id;
-        #[cfg(all(not(windows), not(target_os = "linux")))]
+        #[cfg(all(not(windows), not(target_os = "linux"), not(target_os = "macos")))]
         {
             let _ = (app, store, action, native_id);
             return Err(PLUGIN_UPDATE_MESSAGE.into());
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
-            let mut engine = self
-                .linux_engine
+            #[cfg(target_os = "linux")]
+            let engine = &self.linux_engine;
+            #[cfg(target_os = "macos")]
+            let engine = &self.macos_engine;
+            let mut engine = engine
                 .lock()
                 .map_err(|_| PLUGIN_UPDATE_MESSAGE.to_string())?;
             let engine = engine
@@ -494,6 +586,10 @@ impl XunleiNativeBackend {
                     updated.status = TaskStatus::Cancelled;
                     updated.status_message = None;
                 }
+            }
+            #[cfg(target_os = "macos")]
+            if action == DownloadAction::Resume {
+                updated.status_message = Some("download.xunlei.native".into());
             }
             updated.download_speed = 0;
             updated.error = None;
@@ -611,7 +707,7 @@ impl XunleiNativeBackend {
         }
     }
 
-    #[cfg(any(windows, target_os = "linux"))]
+    #[cfg(any(windows, target_os = "linux", target_os = "macos"))]
     fn spawn_task_cleanup(self: &Arc<Self>, native_handle: NativeTaskHandle) {
         let backend = Arc::clone(self);
         tauri::async_runtime::spawn_blocking(move || {
@@ -635,7 +731,11 @@ impl XunleiNativeBackend {
                 }
             }
             #[cfg(target_os = "linux")]
-            if let Ok(mut engine) = backend.linux_engine.lock() {
+            let engine = &backend.linux_engine;
+            #[cfg(target_os = "macos")]
+            let engine = &backend.macos_engine;
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
+            if let Ok(mut engine) = engine.lock() {
                 if let Some(engine) = engine.as_mut() {
                     let _ = engine.control(native_handle, DownloadAction::Cancel);
                     let _ = engine.release(native_handle);
@@ -673,14 +773,18 @@ impl XunleiNativeBackend {
                     .ok()
                     .and_then(|api| api.as_ref().map(|api| api.progress(native_task_id)));
                 #[cfg(target_os = "linux")]
-                let native_progress = backend.linux_engine.lock().ok().and_then(|mut engine| {
+                let engine = &backend.linux_engine;
+                #[cfg(target_os = "macos")]
+                let engine = &backend.macos_engine;
+                #[cfg(any(target_os = "linux", target_os = "macos"))]
+                let native_progress = engine.lock().ok().and_then(|mut engine| {
                     engine.as_mut().map(|engine| {
                         engine
                             .poll(expected_native_handle)
                             .map_err(|_| NativeSubmitError::Incompatible)
                     })
                 });
-                #[cfg(all(not(windows), not(target_os = "linux")))]
+                #[cfg(all(not(windows), not(target_os = "linux"), not(target_os = "macos")))]
                 let native_progress: Option<
                     Result<NativeProgress, NativeSubmitError>,
                 > = None;
@@ -719,14 +823,14 @@ impl XunleiNativeBackend {
                             .lock()
                             .is_ok_and(|tokens| tokens.contains_key(&native_task_id))
                     }
-                    #[cfg(target_os = "linux")]
+                    #[cfg(any(target_os = "linux", target_os = "macos"))]
                     {
                         backend
                             .vip_tokens
                             .lock()
                             .is_ok_and(|tokens| tokens.contains_key(&native_task_id))
                     }
-                    #[cfg(all(not(windows), not(target_os = "linux")))]
+                    #[cfg(all(not(windows), not(target_os = "linux"), not(target_os = "macos")))]
                     {
                         false
                     }
@@ -735,7 +839,19 @@ impl XunleiNativeBackend {
                 task.completed_length = completed;
                 task.download_speed = speed;
                 task.connections = native_progress.connections;
+                #[cfg(not(target_os = "macos"))]
                 update_svip_status_message(&mut task.status_message, has_vip_token, svip_confirmed);
+                #[cfg(target_os = "macos")]
+                {
+                    task.status_message = Some(
+                        if svip_confirmed {
+                            "download.xunlei.accelerating"
+                        } else {
+                            "download.xunlei.native"
+                        }
+                        .into(),
+                    );
+                }
                 task.progress = total
                     .filter(|total| *total > 0)
                     .map(|total| ((completed.saturating_mul(100) / total).min(100)) as u8)
@@ -797,7 +913,42 @@ impl XunleiNativeBackend {
         });
     }
 
+    #[cfg(target_os = "macos")]
+    pub(crate) fn shutdown(&self) {
+        if let Ok(mut engine) = self.macos_engine.lock() {
+            if let Some(engine) = engine.as_mut() {
+                engine.shutdown();
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(crate) fn set_limits(&self, download: u64, upload: u64) -> Result<(), String> {
+        if let Ok(mut engine) = self.macos_engine.lock() {
+            if let Some(engine) = engine.as_mut() {
+                if !engine.is_alive() {
+                    return Ok(());
+                }
+                engine
+                    .set_limits(download, upload)
+                    .map_err(|_| PLUGIN_UPDATE_MESSAGE.to_string())?;
+            }
+        }
+        Ok(())
+    }
+
     fn stop_completed_task(&self, task: &DownloadTask) -> Result<(), NativeSubmitError> {
+        #[cfg(target_os = "macos")]
+        if let Some(handle) = native_handle(task) {
+            if let Ok(mut engine) = self.macos_engine.lock() {
+                if let Some(engine) = engine.as_mut() {
+                    if task.status != TaskStatus::Completed {
+                        let _ = engine.control(handle, DownloadAction::Pause);
+                    }
+                    let _ = engine.release(handle);
+                }
+            }
+        }
         #[cfg(windows)]
         if let Some(handle) = native_handle(task).filter(|handle| self.engine_session.owns(*handle))
         {
@@ -863,6 +1014,14 @@ fn prepare_native_output(
         ));
     }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn macos_can_select_native(options: &UriSubmissionOptions, legacy_checkpoint: bool) -> bool {
+    options.proxy.is_none() && !legacy_checkpoint && options
+        .native_resume_gid
+        .as_deref()
+        .is_none_or(|gid| is_native_gid(Some(gid)))
 }
 
 fn marker_header<'a>(resolved: &'a ResolvedCloudDownload, marker: &str) -> Option<&'a str> {
@@ -1651,6 +1810,22 @@ mod tests {
         assert!(!is_native_gid(Some("0123456789abcdef")));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_engine_selection_preserves_existing_aria2_resumes() {
+        let mut options = UriSubmissionOptions::default();
+        assert!(macos_can_select_native(&options, false));
+        assert!(!macos_can_select_native(&options, true));
+        options.proxy = Some("http://localhost:8080".into());
+        assert!(!macos_can_select_native(&options, false));
+        options.proxy = None;
+        options.native_resume_gid = Some("12ab345678abcdef".into());
+        assert!(!macos_can_select_native(&options, false));
+        options.native_resume_gid =
+            Some("xunlei-native:4aa8c3e7-f41d-4d2e-bbb0-21a9f87000f1:7".into());
+        assert!(macos_can_select_native(&options, false));
+    }
+
     #[test]
     fn native_credentials_never_reach_aria2_options() {
         let resolved = ResolvedCloudDownload {
@@ -1664,6 +1839,7 @@ mod tests {
                 (CONTENT_LENGTH_MARKER_HEADER.into(), "42".into()),
                 (CID_MARKER_HEADER.into(), "cid".into()),
                 (GCID_MARKER_HEADER.into(), "gcid".into()),
+                (VIP_TYPE_MARKER_HEADER.into(), "5".into()),
             ],
         };
         let options = resolved.into_uri_submission_options();
@@ -2193,10 +2369,7 @@ mod tests {
         use crate::cloud::CredentialStore;
         use std::io::Read as _;
 
-        assert_eq!(
-            std::env::var("VERSADOWN_LIVE_CLOUD").as_deref(),
-            Ok("1")
-        );
+        assert_eq!(std::env::var("VERSADOWN_LIVE_CLOUD").as_deref(), Ok("1"));
         let app_data = std::env::var_os("VERSADOWN_XUNLEI_SESSION_ROOT")
             .map(PathBuf::from)
             .expect("use an explicitly isolated session directory for the live test");
