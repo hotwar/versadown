@@ -25,7 +25,7 @@ jobs:
           - name: Linux · x86_64
             runner: ubuntu-22.04
           - name: macOS · Apple Silicon (ARM64)
-            runner: macos-14
+            runner: macos-15
           - name: macOS · Intel (x86_64)
             runner: macos-15-intel
     runs-on: ${{ matrix.runner }}
