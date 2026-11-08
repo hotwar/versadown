@@ -122,8 +122,8 @@ it('uses one queued control with the regular task menu until aria2 promotes the 
 
 it('shows a sharing marker only for completed peer-to-peer tasks that are still uploading', () => {
   render(<DownloadQueue tasks={[
-    { id: 'sharing', name: 'sharing.mkv', kind: 'magnet', status: 'completed', progress: 100, completed_at: 1_789_095_720, p2p_sharing: true },
-    { id: 'finished', name: 'finished.zip', kind: 'ed2k', status: 'completed', progress: 100, completed_at: 1_789_095_720, p2p_sharing: false },
+    { id: 'sharing', name: 'sharing.mkv', kind: 'magnet', status: 'completed', progress: 100, completed_at: new Date(2026, 8, 11, 11, 2).getTime() / 1000, p2p_sharing: true },
+    { id: 'finished', name: 'finished.zip', kind: 'ed2k', status: 'completed', progress: 100, completed_at: new Date(2026, 8, 11, 11, 2).getTime() / 1000, p2p_sharing: false },
   ]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);
 
   expect(screen.getByText('P2P 分享中')).toBeVisible();
@@ -486,7 +486,7 @@ it('shows each completed file time instead of progress in a completed cloud dire
       id: 'completed-time-directory', name: '已完成归档', kind: 'folder', status: 'completed', progress: 100,
       children: [{
         id: 'completed-time-file', name: 'finale.mp4', kind: 'cloud', status: 'completed', progress: 100,
-        completed_at: 1_789_095_720, total_length: 1_048_576, completed_length: 1_048_576,
+        completed_at: new Date(2026, 8, 11, 11, 2).getTime() / 1000, total_length: 1_048_576, completed_length: 1_048_576,
       }],
     }]}
     selectedTaskId={null}
@@ -514,7 +514,7 @@ it('keeps completed nested directories on their existing progress display', asyn
         id: 'completed-nested-directory', name: '第二季', kind: 'folder', status: 'completed', progress: 100,
         children: [{
           id: 'completed-nested-file', name: 'finale.mp4', kind: 'cloud', status: 'completed', progress: 100,
-          completed_at: 1_789_095_720,
+          completed_at: new Date(2026, 8, 11, 11, 2).getTime() / 1000,
         }],
       }],
     }]}
@@ -860,7 +860,7 @@ it('opens the directory when a completed task mixes video and other files', asyn
   const onCommand = vi.fn();
   const completedTask = {
     id: 'completed-video', name: '纪录片合集', kind: 'torrent' as const, status: 'completed' as const, progress: 100,
-    completed_at: 1_788_998_400,
+    completed_at: new Date(2026, 8, 10, 8).getTime() / 1000,
     files: [
       { index: 1, path: 'D:/Downloads/documentary.mp4', length: 1_073_741_824, completed_length: 1_073_741_824, selected: true },
       { index: 2, path: 'D:/Downloads/notes.txt', length: 524_288, completed_length: 524_288, selected: true },
@@ -966,7 +966,7 @@ it('opens the download directory for a completed task without video files', asyn
   render(<DownloadQueue
     tasks={[{
       id: 'completed-archive', name: 'archive.zip', kind: 'file', status: 'completed', progress: 100,
-      updated_at: 1_788_998_400,
+      updated_at: new Date(2026, 8, 10, 8).getTime() / 1000,
       files: [{ index: 1, path: 'D:/Downloads/archive.zip', length: 1_572_864, completed_length: 1_572_864, selected: true }],
     }]}
     selectedTaskId={null}
