@@ -1,4 +1,8 @@
 const messages = {
+  'cloud.xunlei.membership.vip': 'VIP{level}',
+  'cloud.xunlei.membership.platinum': 'Platinum VIP{level}',
+  'cloud.xunlei.membership.svip': 'SVIP{level}',
+  'cloud.xunlei.membership.cloud': 'Cloud member {level}',
   'cloud.verification.xunlei.shareProfileUnsupported': 'This Xunlei web profile is unsupported for share links. Open the share on the official website. [XL-SHARE-PROFILE]',
   'cloud.verification.xunlei.metadataMissing': 'Xunlei operation verification is unavailable. [XL-LOCAL-MISSING]',
   'cloud.verification.xunlei.metadataExpired': 'The Xunlei verification data saved by VersaDown exceeded its local reuse limit. Reauthorize in the browser, then retry this operation. [XL-LOCAL-EXPIRED]',

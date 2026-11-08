@@ -2732,3 +2732,33 @@ it('keeps the Xunlei file list and offers explicit authorization when operation 
   expect(client.beginCloudAuthorization).toHaveBeenCalledWith('xunlei');
   expect(client.logoutCloud).not.toHaveBeenCalled();
 });
+
+it('shows the profile nickname and SVIP level for the authorized Xunlei account', async () => {
+  const client = createCloudFake({ getXunleiAccountProfile: vi.fn().mockResolvedValue({
+    accountId: '123456', nickname: '中文昵称', membership: { kind: 'svip', level: 1 }
+  }) });
+  render(<CloudManager provider="xunlei" client={client} authorizationOnly initialAccount={{ id: '123456', displayName: '123456', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} />);
+  expect(await screen.findByRole('heading', { name: /中文昵称/ })).toBeVisible();
+  expect(screen.getByText('SVIP1')).toBeVisible();
+});
+
+it.each([null, { kind: 'none' as const, level: null }])('omits the membership line and still shows the nickname for %j', async membership => {
+  const client = createCloudFake({ getXunleiAccountProfile: vi.fn().mockResolvedValue({
+    accountId: '123456', nickname: '中文昵称', membership
+  }) });
+  render(<CloudManager provider="xunlei" client={client} authorizationOnly initialAccount={{ id: '123456', displayName: '123456', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} />);
+  const card = (await screen.findByRole('heading', { name: /中文昵称/ })).closest('section')!;
+  expect(card.querySelectorAll('p.cloud-account-capacity')).toHaveLength(1);
+});
+
+it('keeps the signed-in card and withholds profile details belonging to another account', async () => {
+  const client = createCloudFake({ getXunleiAccountProfile: vi.fn().mockResolvedValue({
+    accountId: 'different', nickname: '别的账号', membership: { kind: 'svip', level: 8 }
+  }) });
+  await act(async () => {
+    render(<CloudManager provider="xunlei" client={client} authorizationOnly initialAccount={{ id: '123456', displayName: '123456', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} />);
+  });
+  expect(screen.getByRole('heading', { name: /123456/ })).toBeVisible();
+  expect(screen.queryByText('SVIP8')).not.toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: /别的账号/ })).not.toBeInTheDocument();
+});

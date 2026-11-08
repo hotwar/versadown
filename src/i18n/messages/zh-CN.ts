@@ -1,4 +1,8 @@
 const messages = {
+  'cloud.xunlei.membership.vip': 'VIP{level}',
+  'cloud.xunlei.membership.platinum': '白金 VIP{level}',
+  'cloud.xunlei.membership.svip': 'SVIP{level}',
+  'cloud.xunlei.membership.cloud': '云盘会员{level}',
   'cloud.verification.xunlei.shareProfileUnsupported': '当前迅雷网页版本的分享链接解析暂不受支持，请在迅雷官网打开此分享。[XL-SHARE-PROFILE]',
   'cloud.verification.xunlei.metadataMissing': '缺少迅雷操作验证信息。[XL-LOCAL-MISSING]',
   'cloud.verification.xunlei.metadataExpired': 'VD 保存的迅雷验证信息已超过本地复用时限。请重新网页授权后重试此操作。[XL-LOCAL-EXPIRED]',

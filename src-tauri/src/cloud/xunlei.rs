@@ -5,6 +5,10 @@
 //! identity, device id, and short-lived security state; it never accepts or
 //! stores an account password.
 
+#[path = "xunlei_account_profile.rs"]
+mod account_profile;
+pub use account_profile::XunleiAccountProfile;
+
 use super::{
     http::response_json,
     types::{download_source_missing_from_http_404, encoded, required},

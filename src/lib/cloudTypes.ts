@@ -44,6 +44,12 @@ export interface CloudAccount { provider: CloudProvider; id: string; displayName
 export type CloudStorageCapacity =
   | { kind: 'limited'; totalBytes: number; usedBytes: number }
   | { kind: 'unlimited'; usedBytes: number };
+export interface XunleiAccountProfile {
+  accountId: string;
+  nickname: string | null;
+  membership: { kind: 'none' | 'vip' | 'platinum' | 'svip' | 'cloud'; level: number | null } | null;
+}
+
 export interface CloudAccountCapacity {
   provider: CloudProvider;
   accountId: string;

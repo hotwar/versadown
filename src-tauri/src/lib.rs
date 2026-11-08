@@ -608,6 +608,7 @@ pub fn run() {
             cloud::commands::cloud_tianyi_resolve_download_for_test,
             cloud::commands::cloud_account,
             cloud::commands::cloud_account_capacity,
+            cloud::commands::cloud_xunlei_account_profile,
             cloud::commands::cloud_list_directory,
             cloud::commands::cloud_create_share,
             cloud::commands::cloud_list_shares,

@@ -1150,3 +1150,51 @@ fn xunlei_upload_file_signs_https_s3_multipart_transfer_and_completes_it() {
         .windows("part-etag".len())
         .any(|part| part == b"part-etag"));
 }
+
+#[test]
+fn account_card_reads_official_name_and_active_download_membership_together() {
+    let http = RecordingHttp::sequence(&[
+        r#"{"sub":"modern-user","name":"中文昵称","username":"123456","vip_info":[{"user_vas":306,"is_vip":1,"level":"9"},{"user_vas":"2","is_vip":"1","vas_type":"5","level":"1"}]}"#,
+    ]);
+    let profile = XunleiClient::new(modern_session(), &http)
+        .account_card_profile()
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(profile).unwrap(),
+        serde_json::json!({
+            "accountId":"modern-user","nickname":"中文昵称","membership":{"kind":"svip","level":1}
+        })
+    );
+    let requests = http.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].url, "https://xluser-ssl.xunlei.com/v1/user/me");
+}
+
+#[test]
+fn account_card_distinguishes_unknown_expired_and_cloud_membership() {
+    for (fields, expected) in [
+        (r#"{}"#, serde_json::Value::Null),
+        (
+            r#"{"vip_info":[{"user_vas":2,"is_vip":0,"vas_type":5,"level":8}]}"#,
+            serde_json::json!({"kind":"none","level":null}),
+        ),
+        (
+            r#"{"vip_info":[{"user_vas":306,"is_vip":1,"level":3}]}"#,
+            serde_json::json!({"kind":"cloud","level":3}),
+        ),
+    ] {
+        let http = RecordingHttp::sequence(&[fields]);
+        let response = XunleiClient::new(modern_session(), &http)
+            .account_card_profile()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(response).unwrap()["membership"],
+            expected
+        );
+    }
+    let http = RecordingHttp::sequence(&[r#"{"sub":"different-account","name":"别的账号"}"#]);
+    assert!(matches!(
+        XunleiClient::new(modern_session(), &http).account_card_profile(),
+        Err(QuarkError::AccountMismatch)
+    ));
+}

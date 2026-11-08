@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { LocalUploadPicker } from './LocalUploadPicker';
 import type { LocalUploadListing } from '../lib/localUpload';
 import { CloudCapacityController, formatCloudCapacity, type CloudCapacityViewState } from '../lib/cloudCapacity';
-import type { CloudUploadAction, CloudUploadProgress } from '../lib/cloudTypes';
+import type { XunleiAccountProfile, CloudUploadAction, CloudUploadProgress } from '../lib/cloudTypes';
 import type { CloudAuthorizationStateEvent, CloudCapacityInvalidated } from '../lib/cloudTypes';
 import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider, CloudShare, CloudShareCancelOutcome, CloudShareOptions, CloudUploadOutcome, SharePassCodeConstraint } from '../lib/cloudTypes';
 import { t, useTranslation } from '../i18n';
@@ -25,6 +25,7 @@ export interface CloudManagerClient {
   loginCloudWithPassword(provider: CloudProvider, credentials: CloudCredentials): Promise<CloudAccount>;
   getSavedCloudCredentials?(provider: CloudProvider): Promise<import('../lib/cloudTypes').SavedCloudCredentialInfo | null>;
   getCloudAccount(provider: CloudProvider): Promise<CloudAccount>;
+  getXunleiAccountProfile?(): Promise<XunleiAccountProfile>;
   getCloudAccountCapacity?(provider: CloudProvider): Promise<import('../lib/cloudTypes').CloudAccountCapacity>;
   subscribeCloudCapacityInvalidated?(provider: CloudProvider, receive: (event: CloudCapacityInvalidated) => void): Promise<() => void>;
   listCloudDirectory(provider: CloudProvider, parentId?: string): Promise<CloudDirectory>;
@@ -642,6 +643,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const label = cloudProviderLabel(provider, t);
   const rootId = descriptor.rootDirectoryId;
   const [activeAccount, setActiveAccount] = useState<CloudAccount | null>(initialAccount?.provider === provider ? initialAccount : null);
+  const [xunleiProfile, setXunleiProfile] = useState<XunleiAccountProfile | null>(null);
   const [accountCapacity, setAccountCapacity] = useState<CloudCapacityViewState>();
   const capacityControllerRef = useRef<CloudCapacityController | null>(null);
   if (!capacityControllerRef.current) capacityControllerRef.current = new CloudCapacityController();
@@ -857,6 +859,17 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }, [activeAccount?.id, authorizationOnly, capacityController, client, provider]);
 
   useEffect(() => () => capacityController.dispose(), [capacityController]);
+
+  useEffect(() => {
+    setXunleiProfile(null);
+    const id = activeAccount?.id;
+    if (!authorizationOnly || provider !== 'xunlei' || !id || !client.getXunleiAccountProfile) return;
+    let current = true;
+    client.getXunleiAccountProfile().then(profile => {
+      if (current) setXunleiProfile(profile.accountId === id ? profile : null);
+    }).catch(() => { if (current) setXunleiProfile(null); });
+    return () => { current = false; };
+  }, [activeAccount?.id, authorizationOnly, client, provider]);
 
   async function loadDirectory(account: CloudAccount, parentId: string, nextBreadcrumbs: readonly Breadcrumb[]) {
     setDirectoryState('loading');
@@ -1623,12 +1636,17 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }
 
   function accountManagementView() {
+    const profile = provider === 'xunlei' && xunleiProfile?.accountId === activeAccount?.id ? xunleiProfile : null;
+    const member = profile?.membership;
     const capacityText = accountCapacity?.value
       ? formatCloudCapacity(accountCapacity.value.capacity)
       : accountCapacity?.loading || !accountCapacity ? t('cloud.capacityLoading') : t('cloud.capacityUnavailable');
     return <section className={`cloud-manager cloud-authorization cloud-connected-account cloud-provider-${provider}${authorizationCardDrag?.dragging ? ' cloud-provider-dragging' : ''}${authorizationCardDrag?.dropTarget ? ' cloud-provider-drop-target' : ''}`} data-cloud-provider={authorizationCardDrag ? provider : undefined} aria-label={t('cloud.accountAuthorization', { name: label })}>
-      <header className="cloud-heading cloud-authorization-drag-handle" onPointerDown={authorizationCardDrag?.onPointerDown}><h2>{t('cloud.providerDrive', { name: label })} <span className="cloud-account-name">· {activeAccount?.displayName}</span></h2><button type="button" onPointerDown={(event) => event.stopPropagation()} className="cloud-provider-info-button" aria-label={providerInfoOpen ? t('cloud.closeProviderInfo', { name: label }) : t('cloud.viewProviderInfo', { name: label })} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
+      <header className="cloud-heading cloud-authorization-drag-handle" onPointerDown={authorizationCardDrag?.onPointerDown}><h2>{t('cloud.providerDrive', { name: label })} <span className="cloud-account-name">· {profile?.nickname ?? activeAccount?.displayName}</span></h2><button type="button" onPointerDown={(event) => event.stopPropagation()} className="cloud-provider-info-button" aria-label={providerInfoOpen ? t('cloud.closeProviderInfo', { name: label }) : t('cloud.viewProviderInfo', { name: label })} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
       {!providerInfoOpen && <p className="cloud-account-capacity" aria-live="polite">{capacityText}{accountCapacity?.value && accountCapacity.refreshFailed && <span> · {t('cloud.capacityRefreshFailed')}</span>}</p>}
+      {!providerInfoOpen && member && member.kind !== 'none' && <p className="cloud-account-capacity" aria-live="polite">
+        {t(`cloud.xunlei.membership.${member.kind}`, { level: member.level ?? '' })}
+      </p>}
       {providerInfoOpen ? <CloudProviderInfo provider={provider} label={label} officialUrl={descriptor.authorizationUrl} /> : <>{sessionActions()}{logoutConfirmation()}{operationStatus()}</>}
     </section>;
   }

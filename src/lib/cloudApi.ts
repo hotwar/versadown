@@ -1,7 +1,7 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import type { LocalUploadListing } from './localUpload';
-import type { CloudAccountCapacity, CloudAuthorizationStateEvent, CloudCapacityInvalidated, CloudUploadAction, CloudUploadProgress } from './cloudTypes';
+import type { XunleiAccountProfile, CloudAccountCapacity, CloudAuthorizationStateEvent, CloudCapacityInvalidated, CloudUploadAction, CloudUploadProgress } from './cloudTypes';
 import type { DuplicateDownloadState, QueueTask, TaskActionResult } from './types';
 import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider, CloudShare, CloudShareCancelOutcome, CloudShareOptions, CloudUploadOutcome } from './cloudTypes';
 
@@ -42,6 +42,8 @@ export const reauthorizeFailedCloudTask = (taskId: string) => invoke<CloudAuthor
 export const loginCloudWithPassword = (provider: CloudProvider, credentials: CloudCredentials) => invoke<CloudAccount>('cloud_login_password', { provider, ...credentials });
 export const getSavedCloudCredentials = (provider: CloudProvider) => invoke<import('./cloudTypes').SavedCloudCredentialInfo | null>('cloud_saved_password_credentials', { provider });
 export const getCloudAccount = (provider: CloudProvider) => invoke<CloudAccount>('cloud_account', { provider });
+export const getXunleiAccountProfile = () => invoke<XunleiAccountProfile>('cloud_xunlei_account_profile');
+
 export const getCloudAccountCapacity = (provider: CloudProvider) => invoke<CloudAccountCapacity>('cloud_account_capacity', { provider });
 const capacitySubscribers = new Set<{ provider: CloudProvider; receive: (event: CloudCapacityInvalidated) => void }>();
 let capacityListener: Promise<() => void> | null = null;
