@@ -81,18 +81,36 @@ pub struct CloudDownloadDispatch {
     tasks: Arc<Mutex<HashMap<Uuid, Arc<TaskDispatch>>>>,
 }
 
-struct Slot {
+struct Slot<'a> {
     scheduler: CloudDownloadScheduler,
+    store: &'a TaskStore,
     id: Uuid,
     directory: Option<DirectoryAdmission>,
     accepted: bool,
 }
-impl Drop for Slot {
+
+/// A cancelled, recycled or deleted directory will never be released by a
+/// terminal-member event, because it has no member left to emit one.
+fn directory_is_closed(store: &TaskStore, directory: Uuid) -> bool {
+    match store.cloud_directory_group(directory) {
+        Ok(Some(group)) => matches!(group.status, TaskStatus::Cancelled | TaskStatus::Recycled),
+        Ok(None) => true,
+        Err(_) => false,
+    }
+}
+
+impl Drop for Slot<'_> {
     fn drop(&mut self) {
         if !self.accepted {
             if let Some(directory) = self.directory {
-                self.scheduler
-                    .release_directory_member(directory.id, self.id, false);
+                // A queued member can be admitted after its directory was
+                // cancelled and the owner was released. That admission creates
+                // the owner again, so give it back together with the member.
+                self.scheduler.release_directory_member(
+                    directory.id,
+                    self.id,
+                    directory_is_closed(self.store, directory.id),
+                );
             } else {
                 self.scheduler.release(self.id);
             }
@@ -415,6 +433,7 @@ impl CloudDownloadDispatch {
         }
         let mut slot = Slot {
             scheduler: self.scheduler.clone(),
+            store,
             id,
             directory,
             accepted: false,
@@ -491,6 +510,112 @@ impl CloudDownloadDispatch {
 mod tests {
     use super::*;
     use crate::NewTask;
+
+    /// A directory with one admitted file and one queued file is cancelled.
+    /// Releasing the admitted file frees the directory's provider slot, which
+    /// immediately admits the queued file as a brand-new owner. That file is no
+    /// longer runnable, so its dropped slot must also give the owner back;
+    /// otherwise the provider's only slot stays taken by a deleted directory.
+    #[tokio::test]
+    async fn cancelled_directory_does_not_keep_the_provider_slot_through_a_late_admission() {
+        use crate::models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem};
+
+        let store = Arc::new(TaskStore::open_in_memory().unwrap());
+        // Tianyi admits a single provider task, so a leaked slot is visible.
+        let provider = CloudProvider::Tianyi;
+        let group = store
+            .create_cloud_directory_group(
+                NewCloudDirectoryGroup::new(
+                    provider,
+                    "cloud-share://tianyi/share",
+                    "Share",
+                    std::path::Path::new("/downloads"),
+                ),
+                &[
+                    NewCloudDirectoryGroupItem::new(
+                        "cloud-share://tianyi/share/a",
+                        &["Share"],
+                        "a.bin",
+                        Some(1),
+                    ),
+                    NewCloudDirectoryGroupItem::new(
+                        "cloud-share://tianyi/share/b",
+                        &["Share"],
+                        "b.bin",
+                        Some(1),
+                    ),
+                ],
+            )
+            .unwrap();
+        let mut members = Vec::new();
+        for item in store.cloud_directory_group_items(group.id).unwrap() {
+            members.push(
+                store
+                    .prepare_cloud_share_directory_leaf_task(
+                        group.id,
+                        item.id,
+                        NewTask {
+                            source: item.remote_file_id.clone(),
+                            name: item.output_name.clone(),
+                            kind: "cloud".into(),
+                            is_private: false,
+                        },
+                        None,
+                    )
+                    .unwrap(),
+            );
+        }
+        for member in &members {
+            store.transition(member.id, TaskStatus::Queued).unwrap();
+        }
+        let (admitted, queued) = (members[0].clone(), members[1].clone());
+        let dispatch = CloudDownloadDispatch::default();
+        for member in &members {
+            dispatch.configure_directory(member.id, group.id, 1);
+        }
+        assert_eq!(
+            dispatch
+                .scheduler
+                .enqueue_directory(provider, group.id, admitted.id, 1)
+                .await,
+            AdmissionOutcome::Granted
+        );
+        let version = dispatch.task(queued.id).version.load(Ordering::SeqCst);
+        let worker = {
+            let (dispatch, store, id) = (dispatch.clone(), Arc::clone(&store), queued.id);
+            tokio::spawn(async move {
+                dispatch
+                    .run(
+                        &store,
+                        provider,
+                        id,
+                        version,
+                        || async { Ok::<(), QuarkError>(()) },
+                        |()| async { unreachable!("a cancelled directory never submits") },
+                    )
+                    .await
+            })
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !dispatch.scheduler.pending(provider).contains(&queued.id) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the queued member should wait for the directory's single member slot");
+
+        store.cancel_cloud_directory_group(group.id).unwrap();
+        dispatch.release_terminal(admitted.id, true);
+        assert!(worker.await.unwrap().is_none());
+
+        let unrelated = Uuid::new_v4();
+        let outcome = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            dispatch.scheduler.enqueue(provider, unrelated),
+        )
+        .await;
+        assert_eq!(outcome.ok(), Some(AdmissionOutcome::Granted));
+    }
 
     #[tokio::test]
     async fn startup_recovered_partial_download_reenters_dispatch_without_creating_a_task() {
