@@ -200,15 +200,16 @@ it('reveals the main task list without forwarding a parse request', async () => 
   expect(native.emitTo).not.toHaveBeenCalled();
 });
 
-it('restores and reveals the all-tasks list on a launcher double click', async () => {
-  await launcherWindow.openLauncherAllTasks();
+it('lets the native side toggle the manager on a launcher double click', async () => {
+  native.invoke.mockResolvedValueOnce(false);
 
-  expect(native.getByLabel).toHaveBeenCalledWith('main');
-  expect(native.calls).toEqual(['unminimize', 'show', 'focus', 'emit']);
-  expect(native.emitTo).toHaveBeenCalledWith(
-    'main',
-    'launcher-open-all-tasks'
-  );
+  await expect(launcherWindow.toggleLauncherManager()).resolves.toBe(false);
+
+  expect(native.invoke).toHaveBeenCalledWith('toggle_manager_from_launcher');
+  // The renderer cannot tell whether the manager was in front: pressing the
+  // launcher has already taken its focus. It must not show or focus it itself.
+  expect(native.calls).toEqual([]);
+  expect(native.emitTo).not.toHaveBeenCalled();
 });
 
 it('waits for native drag completion without sending browser position updates', async () => {

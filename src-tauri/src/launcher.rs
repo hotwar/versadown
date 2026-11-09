@@ -436,6 +436,37 @@ fn toggle_manager_visibility(app: &AppHandle) {
     }
 }
 
+/// Launcher double click: hides the manager the user was looking at, and
+/// otherwise brings it to the front on its task list. Returns whether the
+/// manager is visible afterwards.
+#[tauri::command]
+pub fn toggle_manager_from_launcher(
+    window: WebviewWindow,
+    focus: State<'_, crate::launcher_focus::ManagerFocusHistory>,
+) -> Result<bool, String> {
+    if window.label() != "launcher" {
+        return Err("只能从悬浮窗切换主界面".to_string());
+    }
+    let app = window.app_handle();
+    let manager = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主界面窗口不存在".to_string())?;
+    let hide = crate::launcher_focus::launcher_toggle_hides_manager(
+        manager.is_visible().unwrap_or(false),
+        manager.is_minimized().unwrap_or(false),
+        manager.is_focused().unwrap_or(false),
+        focus.manager_was_foreground(),
+    );
+    if hide {
+        manager.hide().map_err(|error| error.to_string())?;
+        set_tray_manager_visibility(app, false);
+        return Ok(false);
+    }
+    reveal_manager(app, None);
+    let _ = app.emit_to("main", "launcher-open-all-tasks", ());
+    Ok(true)
+}
+
 pub(crate) fn reveal_manager(app: &AppHandle, destination: Option<&str>) {
     let Some(manager) = app.get_webview_window("main") else {
         return;

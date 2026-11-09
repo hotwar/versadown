@@ -16,6 +16,7 @@ mod external_links;
 mod ftp;
 mod launcher;
 mod launcher_drag;
+mod launcher_focus;
 mod launcher_input;
 #[cfg(any(test, target_os = "macos"))]
 mod launcher_poll;
@@ -253,6 +254,19 @@ pub fn run() {
             });
         })
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Focused(focused) = event {
+                if let Some(history) = window
+                    .app_handle()
+                    .try_state::<launcher_focus::ManagerFocusHistory>()
+                {
+                    let now = std::time::Instant::now();
+                    match window.label() {
+                        "main" => history.manager_focus_changed(*focused, now),
+                        "launcher" => history.launcher_focus_changed(*focused, now),
+                        _ => {}
+                    }
+                }
+            }
             if let Some(lifecycle) = window
                 .app_handle()
                 .try_state::<std::sync::Arc<ApplicationLifecycle>>()
@@ -268,6 +282,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             app.manage(std::sync::Arc::new(launcher_input::macos::InputMonitor::default()));
             app.manage(window_icon::TaskbarIconState::default());
+            app.manage(launcher_focus::ManagerFocusHistory::default());
             let lifecycle = std::sync::Arc::new(ApplicationLifecycle::new());
             app.manage(std::sync::Arc::clone(&lifecycle));
             let background_ui_test = std::env::var("VERSADOWN_BACKGROUND_UI_TEST").ok();
@@ -631,6 +646,7 @@ pub fn run() {
             launcher::show_launcher_menu,
             launcher::run_launcher_menu_action,
             launcher::launcher_manager_visible,
+            launcher::toggle_manager_from_launcher,
             launcher::launcher_interaction_snapshot,
             launcher::manager_window_snapshot,
             launcher::activate_launcher_menu_for_test,

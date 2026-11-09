@@ -279,11 +279,15 @@ export async function openLauncherManager() {
   await mainWindow?.setFocus();
 }
 
-/** Activates the manager and switches it to the all-tasks tab. */
-export async function openLauncherAllTasks() {
-  if (!isTauriRuntime()) return;
-  await openLauncherManager();
-  await emitTo('main', 'launcher-open-all-tasks');
+/**
+ * Launcher double click: hides the manager while the user is looking at it,
+ * otherwise brings it to the front on the all-tasks tab. The native side
+ * decides, because pressing the launcher has already taken focus from the
+ * manager by the time this runs. Resolves to the manager's new visibility.
+ */
+export async function toggleLauncherManager(): Promise<boolean> {
+  if (!isTauriRuntime()) return true;
+  return invoke<boolean>('toggle_manager_from_launcher');
 }
 
 /** Opens the manager's normal new-task dialog only for accepted dropped input. */

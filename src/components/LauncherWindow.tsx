@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { FloatingLauncher, type LauncherPointerPosition } from './FloatingLauncher';
 import { LauncherContextMenu, type LauncherMenuAction } from './LauncherContextMenu';
-import { anchorLauncherToWorkArea, beginLauncherPointerDrag, getLauncherManagerVisible, getLauncherPopupPlacement, getLauncherPopupSide, launcherIconRegion, moveLauncherPointerDrag, openLauncherAllTasks, openLauncherNewDownload, runLauncherMenuAction, setLauncherInputRegions, setLauncherWindowVisible, showLauncherMenu, type LauncherInputRegion, type LauncherPointerDragSession, type LauncherPopupPlacement, type LauncherPopupSide } from '../lib/launcherWindow';
+import { anchorLauncherToWorkArea, beginLauncherPointerDrag, getLauncherManagerVisible, getLauncherPopupPlacement, getLauncherPopupSide, launcherIconRegion, moveLauncherPointerDrag, openLauncherNewDownload, toggleLauncherManager, runLauncherMenuAction, setLauncherInputRegions, setLauncherWindowVisible, showLauncherMenu, type LauncherInputRegion, type LauncherPointerDragSession, type LauncherPopupPlacement, type LauncherPopupSide } from '../lib/launcherWindow';
 import { getDownloadGlobalStat, getSettings, isTauriRuntime, scanDownloadInputs, stageDroppedTorrent, updateSettings } from '../lib/api';
 import { runNativeLauncherDrag } from '../lib/launcherWindow';
 import { formatSpeed, subscribeToDownloadEvents } from '../lib/downloadEvents';
@@ -325,7 +325,7 @@ export function LauncherWindow() {
         onScan={scanDownloadInputs}
         onDroppedInput={openLauncherNewDownload}
         onStageDroppedTorrent={stageLauncherTorrent}
-        onActivateTaskList={() => { void openLauncherAllTasks(); }}
+        onActivateTaskList={async () => { setManagerVisible(await toggleLauncherManager().catch(() => managerVisible)); }}
         onDragStart={(pointer, grabOffset) => { dragStartQueue.current = beginLauncherDrag(pointer, grabOffset); }}
         onDragMove={moveLauncherDrag}
         onDragEnd={finishLauncherDrag}

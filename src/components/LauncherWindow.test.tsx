@@ -8,7 +8,7 @@ const state = vi.hoisted(() => ({
   updateSettings: vi.fn(), getManagerVisible: vi.fn(), getLauncherPopupPlacement: vi.fn(), getLauncherPopupSide: vi.fn(),
   setLauncherInputRegions: vi.fn(),
   runNativeLauncherDrag: vi.fn(),
-  beginLauncherPointerDrag: vi.fn(), moveLauncherPointerDrag: vi.fn(), openActiveDownloads: vi.fn(), openNewDownload: vi.fn(), stageDroppedTorrent: vi.fn(),
+  beginLauncherPointerDrag: vi.fn(), moveLauncherPointerDrag: vi.fn(), toggleManager: vi.fn(), openNewDownload: vi.fn(), stageDroppedTorrent: vi.fn(),
   onMoved: vi.fn(), onScaleChanged: vi.fn(),
   movedHandler: undefined as undefined | (() => void),
   scaleChangedHandler: undefined as undefined | (() => void),
@@ -40,7 +40,7 @@ vi.mock('../lib/launcherWindow', () => ({
   beginLauncherPointerDrag: state.beginLauncherPointerDrag,
   runNativeLauncherDrag: state.runNativeLauncherDrag,
   moveLauncherPointerDrag: state.moveLauncherPointerDrag,
-  openLauncherAllTasks: state.openActiveDownloads,
+  toggleLauncherManager: state.toggleManager,
   openLauncherNewDownload: state.openNewDownload,
   stageDroppedTorrent: state.stageDroppedTorrent,
 }));
@@ -80,7 +80,7 @@ beforeEach(() => {
     windowPosition: { x: 1369, y: 506 }, pointerPosition: { x: 10, y: 10 }, scaleFactor: 1.5,
   });
   state.moveLauncherPointerDrag.mockReset().mockResolvedValue(undefined);
-  state.openActiveDownloads.mockReset().mockResolvedValue(undefined);
+  state.toggleManager.mockReset().mockResolvedValue(true);
   state.openNewDownload.mockReset().mockResolvedValue(undefined);
   state.stageDroppedTorrent.mockReset().mockResolvedValue('C:\\AppData\\dropped-torrents\\fixture.torrent');
   state.movedHandler = undefined;
@@ -155,14 +155,14 @@ it('keeps the compact launcher visible for an active task in download-only mode'
   await waitFor(() => expect(setLauncherWindowVisible).toHaveBeenLastCalledWith(true));
 });
 
-it('keeps the hexagon compact on one click, activates tasks on double click, and opens the context menu on right click', async () => {
+it('keeps the hexagon compact on one click, toggles the manager on double click, and opens the context menu on right click', async () => {
   render(<LauncherWindow />);
   const trigger = screen.getByRole('button', { name: '打开下载输入' });
   const mark = trigger.querySelector('.launcher-mark');
   fireEvent.click(trigger);
   expect(screen.queryByRole('dialog', { name: '新建下载' })).not.toBeInTheDocument();
   fireEvent.doubleClick(trigger);
-  await waitFor(() => expect(state.openActiveDownloads).toHaveBeenCalledOnce());
+  await waitFor(() => expect(state.toggleManager).toHaveBeenCalledOnce());
   fireEvent.contextMenu(trigger);
   expect(await screen.findByRole('menu', { name: '悬浮球菜单' })).toBeVisible();
   expect(setLauncherInputRegions).toHaveBeenLastCalledWith([icon, menu]);
