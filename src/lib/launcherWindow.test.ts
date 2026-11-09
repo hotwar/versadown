@@ -192,11 +192,13 @@ it('uses the native visibility command so background smoke runs cannot surface a
   expect(native.invoke).toHaveBeenCalledWith('set_launcher_window_visible', { visible: false });
 });
 
-it('reveals the main task list without forwarding a parse request', async () => {
+it('reveals the manager through the native path without forwarding a parse request', async () => {
   await launcherWindow.openLauncherManager();
 
-  expect(native.getByLabel).toHaveBeenCalledWith('main');
-  expect(native.calls).toEqual(['unminimize', 'show', 'focus']);
+  // Tao's unminimize/show/setFocus cannot restore a minimized manager on X11
+  // window managers that keep it mapped; the native path also presents it.
+  expect(native.invoke).toHaveBeenCalledWith('reveal_manager_from_launcher');
+  expect(native.calls).toEqual([]);
   expect(native.emitTo).not.toHaveBeenCalled();
 });
 
@@ -222,8 +224,9 @@ it('waits for native drag completion without sending browser position updates', 
 it('opens the manager new-task dialog with an accepted launcher drop', async () => {
   await launcherWindow.openLauncherNewDownload('magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567');
 
-  expect(native.getByLabel).toHaveBeenCalledWith('main');
-  expect(native.calls).toEqual(['unminimize', 'show', 'focus', 'emit']);
+  expect(native.invoke).toHaveBeenCalledWith('reveal_manager_from_launcher');
+  // The manager is revealed before the new-download request is forwarded.
+  expect(native.calls).toEqual(['emit']);
   expect(native.emitTo).toHaveBeenCalledWith(
     'main',
     'launcher-new-download',

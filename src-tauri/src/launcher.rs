@@ -128,6 +128,19 @@ pub fn tray_menu_entries(manager_visible: bool) -> [(&'static str, &'static str)
     ]
 }
 
+/// A minimized manager is "visible" to the windowing API but not on screen.
+/// Treat it as hidden so menus offer to show it and their toggle restores it.
+fn manager_is_shown(visible: bool, minimized: bool) -> bool {
+    visible && !minimized
+}
+
+fn manager_window_shown(manager: &WebviewWindow) -> bool {
+    manager_is_shown(
+        manager.is_visible().unwrap_or(false),
+        manager.is_minimized().unwrap_or(false),
+    )
+}
+
 fn tray_manager_item_label(manager_visible: bool) -> &'static str {
     if manager_visible {
         "隐藏主界面"
@@ -139,8 +152,7 @@ fn tray_manager_item_label(manager_visible: bool) -> &'static str {
 pub fn setup_manager_tray(app: &AppHandle) -> Result<(), String> {
     let manager_visible = app
         .get_webview_window("main")
-        .and_then(|window| window.is_visible().ok())
-        .unwrap_or(false);
+        .is_some_and(|window| manager_window_shown(&window));
     let entries = tray_menu_entries(manager_visible);
     let manager_item = MenuItem::with_id(app, entries[0].0, entries[0].1, true, None::<&str>)
         .map_err(|error| error.to_string())?;
@@ -214,6 +226,14 @@ pub fn setup_manager_tray(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Keeps the tray label in step when the user minimizes or restores the
+/// manager from its own title bar, which bypasses our show/hide paths.
+pub fn refresh_tray_manager_visibility(app: &AppHandle) {
+    if let Some(manager) = app.get_webview_window("main") {
+        set_tray_manager_visibility(app, manager_window_shown(&manager));
+    }
+}
+
 pub fn set_tray_manager_visibility(app: &AppHandle, manager_visible: bool) {
     if let Some(state) = app.try_state::<TrayMenuState>() {
         let _ = state
@@ -236,7 +256,20 @@ fn require_background_ui_test() -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{EXIT_ARIA2_SHUTDOWN_TIMEOUT, EXIT_TRAY_REMOVE_DELAY};
+    use super::{
+        manager_is_shown, tray_manager_item_label, EXIT_ARIA2_SHUTDOWN_TIMEOUT,
+        EXIT_TRAY_REMOVE_DELAY,
+    };
+
+    #[test]
+    fn a_minimized_manager_is_offered_and_toggled_as_hidden() {
+        assert!(manager_is_shown(true, false));
+        // Minimized: visible to the windowing API, but off screen. The menu
+        // must offer "show" and its toggle must restore, not hide, it.
+        assert!(!manager_is_shown(true, true));
+        assert_eq!(tray_manager_item_label(manager_is_shown(true, true)), "显示主界面");
+        assert!(!manager_is_shown(false, false));
+    }
 
     #[test]
     fn launcher_popup_commands_do_not_reintroduce_window_region_redraws() {
@@ -345,8 +378,7 @@ pub fn run_launcher_menu_action(
 #[tauri::command]
 pub fn launcher_manager_visible(app: AppHandle) -> bool {
     app.get_webview_window("main")
-        .and_then(|manager| manager.is_visible().ok())
-        .unwrap_or(false)
+        .is_some_and(|manager| manager_window_shown(&manager))
 }
 
 #[tauri::command]
@@ -428,7 +460,7 @@ fn toggle_manager_visibility(app: &AppHandle) {
     let Some(manager) = app.get_webview_window("main") else {
         return;
     };
-    if manager.is_visible().unwrap_or(false) {
+    if manager_window_shown(&manager) {
         let _ = manager.hide();
         set_tray_manager_visibility(app, false);
     } else {
@@ -480,8 +512,37 @@ pub(crate) fn reveal_manager(app: &AppHandle, destination: Option<&str>) {
         let _ = manager.unminimize();
         let _ = manager.show();
         let _ = manager.set_focus();
+        #[cfg(target_os = "linux")]
+        present_manager(app, &manager);
     }
     set_tray_manager_visibility(app, true);
+}
+
+/// Tao cannot restore a minimized manager on X11 window managers that keep
+/// minimized windows mapped (deepin's KWin): `unminimize` only queues GDK's
+/// `deiconify`, which is a no-op for a mapped window, and `set_focus` is
+/// skipped while Tao's minimized flag is still set. `gtk_window_present`
+/// sends `_NET_ACTIVE_WINDOW`, which the window manager honours.
+#[cfg(target_os = "linux")]
+fn present_manager(app: &AppHandle, manager: &WebviewWindow) {
+    let manager = manager.clone();
+    let _ = app.run_on_main_thread(move || {
+        use gtk::prelude::GtkWindowExt;
+        if let Ok(window) = manager.gtk_window() {
+            window.present();
+        }
+    });
+}
+
+/// The launcher's own manager activation (e.g. for dropped links) must use the
+/// same path as the tray and menu so a minimized manager is restored.
+#[tauri::command]
+pub fn reveal_manager_from_launcher(window: WebviewWindow) -> Result<(), String> {
+    if window.label() != "launcher" {
+        return Err("只能从悬浮窗显示主界面".to_string());
+    }
+    reveal_manager(window.app_handle(), None);
+    Ok(())
 }
 
 fn begin_application_exit(app: &AppHandle) {

@@ -1,6 +1,6 @@
 import { emitTo } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
-import { availableMonitors, currentMonitor, getCurrentWindow, PhysicalPosition, PhysicalSize, Window, type Monitor } from '@tauri-apps/api/window';
+import { availableMonitors, currentMonitor, getCurrentWindow, PhysicalPosition, PhysicalSize, type Monitor } from '@tauri-apps/api/window';
 import { isTauriRuntime } from './api';
 
 export const LAUNCHER_WINDOW_LABEL = 'launcher';
@@ -271,12 +271,14 @@ export async function anchorLauncherToWorkArea() {
   await launcher.setPosition(new PhysicalPosition(corner.x, corner.y));
 }
 
+/**
+ * Shows, restores and focuses the manager through the native path shared with
+ * the tray and menu. Tao's own unminimize/show/setFocus cannot restore a
+ * minimized window on X11 window managers that keep it mapped.
+ */
 export async function openLauncherManager() {
   if (!isTauriRuntime()) return;
-  const mainWindow = await Window.getByLabel('main');
-  await mainWindow?.unminimize();
-  await mainWindow?.show();
-  await mainWindow?.setFocus();
+  await invoke('reveal_manager_from_launcher');
 }
 
 /**
