@@ -14,6 +14,38 @@ pub struct LauncherInputRegion {
     pub height: f64,
 }
 
+/// The compact icon in CSS pixels of the fixed launcher canvas.
+pub(crate) const LAUNCHER_ICON_REGION: LauncherInputRegion = LauncherInputRegion {
+    x: 346.0,
+    y: 328.0,
+    width: 64.0,
+    height: 64.0,
+};
+
+/// Input regions as last reported by the renderer, with the WebView's own
+/// devicePixelRatio. On fractional-scale X11 desktops Tao reports an unscaled
+/// monitor factor, so only this scale places the shape under the drawn icon.
+#[cfg(all(unix, not(target_os = "macos")))]
+#[derive(Clone, Debug, PartialEq)]
+struct RendererInputRegions {
+    regions: Vec<LauncherInputRegion>,
+    scale_factor: f64,
+}
+
+/// Chooses the input shape applied when the launcher is first shown. The
+/// renderer and this startup path race; whichever runs last must not replace
+/// the renderer's regions with Tao's scale, so a known renderer report wins.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn startup_input_regions(
+    renderer: Option<&RendererInputRegions>,
+    fallback_scale_factor: f64,
+) -> (Vec<LauncherInputRegion>, f64) {
+    match renderer {
+        Some(renderer) => (renderer.regions.clone(), renderer.scale_factor),
+        None => (vec![LAUNCHER_ICON_REGION], fallback_scale_factor),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PhysicalLauncherRegion {
     left: i32,
@@ -205,9 +237,9 @@ pub async fn set_launcher_input_regions(
         let (sender, receiver) = tokio::sync::oneshot::channel();
         window
             .run_on_main_thread(move || {
-                let _ = sender.send(platform::apply_input_region(
+                let _ = sender.send(platform::apply_renderer_input_region(
                     &target,
-                    &regions,
+                    regions,
                     scale_factor,
                 ));
             })
@@ -268,7 +300,8 @@ pub async fn launcher_input_hit_test_for_test(
 mod platform {
     use super::{
         gdk_input_regions, launcher_drag_capture_regions, launcher_drag_icon_regions,
-        point_hits_regions, LauncherInputRegion, PhysicalLauncherRegion,
+        point_hits_regions, startup_input_regions, LauncherInputRegion, PhysicalLauncherRegion,
+        RendererInputRegions,
     };
     use gtk::prelude::*;
     use tauri::WebviewWindow;
@@ -305,14 +338,54 @@ mod platform {
         Ok(())
     }
 
-    pub fn apply_input_region(
-        window: &WebviewWindow,
+    fn apply_input_region(
+        gdk_window: &gtk::gdk::Window,
         logical_regions: &[LauncherInputRegion],
         scale_factor: f64,
     ) -> Result<(), String> {
-        let gdk_window = gdk_window(window)?;
         let regions = gdk_input_regions(logical_regions, scale_factor, gdk_window.scale_factor())?;
-        apply_physical_input_regions(&gdk_window, &regions)
+        apply_physical_input_regions(gdk_window, &regions)
+    }
+
+    // Both writers run on the GTK main thread, so this slot needs no lock and
+    // their order is the order in which GTK applies the shape.
+    thread_local! {
+        static RENDERER_REGIONS: std::cell::RefCell<Option<RendererInputRegions>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    /// Records the renderer's regions and applies them if the window is
+    /// realized. Before the first show there is no GdkWindow yet; the startup
+    /// path applies the recorded regions as soon as it shows the launcher.
+    pub fn apply_renderer_input_region(
+        window: &WebviewWindow,
+        logical_regions: Vec<LauncherInputRegion>,
+        scale_factor: f64,
+    ) -> Result<(), String> {
+        // Validate before recording so a rejected report cannot replace a
+        // good one that the startup path would otherwise reuse.
+        gdk_input_regions(&logical_regions, scale_factor, 1)?;
+        RENDERER_REGIONS.with(|slot| {
+            *slot.borrow_mut() = Some(RendererInputRegions {
+                regions: logical_regions.clone(),
+                scale_factor,
+            })
+        });
+        match window.gtk_window().ok().and_then(|window| window.window()) {
+            Some(gdk_window) => apply_input_region(&gdk_window, &logical_regions, scale_factor),
+            None => Ok(()),
+        }
+    }
+
+    pub fn apply_startup_input_region(
+        window: &WebviewWindow,
+        fallback_scale_factor: f64,
+    ) -> Result<(), String> {
+        let gdk_window = gdk_window(window)?;
+        let (regions, scale_factor) = RENDERER_REGIONS.with(|slot| {
+            startup_input_regions(slot.borrow().as_ref(), fallback_scale_factor)
+        });
+        apply_input_region(&gdk_window, &regions, scale_factor)
     }
 
     fn begin_drag_capture(window: &WebviewWindow) -> Result<(), String> {
@@ -391,6 +464,29 @@ pub fn install_linux_context_menu(window: &WebviewWindow) -> Result<(), String> 
 #[cfg(all(unix, not(target_os = "macos")))]
 pub fn install_linux_drag(window: &WebviewWindow) -> Result<(), String> {
     platform::install_drag(window)
+}
+
+/// Applies the first input shape after the launcher is shown, preferring the
+/// renderer's own report over Tao's scale factor.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub async fn apply_linux_startup_input_region(
+    window: WebviewWindow,
+    fallback_scale_factor: f64,
+    interaction: State<'_, crate::launcher::LauncherInteractionState>,
+) -> Result<(), String> {
+    let target = window.clone();
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    window
+        .run_on_main_thread(move || {
+            let _ = sender.send(platform::apply_startup_input_region(
+                &target,
+                fallback_scale_factor,
+            ));
+        })
+        .map_err(|error| error.to_string())?;
+    receiver.await.map_err(|error| error.to_string())??;
+    interaction.record_input_region_update();
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -986,6 +1082,59 @@ mod tests {
         assert_eq!(
             gdk_input_regions(&icon, 1.5, 1).unwrap(),
             physical_regions(&icon, 1.5).unwrap()
+        );
+    }
+
+    /// Observed on a 1.25x (Xft.dpi 120) X11 desktop: Tao reports 1.0 and the
+    /// renderer 1.25. If the startup shape wins, it covers 346..410 while the
+    /// icon is drawn at 433..513, so the whole launcher becomes click-through.
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn x11_startup_shape_keeps_the_renderer_scale_on_fractional_desktops() {
+        let renderer = RendererInputRegions {
+            regions: vec![LAUNCHER_ICON_REGION],
+            scale_factor: 1.25,
+        };
+        let (regions, scale) = startup_input_regions(Some(&renderer), 1.0);
+        let shape = gdk_input_regions(&regions, scale, 1).unwrap();
+        assert_eq!(
+            shape,
+            vec![PhysicalLauncherRegion {
+                left: 433,
+                top: 410,
+                right: 513,
+                bottom: 490,
+            }]
+        );
+        // The drawn icon's centre must be inside the shape.
+        assert!(point_hits_regions((473, 450), &shape));
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn x11_startup_shape_keeps_an_open_menu_reported_by_the_renderer() {
+        let menu = LauncherInputRegion {
+            x: 122.0,
+            y: 30.0,
+            width: 280.0,
+            height: 292.0,
+        };
+        let renderer = RendererInputRegions {
+            regions: vec![LAUNCHER_ICON_REGION, menu],
+            scale_factor: 1.25,
+        };
+        assert_eq!(
+            startup_input_regions(Some(&renderer), 1.0),
+            (vec![LAUNCHER_ICON_REGION, menu], 1.25)
+        );
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    #[test]
+    fn x11_startup_shape_falls_back_to_the_icon_before_the_renderer_reports() {
+        assert_eq!(
+            startup_input_regions(None, 1.0),
+            (vec![LAUNCHER_ICON_REGION], 1.0)
         );
     }
 

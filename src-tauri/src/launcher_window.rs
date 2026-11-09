@@ -152,14 +152,20 @@ pub fn present_launcher(launcher: WebviewWindow) -> tauri::Result<()> {
                 eprintln!("无法安装悬浮窗拖动: {error}");
             }
         }
+        // Linux: the renderer may already have reported its regions with the
+        // WebView's real devicePixelRatio. Never overwrite them with Tao's
+        // scale, which is unscaled on fractional-scale X11 desktops.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let result = launcher_input::apply_linux_startup_input_region(
+            launcher.clone(),
+            launcher.scale_factor().unwrap_or(1.0),
+            launcher.state::<launcher::LauncherInteractionState>(),
+        )
+        .await;
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
         let result = launcher_input::set_launcher_input_regions(
             launcher.clone(),
-            vec![launcher_input::LauncherInputRegion {
-                x: 346.0,
-                y: 328.0,
-                width: 64.0,
-                height: 64.0,
-            }],
+            vec![launcher_input::LAUNCHER_ICON_REGION],
             launcher.scale_factor().unwrap_or(1.0),
             launcher.state::<launcher::LauncherInteractionState>(),
         )
