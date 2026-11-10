@@ -1,7 +1,7 @@
 const messages = {
   'download.xunlei.completedFallback': 'Completed · Standard download',
-  'download.xunlei.unsupportedFallback': 'This version of Thunder is unsupported. Using standard download. Supported versions include {versions}.',
-  'download.xunlei.unsupportedCheckpoint': 'Install a compatible Thunder client to resume this download. Supported builds include {versions}.',
+  'download.xunlei.unsupportedFallback': 'Thunder did not pass the compatibility check. Using standard download. Tested builds: {versions}.',
+  'download.xunlei.unsupportedCheckpoint': 'Resume with the Thunder client that created this checkpoint. Tested builds: {versions}.',
   'download.xunlei.native': 'Thunder native channel',
   'download.xunlei.accelerating': 'Thunder member channel',
   'download.xunlei.submitFailed': 'Unable to start or resume the Thunder task. Retry, or start a new download if its checkpoint was removed.',

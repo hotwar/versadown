@@ -1,7 +1,7 @@
 const messages = {
   'download.xunlei.completedFallback': '已完成 · 普通下载',
-  'download.xunlei.unsupportedFallback': '本机迅雷版本不受支持，已改用普通下载。支持的版本为 {versions}。',
-  'download.xunlei.unsupportedCheckpoint': '本机迅雷版本无法恢复此断点。请安装受支持的迅雷客户端后继续下载。支持的版本为 {versions}。',
+  'download.xunlei.unsupportedFallback': '本机迅雷未通过兼容性检查，已改用普通下载。实测版本： {versions}。',
+  'download.xunlei.unsupportedCheckpoint': '本机迅雷版本无法恢复此断点。请使用创建断点时的迅雷客户端继续下载。实测版本： {versions}。',
   'download.xunlei.native': '迅雷原生通道',
   'download.xunlei.accelerating': '迅雷会员通道',
   'download.xunlei.submitFailed': '迅雷原生任务无法启动或恢复，请重试。如果断点已删除，请新建下载任务。',

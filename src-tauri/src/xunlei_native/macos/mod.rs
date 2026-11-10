@@ -1,3 +1,5 @@
+mod compatibility;
+mod probe;
 mod runtime;
 mod transport;
 
@@ -17,7 +19,10 @@ use std::{
     io::Write,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU32, Ordering},
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        Arc,
+    },
 };
 use transport::Worker;
 use uuid::Uuid;
@@ -33,7 +38,7 @@ struct SavedTask {
 
 pub(super) struct MacWorkerEngine {
     worker: Worker,
-    _runtime: runtime::Runtime,
+    _runtime: Arc<runtime::Runtime>,
     session: NativeEngineSession,
     records: BTreeMap<PathBuf, SavedTask>,
     records_path: PathBuf,
@@ -64,8 +69,18 @@ impl MacWorkerEngine {
         session: NativeEngineSession,
         peer_id: &str,
     ) -> Result<Self, NativeEngineError> {
-        let runtime = runtime::installed_runtime(root)?;
-        let records_path = runtime.state.join("versadown-tasks.json");
+        let runtime = Arc::new(runtime::installed_runtime(root)?);
+        compatibility::ensure_probed(&runtime, || probe::verify(&runtime))?;
+        Self::open(&runtime, &runtime.state, session, peer_id)
+    }
+
+    fn open(
+        runtime: &Arc<runtime::Runtime>,
+        state: &Path,
+        session: NativeEngineSession,
+        peer_id: &str,
+    ) -> Result<Self, NativeEngineError> {
+        let records_path = state.join("versadown-tasks.json");
         let records: BTreeMap<PathBuf, SavedTask> = if records_path.exists() {
             serde_json::from_slice(
                 &fs::read(&records_path).map_err(|_| NativeEngineError::OperationFailed)?,
@@ -74,7 +89,7 @@ impl MacWorkerEngine {
         } else {
             BTreeMap::new()
         };
-        let mut worker = Worker::start(&runtime.executable, &runtime.state)?;
+        let mut worker = Worker::start(&runtime.executable, state)?;
         let task_ids: Vec<u32> = records.values().map(|v| v.sdk_id).collect();
         worker.call(json!({
             "op": "init", "peerId": peer_id, "taskIds": task_ids,
@@ -87,7 +102,7 @@ impl MacWorkerEngine {
             records,
             records_path,
             handles: BTreeMap::new(),
-            _runtime: runtime,
+            _runtime: Arc::clone(runtime),
         })
     }
 

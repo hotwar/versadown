@@ -1491,7 +1491,7 @@ it.each([
 it('keeps the Mac native channel fallback reason available after a quick download finishes', () => {
   const task = { id: 'file', name: 'file.bin', kind: 'cloud' as const, statusMessage: 'download.xunlei.unsupportedFallback:5.80.7 (66660)' };
   const props = { selectedTaskId: null, onSelect() {}, onCommand() {} };
-  const reason = '本机迅雷版本不受支持，已改用普通下载。支持的版本为 5.80.7 (66660)。';
+  const reason = '本机迅雷未通过兼容性检查，已改用普通下载。实测版本： 5.80.7 (66660)。';
   const { rerender } = render(<DownloadQueue {...props} tasks={[{ ...task, status: 'downloading', progress: 5 }]} />);
   expect(screen.getByText(reason)).toBeVisible();
   rerender(<DownloadQueue {...props} tasks={[{ ...task, status: 'completed', progress: 100 }]} />);

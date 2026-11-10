@@ -53,5 +53,5 @@ it('translates a native submit failure in the OS notification', () => {
 it('includes the supported builds in a Mac native channel resume failure', () => {
   const error = 'download.xunlei.unsupportedCheckpoint:5.80.7 (66660), 6.0.0 (70000)';
   expect(notificationForTask(task({ status: 'failed', error }))?.body)
-    .toContain('请安装受支持的迅雷客户端后继续下载。支持的版本为 5.80.7 (66660), 6.0.0 (70000)。');
+    .toContain('请使用创建断点时的迅雷客户端继续下载。实测版本： 5.80.7 (66660), 6.0.0 (70000)。');
 });
