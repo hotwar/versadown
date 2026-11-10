@@ -531,13 +531,11 @@ export function App() {
 
   function applyTaskUpdates(
     incoming: readonly QueueTaskInput[],
-    request?: { version: number; scope?: TaskSnapshotScope; protectPurgeInProgress?: boolean },
+    request?: { version: number; scope?: TaskSnapshotScope },
   ) {
     const normalized = normalizeQueueTasks(incoming);
     const protectedIds = new Set(permanentlyPurgedTaskIds.current);
-    if (request?.protectPurgeInProgress !== false) {
-      for (const id of purgingTaskIds.current) protectedIds.add(id);
-    }
+    for (const id of purgingTaskIds.current) protectedIds.add(id);
     if (request) {
       for (const id of pendingStartTaskIds.current) protectedIds.add(id);
     }
@@ -595,13 +593,12 @@ export function App() {
   function refreshTaskSnapshot(
     disposed: () => boolean,
     scope?: 'active' | 'terminal',
-    protectPurgeInProgress = true,
   ) {
     const requestVersion = taskUpdates.current.beginSnapshot();
     const snapshot = scope ? listPersistedTasks(scope) : listPersistedTasks();
     return snapshot.then((saved) => {
       if (disposed()) return [] as QueueTask[];
-      applyTaskUpdates(saved, { version: requestVersion, scope, protectPurgeInProgress });
+      applyTaskUpdates(saved, { version: requestVersion, scope });
       return normalizeQueueTasks(saved);
     }).catch((error: unknown) => {
       if (!disposed()) setNotice({ kind: 'error', message: String(error) });
@@ -1471,8 +1468,10 @@ export function App() {
       } catch (error) {
         if (timer !== undefined) window.clearTimeout(timer);
         timer = undefined;
-        await refreshTaskSnapshot(() => false, 'terminal', false);
         for (const id of ids) purgingTaskIds.current.delete(id);
+        // A failed batch may leave both active (including paused) and terminal tasks.
+        await refreshTaskSnapshot(() => false, 'active');
+        await refreshTaskSnapshot(() => false, 'terminal');
         purgeInProgressRef.current = false;
         setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
       }

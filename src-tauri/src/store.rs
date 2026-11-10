@@ -1288,6 +1288,26 @@ impl TaskStore {
         find_with_connection(&connection, id)
     }
 
+    /// A resume can replace the binding between reading the queue and clicking
+    /// cancel. Only retire the paused row that still owns the observed GID.
+    pub(crate) fn cancel_paused_task_if_bound(
+        &self,
+        id: Uuid,
+        gid: &str,
+    ) -> Result<Option<DownloadTask>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let changed = connection.execute(
+            "UPDATE tasks SET status='cancelled', status_message=NULL, error=NULL, failure_code=NULL,
+             aria_error_code=NULL, download_speed=0, upload_speed=0, eta_seconds=NULL, updated_at=?3
+             WHERE id=?1 AND aria_gid=?2 AND status='paused'",
+            params![id.to_string(), gid, current_timestamp()],
+        )?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        find_with_connection(&connection, id).map(Some)
+    }
+
     pub fn bind_gid(&self, id: Uuid, gid: impl AsRef<str>) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         update_gid(&connection, id, gid.as_ref(), None)?;

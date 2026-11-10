@@ -1055,6 +1055,35 @@ it('uses permanent deletion for an active task instead of only cancelling it', a
   expect(state.taskAction).not.toHaveBeenCalled();
 });
 
+it('restores the surviving paused task immediately when permanent deletion partly fails', async () => {
+  const removed: QueueTask = { ...oldTask, id: 'removed', name: 'finished.zip', status: 'completed' };
+  const paused: QueueTask = {
+    ...oldTask, id: 'survivor', name: 'paused.zip', kind: 'cloud', status: 'paused',
+    source: 'cloud-share://xunlei/share/entry',
+  };
+  const deletion = deferred<void>();
+  let terminal = [removed];
+  state.list.mockImplementation((scope?: string) => Promise.resolve(scope === 'active' ? [paused] : terminal));
+  state.deleteTasks.mockReturnValue(deletion.promise);
+  const user = userEvent.setup();
+  render(<App />);
+
+  await screen.findByText('finished.zip');
+  fireEvent.click(screen.getByText('finished.zip'));
+  fireEvent.click(screen.getByText('paused.zip'), { ctrlKey: true });
+  fireEvent.contextMenu(screen.getByText('paused.zip'));
+  await user.click(screen.getByRole('menuitem', { name: '删除' }));
+  const dialog = screen.getByRole('dialog', { name: '彻底删除任务' });
+  await user.click(within(dialog).getByRole('button', { name: '彻底删除任务' }));
+  expect(screen.queryByText('paused.zip')).not.toBeInTheDocument();
+
+  terminal = [];
+  await act(async () => { deletion.reject(new Error('Could not cancel the paused task')); });
+  expect(await screen.findByText('Could not cancel the paused task')).toBeVisible();
+  expect(screen.getByText('paused.zip')).toBeVisible();
+  expect(screen.queryByText('finished.zip')).not.toBeInTheDocument();
+});
+
 it('selects only the current tab tasks with Ctrl+A across all four task tabs', async () => {
   const groups = [
     { tab: /全部/, statuses: ['downloading', 'failed', 'completed'] }, { tab: /下载中/, statuses: ['downloading'] },

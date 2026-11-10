@@ -575,6 +575,29 @@ impl XunleiNativeBackend {
         Ok(Some(task))
     }
 
+    fn control_previous_session(
+        &self,
+        store: &TaskStore,
+        task_id: Uuid,
+        handle: NativeTaskHandle,
+        action: DownloadAction,
+    ) -> Result<Option<DownloadTask>, String> {
+        if self.engine_session.owns(handle) {
+            return Ok(None);
+        }
+        // A paused task from an earlier process can be cancelled locally.
+        // Keep its GID for checkpoint cleanup; its numeric SDK ID can be reused.
+        if action == DownloadAction::Cancel {
+            if let Some(task) = store
+                .cancel_paused_task_if_bound(task_id, &engine::native_gid(handle))
+                .map_err(|error| error.to_string())?
+            {
+                return Ok(Some(task));
+            }
+        }
+        Err(NATIVE_RESUME_BACKEND_UNAVAILABLE_MESSAGE.into())
+    }
+
     pub fn control(
         self: &Arc<Self>,
         app: &AppHandle,
@@ -584,8 +607,12 @@ impl XunleiNativeBackend {
     ) -> Result<DownloadTask, String> {
         let native_handle =
             native_handle(&task).ok_or_else(|| "迅雷原生任务 ID 无效".to_string())?;
-        if !self.engine_session.owns(native_handle) {
-            return Err(NATIVE_RESUME_BACKEND_UNAVAILABLE_MESSAGE.into());
+        if let Some(cancelled) =
+            self.control_previous_session(store, task.id, native_handle, action)?
+        {
+            emit_task(app, store, &cancelled);
+            release_cloud_slot(app, store, &cancelled);
+            return Ok(cancelled);
         }
         #[cfg(not(target_os = "macos"))]
         let native_id = native_handle.task_id;
@@ -1872,6 +1899,62 @@ mod tests {
             .lines()
             .filter_map(|pid| pid.trim().parse::<u32>().ok())
             .collect()
+    }
+
+    #[test]
+    fn stale_native_cancel_preserves_the_checkpoint_for_purge_and_cannot_cancel_a_new_binding() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let previous = NativeEngineSession::new();
+        let backend = XunleiNativeBackend::default();
+        let old_handle = previous.allocate_handle(3).unwrap();
+        let new_handle = backend.engine_session.allocate_handle(3).unwrap();
+        let old_gid = engine::native_gid(old_handle);
+        let current_gid = engine::native_gid(new_handle);
+        let task = store
+            .create(crate::NewTask::direct("cloud://xunlei/test-file"))
+            .unwrap();
+        let mut paused = DownloadTask {
+            status: TaskStatus::Paused,
+            aria_gid: Some(old_gid.clone()),
+            ..task
+        };
+
+        store.apply_transfer_snapshot(paused.clone()).unwrap();
+        for action in [DownloadAction::Pause, DownloadAction::Resume] {
+            assert!(backend
+                .control_previous_session(&store, paused.id, old_handle, action)
+                .is_err());
+        }
+        paused.aria_gid = Some(current_gid);
+        store.apply_transfer_snapshot(paused.clone()).unwrap();
+        assert!(backend
+            .control_previous_session(&store, paused.id, old_handle, DownloadAction::Cancel)
+            .is_err());
+        assert!(backend
+            .control_previous_session(&store, paused.id, new_handle, DownloadAction::Cancel)
+            .unwrap()
+            .is_none());
+        assert_eq!(store.find(paused.id).unwrap().status, TaskStatus::Paused);
+
+        paused.aria_gid = Some(old_gid.clone());
+        store.apply_transfer_snapshot(paused.clone()).unwrap();
+        let cancelled = backend
+            .control_previous_session(&store, paused.id, old_handle, DownloadAction::Cancel)
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancelled.status, TaskStatus::Cancelled);
+        assert_eq!(cancelled.aria_gid.as_deref(), Some(old_gid.as_str()));
+        store.remove_task_records(&[cancelled.id]).unwrap();
+        let next = store
+            .create(crate::NewTask::direct("cloud://xunlei/another-file"))
+            .unwrap();
+        let rows = store.list().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].id, next.id);
+        assert!(matches!(
+            store.find(cancelled.id),
+            Err(crate::StoreError::NotFound(_))
+        ));
     }
 
     #[test]
