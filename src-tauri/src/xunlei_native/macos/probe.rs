@@ -52,13 +52,19 @@ pub(super) fn verify(runtime: &Arc<Runtime>) -> Result<(), NativeEngineError> {
         total_length: Some(SIZE as u64),
     };
 
+    #[cfg(test)]
+    eprintln!("Probe: starting the isolated worker");
     let mut engine = open()?;
     engine.set_limits(256 * 1024, 0)?;
     let handle =
         engine.submit_with_options(task, request(fixture.url("original")), 0, false, false)?;
+    #[cfg(test)]
+    eprintln!("Probe: task created, waiting for data");
     let partial = wait_for(&mut engine, handle, |p| {
         p.status == super::super::NATIVE_DOWNLOADING && p.completed >= 256 * 1024
     })?;
+    #[cfg(test)]
+    eprintln!("Probe: pausing after {} bytes", partial.completed);
     if partial.completed >= SIZE as u64 {
         return Err(NativeEngineError::Incompatible);
     }
@@ -68,17 +74,24 @@ pub(super) fn verify(runtime: &Arc<Runtime>) -> Result<(), NativeEngineError> {
     }
     drop(engine);
 
+    #[cfg(test)]
+    eprintln!("Probe: reopening worker for the saved checkpoint");
     fixture.restoring.store(true, Ordering::Release);
     let mut engine = open()?;
     engine.set_limits(0, 0)?;
     let handle =
         engine.submit_with_options(task, request(fixture.url("renewed")), 0, false, true)?;
-    if engine.poll(handle)?.completed < partial.completed {
+    let restored = engine.poll(handle)?;
+    #[cfg(test)]
+    eprintln!("Probe: restored {} bytes", restored.completed);
+    if restored.completed < partial.completed {
         return Err(NativeEngineError::Incompatible);
     }
     wait_for(&mut engine, handle, |p| {
         p.status == super::super::NATIVE_COMPLETE
     })?;
+    #[cfg(test)]
+    eprintln!("Probe: download completed, checking Range and file contents");
     engine.finish(handle)?;
     if !fixture.resumed_range.load(Ordering::Acquire)
         || fs::metadata(&target).map_err(io_error)?.len() != SIZE as u64
@@ -101,6 +114,8 @@ fn wait_for(
             return Ok(progress);
         }
         if progress.status == super::super::NATIVE_ERROR || Instant::now() >= deadline {
+            #[cfg(test)]
+            eprintln!("Probe: SDK state {}, error {}, bytes {}", progress.status, progress.error_code, progress.completed);
             return Err(NativeEngineError::Incompatible);
         }
         thread::sleep(Duration::from_millis(200));
@@ -262,7 +277,14 @@ mod tests {
             super::super::runtime::installed_runtime_for_probe_test(root.path(), &app).unwrap(),
         );
         assert!(runtime.needs_probe);
-        super::super::compatibility::ensure_probed(&runtime, || super::verify(&runtime)).unwrap();
+        super::super::compatibility::ensure_probed(&runtime, || {
+            let result = super::verify(&runtime);
+            if let Err(reason) = &result {
+                eprintln!("Anonymous probe failed: {reason:?}");
+            }
+            result
+        })
+        .unwrap();
         super::super::compatibility::ensure_probed(&runtime, || {
             panic!("successful probe should be cached")
         })

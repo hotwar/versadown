@@ -35,7 +35,13 @@ test "$(plutil -extract CFBundleShortVersionString raw "$plist")" = "${build%.*}
 test "$(plutil -extract CFBundleVersion raw "$plist")" = "${build##*.}"
 
 # This test also verifies the Developer ID and the staged XPC before running the SDK.
-cargo test --locked --manifest-path src-tauri/Cargo.toml --lib \
+if ! cargo test --locked --manifest-path src-tauri/Cargo.toml --lib \
   xunlei_native::macos::probe::tests::signed_service_passes_anonymous_probe \
-  -- --exact --ignored --nocapture | tee "$work/result.log"
+  -- --exact --ignored --nocapture | tee "$work/result.log"; then
+  if [[ "${GITHUB_ACTIONS:-false}" == true ]]; then
+    /usr/bin/log show --last 90s --style compact \
+      --predicate '(process == "amfid" OR process == "launchd" OR process == "syspolicyd" OR process == "xpcproxy") AND (eventMessage CONTAINS[c] "DownloadService" OR eventMessage CONTAINS[c] "VersaDownThunder")' | tail -45 || true
+  fi
+  exit 1
+fi
 grep -Fq 'test result: ok. 1 passed;' "$work/result.log"
