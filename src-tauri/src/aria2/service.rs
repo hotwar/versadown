@@ -1209,6 +1209,17 @@ impl DownloadService {
         self.reconcile_task_unlocked(task_id).await
     }
 
+    /// Coordinate with aria2 polling, which reads and writes whole task snapshots.
+    pub(crate) async fn note_download_route(
+        &self,
+        task_id: Uuid,
+        gid: &str,
+        message: &str,
+    ) -> Result<DownloadTask, StoreError> {
+        let _guard = self.operation.lock().await;
+        self.store.note_download_route(task_id, gid, message)
+    }
+
     pub async fn reconcile_task(
         &self,
         task_id: Uuid,

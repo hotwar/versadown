@@ -1,4 +1,11 @@
 const messages = {
+  'download.xunlei.completedFallback': '已完成 · 普通下载',
+  'download.xunlei.unsupportedFallback': '本机迅雷版本不受支持，已改用普通下载。支持的版本为 {versions}。',
+  'download.xunlei.unsupportedCheckpoint': '本机迅雷版本无法恢复此断点。请安装受支持的迅雷客户端后继续下载。支持的版本为 {versions}。',
+  'download.xunlei.native': '迅雷原生通道',
+  'download.xunlei.accelerating': '迅雷会员通道',
+  'download.xunlei.submitFailed': '迅雷原生任务无法启动或恢复，请重试。如果断点已删除，请新建下载任务。',
+  'download.xunlei.proxyCheckpoint': '此迅雷断点需要直连。关闭代理后可继续，或新建任务通过代理下载。',
   'cloud.xunlei.membership.vip': 'VIP{level}',
   'cloud.xunlei.membership.platinum': '白金 VIP{level}',
   'cloud.xunlei.membership.svip': 'SVIP{level}',

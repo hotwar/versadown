@@ -649,8 +649,10 @@ pub async fn queue_cloud_dispatch(
                     } else {
                         apply_cloud_download_policy(provider, configured_connections, configured)
                     };
-                    let mut xunlei_native_plugin_update_required = false;
-                    if provider == CloudProvider::Xunlei {
+                    let fallback_notice = if provider == CloudProvider::Xunlei {
+                        use crate::xunlei_native::NativeSubmitError;
+
+                        let resume_gid = configured.native_resume_gid.as_deref();
                         match state.xunlei_native_backend.submit(
                             &submit_app,
                             &state.store,
@@ -659,25 +661,31 @@ pub async fn queue_cloud_dispatch(
                             &configured,
                         ) {
                             Ok(Some(task)) => return Ok(task),
-                            Ok(None) => {
-                                xunlei_native_plugin_update_required =
-                                    xunlei_native_fallback_allowed(
-                                        configured.native_resume_gid.as_deref(),
-                                        false,
-                                    )?;
+                            Ok(None) => xunlei_native_fallback_notice(resume_gid, false)?,
+                            Err(NativeSubmitError::Incompatible) => {
+                                xunlei_native_fallback_notice(resume_gid, true)?
                             }
-                            Err(crate::xunlei_native::NativeSubmitError::Incompatible) => {
-                                xunlei_native_plugin_update_required =
-                                    xunlei_native_fallback_allowed(
-                                        configured.native_resume_gid.as_deref(),
-                                        true,
-                                    )?;
+                            #[cfg(target_os = "macos")]
+                            Err(NativeSubmitError::UnsupportedClientVersion) => {
+                                Some(macos_xunlei_fallback_notice(resume_gid)?)
                             }
-                            Err(error) => {
-                                return Err(QuarkError::Transport(error.user_message()));
+                            #[cfg(target_os = "macos")]
+                            Err(NativeSubmitError::SubmitFailed) => {
+                                return Err(QuarkError::XunleiNativeDownload(
+                                    crate::cloud::XunleiNativeDownloadFailure::SubmitFailed,
+                                ));
                             }
+                            #[cfg(target_os = "macos")]
+                            Err(NativeSubmitError::ProxyCheckpoint) => {
+                                return Err(QuarkError::XunleiNativeDownload(
+                                    crate::cloud::XunleiNativeDownloadFailure::ProxyCheckpoint,
+                                ));
+                            }
+                            Err(error) => return Err(QuarkError::Transport(error.user_message())),
                         }
-                    }
+                    } else {
+                        None
+                    };
                     let service = state
                         .runtime
                         .service()
@@ -728,13 +736,12 @@ pub async fn queue_cloud_dispatch(
                         }
                     }
                     let submitted = submitted.map_err(cloud_download_submission_error)?;
-                    let submitted = if xunlei_native_plugin_update_required {
-                        let mut submitted = submitted;
-                        submitted.status_message =
-                            Some(crate::xunlei_native::PLUGIN_UPDATE_MESSAGE.into());
-                        state
-                            .store
-                            .apply_transfer_snapshot(submitted)
+                    let submitted = if let (Some(message), Some(gid)) =
+                        (fallback_notice, submitted.aria_gid.as_deref())
+                    {
+                        service
+                            .note_download_route(id, gid, &message)
+                            .await
                             .map_err(|_| QuarkError::Storage)?
                     } else {
                         submitted
@@ -858,13 +865,23 @@ pub fn apply_cloud_download_policy(
     options
 }
 
+#[cfg(target_os = "macos")]
+fn macos_xunlei_fallback_notice(native_resume_gid: Option<&str>) -> Result<String, QuarkError> {
+    if crate::xunlei_native::is_native_gid(native_resume_gid) {
+        return Err(QuarkError::XunleiNativeDownload(
+            crate::cloud::XunleiNativeDownloadFailure::UnsupportedCheckpoint,
+        ));
+    }
+    Ok(crate::xunlei_native::macos_fallback_notice())
+}
+
 /// aria2 can resume its own checkpoint, but it cannot validate the private
 /// range map saved by Thunder. A native retry must therefore remain on the
 /// native backend when the retry intent contains a native task identity.
-fn xunlei_native_fallback_allowed(
+fn xunlei_native_fallback_notice(
     native_resume_gid: Option<&str>,
     plugin_update_required: bool,
-) -> Result<bool, QuarkError> {
+) -> Result<Option<String>, QuarkError> {
     if crate::xunlei_native::is_native_gid(native_resume_gid) {
         let message = if plugin_update_required {
             crate::xunlei_native::PLUGIN_UPDATE_MESSAGE
@@ -873,7 +890,7 @@ fn xunlei_native_fallback_allowed(
         };
         return Err(QuarkError::Transport(message.into()));
     }
-    Ok(plugin_update_required)
+    Ok(plugin_update_required.then(|| crate::xunlei_native::PLUGIN_UPDATE_MESSAGE.to_owned()))
 }
 
 /// Baidu's range gateway can safely split each file into concurrent 4 MiB
@@ -1023,6 +1040,7 @@ pub(crate) fn directory_download_failure_fields(
         QuarkError::Provider(_) => ("provider_error", "网盘拒绝下载请求"),
         QuarkError::InvalidResponse => ("invalid_response", "网盘返回无效下载数据"),
         QuarkError::Storage => ("credential_storage_error", "本机凭据或任务存储不可用"),
+        QuarkError::XunleiNativeDownload(failure) => (failure.code(), failure.message()),
         QuarkError::InvalidInput(_) => ("invalid_input", "下载参数无效"),
         QuarkError::AuthorizationPending => ("authorization_pending", "网页授权尚未完成"),
         QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => {
@@ -1852,6 +1870,7 @@ impl ResolvedCloudDownload {
                         )
                         && !name.eq_ignore_ascii_case(crate::xunlei_native::CID_MARKER_HEADER)
                         && !name.eq_ignore_ascii_case(crate::xunlei_native::GCID_MARKER_HEADER)
+                        && !name.eq_ignore_ascii_case(crate::xunlei_native::VIP_TYPE_MARKER_HEADER)
                 })
                 .collect(),
             ..Default::default()
@@ -1865,12 +1884,19 @@ mod tests {
 
     #[test]
     fn xunlei_native_unavailability_only_falls_back_without_a_native_checkpoint() {
-        assert!(!xunlei_native_fallback_allowed(None, false).unwrap());
-        assert!(xunlei_native_fallback_allowed(None, true).unwrap());
+        assert!(xunlei_native_fallback_notice(None, false)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            xunlei_native_fallback_notice(None, true)
+                .unwrap()
+                .as_deref(),
+            Some(crate::xunlei_native::PLUGIN_UPDATE_MESSAGE)
+        );
 
         assert_eq!(
             super::share_resolution_failure_message(
-                &xunlei_native_fallback_allowed(
+                &xunlei_native_fallback_notice(
                     Some("xunlei-native:4aa8c3e7-f41d-4d2e-bbb0-21a9f87000f1:42"),
                     false,
                 )
@@ -1880,7 +1906,7 @@ mod tests {
         );
         assert_eq!(
             super::share_resolution_failure_message(
-                &xunlei_native_fallback_allowed(
+                &xunlei_native_fallback_notice(
                     Some("xunlei-native:4aa8c3e7-f41d-4d2e-bbb0-21a9f87000f1:42"),
                     true,
                 )
@@ -1888,6 +1914,119 @@ mod tests {
             ),
             crate::xunlei_native::PLUGIN_UPDATE_MESSAGE,
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_xunlei_ordinary_download_reports_the_route_on_fast_completion() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(crate::NewTask::direct("cloud://xunlei/file"))
+            .unwrap();
+        let notice = macos_xunlei_fallback_notice(None).unwrap();
+        assert_eq!(
+            notice,
+            format!(
+                "download.xunlei.unsupportedFallback:{}",
+                crate::xunlei_native::macos_supported_versions()
+            )
+        );
+        let completed = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Completed,
+                aria_gid: Some("0123456789abcdef".into()),
+                completed_length: 256,
+                progress: 100,
+                ..task
+            })
+            .unwrap();
+        let gid = completed.aria_gid.as_deref().unwrap();
+        assert!(store
+            .note_download_route(completed.id, "obsolete", &notice)
+            .unwrap()
+            .status_message
+            .is_none());
+        let noted = store
+            .note_download_route(completed.id, gid, &notice)
+            .unwrap();
+        assert_eq!(noted.status_message.as_deref(), Some(notice.as_str()));
+        assert_eq!(
+            (noted.status, noted.completed_length),
+            (TaskStatus::Completed, 256)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn mac_xunlei_unsupported_checkpoint_can_retry_after_app_restart() {
+        use crate::cloud::download_dispatch::CloudDownloadDispatch;
+        let root = tempfile::tempdir().unwrap();
+        let database = root.path().join("tasks.sqlite");
+        let store = TaskStore::open_path(&database).unwrap();
+        let dispatch = CloudDownloadDispatch::default();
+        let gid = "xunlei-native:4aa8c3e7-f41d-4d2e-bbb0-21a9f87000f1:42";
+        let task = store
+            .create(crate::NewTask::direct("cloud://xunlei/file"))
+            .unwrap();
+        let payload = root.path().join("partial.bin");
+        std::fs::write(&payload, [0; 12]).unwrap();
+        store
+            .upsert_files(
+                task.id,
+                &[(0, payload.to_string_lossy().into_owned(), 24, 12, true)],
+            )
+            .unwrap();
+        let paused = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Paused,
+                completed_length: 12,
+                aria_gid: Some(gid.into()),
+                ..task
+            })
+            .unwrap();
+        let (_, version) = dispatch
+            .prepare_expected_with_retry_intent(&store, &paused, false, true)
+            .await
+            .unwrap();
+        let resume = dispatch.retry_submission_options(paused.id, UriSubmissionOptions::default());
+        let error = macos_xunlei_fallback_notice(resume.native_resume_gid.as_deref()).unwrap_err();
+        let message = error.to_string();
+        assert_eq!(
+            message,
+            format!(
+                "download.xunlei.unsupportedCheckpoint:{}",
+                crate::xunlei_native::macos_supported_versions()
+            )
+        );
+        assert_eq!(directory_download_failure_fields(&error).1, message);
+        let failed = dispatch
+            .run(
+                &store,
+                CloudProvider::Xunlei,
+                paused.id,
+                version,
+                || async { Ok(()) },
+                |()| async { Err(error) },
+            )
+            .await
+            .unwrap();
+        assert_eq!(failed.status, TaskStatus::Failed);
+        assert_eq!(failed.error.as_deref(), Some(message.as_str()));
+        drop(store);
+        let store = TaskStore::open_path(&database).unwrap();
+        let dispatch = CloudDownloadDispatch::default();
+        let task = store.find(paused.id).unwrap();
+        assert_eq!(task.aria_gid.as_deref(), Some(gid));
+        assert!(crate::retry_duplicate_state(&store, &task)
+            .unwrap()
+            .is_none());
+        dispatch
+            .prepare_expected_with_retry_intent(&store, &task, false, true)
+            .await
+            .unwrap();
+        let options = dispatch.retry_submission_options(task.id, UriSubmissionOptions::default());
+        assert!(options.continue_download && !options.allow_overwrite);
+        assert_eq!(options.native_resume_gid.as_deref(), Some(gid));
     }
 
     #[test]

@@ -103,6 +103,15 @@ pub fn retry_duplicate_state(
     store: &TaskStore,
     task: &DownloadTask,
 ) -> Result<Option<DuplicateDownloadState>, StoreError> {
+    #[cfg(target_os = "macos")]
+    if task.failure_code.as_deref()
+        == Some(crate::cloud::XunleiNativeDownloadFailure::UnsupportedCheckpoint.code())
+        && crate::xunlei_native::is_native_gid(task.aria_gid.as_deref())
+    {
+        // The version check ran before a new transfer. Retry the preserved
+        // native checkpoint, even when the partial payload already exists.
+        return Ok(None);
+    }
     let state = duplicate_state(store, task)?;
     match state {
         DuplicateDownloadState::ResumeAvailable => Ok(Some(state)),

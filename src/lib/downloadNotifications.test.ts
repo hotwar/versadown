@@ -44,3 +44,14 @@ describe('download status notifications', () => {
     expect(shouldNotifyTask(task({ status: 'failed' }), 'cancelled')).toBe(true);
   });
 });
+
+it('translates a native submit failure in the OS notification', () => {
+  expect(notificationForTask(task({ status: 'failed', error: 'download.xunlei.submitFailed' }))?.body)
+    .toContain('迅雷原生任务无法启动或恢复');
+});
+
+it('includes the supported builds in a Mac native channel resume failure', () => {
+  const error = 'download.xunlei.unsupportedCheckpoint:5.80.7 (66660), 6.0.0 (70000)';
+  expect(notificationForTask(task({ status: 'failed', error }))?.body)
+    .toContain('请安装受支持的迅雷客户端后继续下载。支持的版本为 5.80.7 (66660), 6.0.0 (70000)。');
+});

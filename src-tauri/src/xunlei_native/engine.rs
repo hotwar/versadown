@@ -117,6 +117,8 @@ pub(super) struct NativeSubmission {
 #[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum NativeEngineError {
+    #[cfg(target_os = "macos")]
+    UnsupportedClientVersion,
     Unavailable,
     Incompatible,
     WorkerStopped,

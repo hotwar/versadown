@@ -82,6 +82,8 @@
 需要 macOS 12+、Xcode Command Line Tools、Node 24+、pnpm 10 与 Rust stable。
 两种架构的 aria2-next 3.0.9 引擎随包提供，构建前检查官方 SHA-256；应用使用系统 WKWebView。
 
+迅雷网盘任务可使用本机迅雷 5.80.7（66660）的下载引擎。将官方迅雷安装在 `/Applications` 或 `~/Applications` 即可，下载时不必打开迅雷。VD 不附带迅雷组件。没有匹配的引擎、文件没有加速凭据，或 VD 配置了代理时，新任务仍走 aria2。已有迅雷断点需在直连模式下用匹配的引擎继续。队列在引擎收到加速通道数据后显示“迅雷会员通道”，实际速度取决于资源。
+
 ```bash
 pnpm install --frozen-lockfile
 pnpm run build:macos:quick       # 增量调试二进制

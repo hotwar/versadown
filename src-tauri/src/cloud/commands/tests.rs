@@ -711,6 +711,47 @@ fn xunlei_verification_messages_never_expose_internal_reason_codes() {
     assert_eq!(wire["code"], "xunlei_verification_unavailable");
 }
 
+#[tokio::test]
+async fn mac_xunlei_native_failures_reach_the_queue_with_their_localization_keys() {
+    use crate::cloud::{download_dispatch::CloudDownloadDispatch, XunleiNativeDownloadFailure};
+
+    let store = TaskStore::open_in_memory().unwrap();
+    let dispatch = CloudDownloadDispatch::default();
+    for (source, failure, message) in [
+        (
+            "cloud://xunlei/file",
+            XunleiNativeDownloadFailure::ProxyCheckpoint,
+            "download.xunlei.proxyCheckpoint",
+        ),
+        (
+            "cloud-share://xunlei/share/file",
+            XunleiNativeDownloadFailure::SubmitFailed,
+            "download.xunlei.submitFailed",
+        ),
+    ] {
+        let task = store.create(crate::NewTask::direct(source)).unwrap();
+        let (_, version) = dispatch.prepare_expected(&store, &task).await.unwrap();
+        let error = QuarkError::XunleiNativeDownload(failure);
+        assert_eq!(
+            directory_download_failure_fields(&error),
+            (cloud_failure_code(&error), message)
+        );
+        let result = dispatch
+            .run(
+                &store,
+                CloudProvider::Xunlei,
+                task.id,
+                version,
+                || async { Ok(()) },
+                |()| async { Err(error) },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status, TaskStatus::Failed);
+        assert_eq!(store.find(task.id).unwrap().error.as_deref(), Some(message));
+    }
+}
+
 #[test]
 fn cloud_download_local_failures_keep_distinct_codes_in_every_error_surface() {
     use crate::aria2::service::DownloadServiceError;

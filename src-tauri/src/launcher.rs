@@ -555,6 +555,8 @@ fn begin_application_exit(app: &AppHandle) {
         return;
     };
     let runtime = std::sync::Arc::clone(&state.runtime);
+    #[cfg(target_os = "macos")]
+    let native = std::sync::Arc::clone(&state.xunlei_native_backend);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         // The user-facing windows disappear immediately, but leave the tray in
@@ -586,6 +588,8 @@ fn begin_application_exit(app: &AppHandle) {
         };
         let shutdown = runtime.shutdown(EXIT_ARIA2_SHUTDOWN_TIMEOUT);
         let (_, report) = tokio::join!(remove_tray, shutdown);
+        #[cfg(target_os = "macos")]
+        let _ = tauri::async_runtime::spawn_blocking(move || native.shutdown()).await;
         if !report.child_stopped {
             // `shutdown_report` only reaches this branch after its force-kill
             // fallback failed.  Keep the process alive instead of orphaning a

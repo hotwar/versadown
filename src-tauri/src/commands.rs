@@ -3157,6 +3157,12 @@ fn recorded_xunlei_checkpoint_paths(
     if !crate::xunlei_native::is_native_gid(task.aria_gid.as_deref()) {
         return Ok(Vec::new());
     }
+    // The Mac service removes its checkpoint on completion. A hidden script
+    // created next to the finished file later does not belong to this task.
+    #[cfg(target_os = "macos")]
+    if task.completed_at.is_some() {
+        return Ok(Vec::new());
+    }
     let mut paths = Vec::new();
     for file in store.files(task.id).map_err(|error| error.to_string())? {
         if file.path.trim().is_empty() {
@@ -3169,10 +3175,15 @@ fn recorded_xunlei_checkpoint_paths(
                 output.display()
             ));
         }
-        for suffix in [".xltd", ".xltd.cfg"] {
+        #[cfg(target_os = "macos")]
+        let checkpoints = [crate::xunlei_native::macos_checkpoint_path(&output)];
+        #[cfg(not(target_os = "macos"))]
+        let checkpoints = [".xltd", ".xltd.cfg"].map(|suffix| {
             let mut checkpoint = output.as_os_str().to_os_string();
             checkpoint.push(suffix);
-            let checkpoint = PathBuf::from(checkpoint);
+            PathBuf::from(checkpoint)
+        });
+        for checkpoint in checkpoints {
             match fs::symlink_metadata(&checkpoint) {
                 Ok(metadata)
                     if metadata.file_type().is_file() || metadata.file_type().is_symlink() => {}
@@ -3975,6 +3986,22 @@ pub async fn update_settings(
             .runtime
             .reconfigure_aria2_settings(settings.aria2.clone())
             .await?;
+    }
+    #[cfg(target_os = "macos")]
+    if settings.aria2.overall_download_limit != previous.aria2.overall_download_limit
+        || settings.aria2.p2p_upload_limit != previous.aria2.p2p_upload_limit
+    {
+        let native = std::sync::Arc::clone(&state.xunlei_native_backend);
+        let download = settings.aria2.overall_download_limit;
+        let upload = settings.aria2.p2p_upload_limit;
+        let sync = tauri::async_runtime::spawn_blocking(move || native.set_limits(download, upload))
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|result| result);
+        if let Err(error) = sync {
+            state.runtime.reconfigure_aria2_settings(previous.aria2.clone()).await?;
+            return Err(error);
+        }
     }
     if settings.associate_download_links != previous.associate_download_links {
         let enabled = settings.associate_download_links;
@@ -5905,6 +5932,30 @@ mod tests {
             .plan
             .linked_local_tasks
             .is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_xunlei_checkpoint_cleanup_uses_only_recorded_payload_paths() {
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("file.zip");
+        let checkpoint = root.path().join(".file.zip.js");
+        fs::write(&checkpoint, b"checkpoint").unwrap();
+        fs::write(root.path().join(".other.zip.js"), b"unrelated").unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut task = store
+            .create(NewTask::direct("cloud://xunlei/file-id"))
+            .unwrap();
+        task.aria_gid = Some("xunlei-native:4aa8c3e7-f41d-4d2e-bbb0-21a9f87000f1:7".into());
+        store
+            .upsert_files(task.id, &[(0, output.to_string_lossy().into_owned(), 7, 2, true)])
+            .unwrap();
+        assert_eq!(
+            recorded_xunlei_checkpoint_paths(&store, &task).unwrap(),
+            vec![checkpoint]
+        );
+        task.completed_at = Some(1);
+        assert!(recorded_xunlei_checkpoint_paths(&store, &task).unwrap().is_empty());
     }
 
     #[cfg(windows)]

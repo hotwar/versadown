@@ -61,6 +61,11 @@ jobs:
           pnpm exec vitest run src/lib/api.test.ts src/lib/downloadEvents.test.ts src/lib/launcherWindow.test.ts src/lib/mainWindow.test.ts src/lib/windowCapabilities.test.ts src/components/LauncherWindow.test.tsx src/components/FloatingLauncher.test.tsx src/components/StartupNotice.test.tsx src/components/SettingsPanel.test.tsx src/components/LocalUploadPicker.test.tsx src/components/CloudManager.test.tsx src/App.live.test.tsx src/i18n/index.test.ts --exclude '.worktrees/**'
           node --test scripts/bundle-resource-config.test.mjs
           node --test scripts/test-xunlei-auth-plugin.cjs
+      - name: Check Thunder cloud download engine
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib xunlei_native
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib mac_xunlei
+          pnpm exec vitest run src/components/DownloadQueue.test.tsx src/lib/downloadNotifications.test.ts -t 'Mac native channel|native submit failure' --exclude '.worktrees/**'
       - name: Check native download and window behavior
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --test engine_binary --test aria2_live --test parser_policy --test window_config --test window_lifecycle --test engine_runtime --test ftp_download --test cloud_provider_contract --test cloud_baidu --test aria2_bt --test magnet_metadata
       - name: Check cloud range streaming and retry recovery

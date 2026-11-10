@@ -145,6 +145,8 @@ impl DownloadOps for XunleiDriver<'_> {
         let http = &self.http;
         with_xunlei_client(store, http, |client| {
             let download = client.download_with_acceleration(file_id)?;
+            #[cfg(target_os = "macos")]
+            let membership = client.native_membership_marker(&download);
             // Keep the authenticated browser's public identity on the CDN
             // request, but never forward bearer/captcha/cookies off the API.
             let session = client.session();
@@ -156,6 +158,8 @@ impl DownloadOps for XunleiDriver<'_> {
                 headers.push(("Referer".into(), "https://pan.xunlei.com/".into()));
             }
             headers.extend(xunlei::xunlei_native_identity_markers(&session));
+            #[cfg(target_os = "macos")]
+            headers.extend(membership);
             append_native_download_markers(&mut headers, &download);
             Ok(ResolvedCloudDownload {
                 url: download.url,

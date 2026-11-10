@@ -7,6 +7,7 @@ import type { XunleiAccountProfile, CloudUploadAction, CloudUploadProgress } fro
 import type { CloudAuthorizationStateEvent, CloudCapacityInvalidated } from '../lib/cloudTypes';
 import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider, CloudShare, CloudShareCancelOutcome, CloudShareOptions, CloudUploadOutcome, SharePassCodeConstraint } from '../lib/cloudTypes';
 import { t, useTranslation } from '../i18n';
+import { xunleiDownloadMessage } from '../i18n/xunleiDownloadMessage';
 import { isXunleiVerificationFailure as hasXunleiVerificationCode, xunleiVerificationMessage } from '../lib/xunleiVerification';
 import { failedShareItemIds, normalizeShareCancelOutcome } from '../lib/cloudShareCancel';
 import { cloudProviderLabel } from '../i18n/cloudProviderLabel';
@@ -184,9 +185,8 @@ function errorMessage(error: unknown, fallback: string) {
   if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'baidu_transfer_pending') {
     return t('cloud.error.baiduTransferPending');
   }
-  if (error instanceof Error && error.message) return error.message;
   if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as { message?: unknown }).message === 'string') {
-    return (error as { message: string }).message;
+    return xunleiDownloadMessage((error as { message: string }).message);
   }
   return fallback;
 }

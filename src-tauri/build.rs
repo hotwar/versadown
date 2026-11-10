@@ -3,6 +3,35 @@ fn main() {
     // This forces Tauri to re-embed the matching dist assets without clearing
     // Cargo's incremental Rust target.
     println!("cargo:rerun-if-env-changed=VERSADOWN_FRONTEND_SIGNATURE");
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        let source = "src/xunlei_native/macos/worker.m";
+        println!("cargo:rerun-if-changed={source}");
+        let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() {
+            Ok("aarch64") => "arm64",
+            Ok("x86_64") => "x86_64",
+            _ => panic!("unsupported macOS architecture"),
+        };
+        let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap())
+            .join("versadown-xunlei-worker");
+        let status = std::process::Command::new("xcrun")
+            .args([
+                "clang",
+                "-arch",
+                arch,
+                "-mmacosx-version-min=12.0",
+                "-fobjc-arc",
+                "-fblocks",
+                "-O2",
+                "-framework",
+                "Foundation",
+                source,
+                "-o",
+            ])
+            .arg(output)
+            .status()
+            .expect("macOS clang is required");
+        assert!(status.success(), "failed to build the Xunlei XPC bridge");
+    }
 
     let mut attributes = tauri_build::Attributes::new();
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")

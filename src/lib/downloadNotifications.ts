@@ -1,5 +1,6 @@
 import type { QueueTask, TaskStatus } from './types';
 import { t } from '../i18n';
+import { xunleiDownloadMessage } from '../i18n/xunleiDownloadMessage';
 import { isPrivateTask } from './queueTask';
 
 let permissionPromise: Promise<boolean> | undefined;
@@ -20,7 +21,7 @@ export function notificationForTask(task: QueueTask): DownloadNotification | nul
   const name = task.name.trim() || '下载任务';
   if (task.status === 'completed') return { title: t('download.status.completed'), body: name };
   const error = task.error?.trim();
-  return { title: t('download.status.failed'), body: error ? t('download.notification.failed', { name, error }) : name };
+  return { title: t('download.status.failed'), body: error ? t('download.notification.failed', { name, error: xunleiDownloadMessage(error) }) : name };
 }
 
 export function shouldNotifyTask(task: QueueTask, previousStatus: TaskStatus | undefined): boolean {

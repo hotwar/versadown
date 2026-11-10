@@ -592,6 +592,49 @@ mod tests {
         );
         assert_eq!(http.requests.lock().unwrap().len(), 4);
     }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_xunlei_download_uses_only_the_accounts_active_download_vip_type() {
+        for (account, active, expected) in [
+            ("user", 1, Some("3")),
+            ("user", 0, None),
+            ("other", 1, None),
+        ] {
+            let credentials = credentials();
+            let http = Http::new(vec![
+                cap(),
+                json!({"id":"f1","name":"file.txt","web_content_link":"https://cdn.example/f1",
+                    "links":{"application/octet-stream":{"token":"file-acceleration"}}}),
+                json!({"captcha_token":"account-ticket","expires_in":300}),
+                json!({"sub": account, "vip_info": [
+                    {"user_vas":306,"is_vip":1,"vas_type":5},
+                    {"user_vas":"2","is_vip":active,"vas_type":"3"}]}),
+            ]);
+            let download = XunleiShareAdapter {
+                credentials: &credentials,
+                http: &http,
+            }
+            .personal_download("f1", "file.txt".into())
+            .unwrap();
+            let marker = download
+                .headers
+                .iter()
+                .find(|(name, _)| name == crate::xunlei_native::VIP_TYPE_MARKER_HEADER);
+            assert_eq!(marker.map(|(_, value)| value.as_str()), expected);
+            assert!(http
+                .requests
+                .lock()
+                .unwrap()
+                .last()
+                .unwrap()
+                .url
+                .ends_with("/v1/user/me"));
+            let saved: XunleiSession =
+                serde_json::from_slice(&credentials.load("xunlei").unwrap().unwrap()).unwrap();
+            assert_eq!(saved.web_security.captcha_token, "account-ticket");
+        }
+    }
+
     #[test]
     fn xunlei_recorded_transfer_refreshes_personal_file_without_share_restore() {
         let credentials = credentials();
@@ -1145,11 +1188,18 @@ impl XunleiShareAdapter<'_> {
             client.supervised()
         };
         let result = client.download_with_acceleration(file_id);
+        #[cfg(target_os = "macos")]
+        let membership = result
+            .as_ref()
+            .ok()
+            .and_then(|download| client.native_membership_marker(download));
         let refreshed = serde_json::to_vec(&client.session()).map_err(|_| QuarkError::Storage)?;
         self.credentials.save("xunlei", &refreshed)?;
         let download = result?;
         let mut headers = xunlei_cdn_headers(&client.session().profile.user_agent);
         headers.extend(xunlei_native_identity_markers(&client.session()));
+        #[cfg(target_os = "macos")]
+        headers.extend(membership);
         if let Some(token) = download.acceleration_token {
             headers.push((
                 crate::xunlei_native::ACCELERATION_TOKEN_MARKER_HEADER.into(),

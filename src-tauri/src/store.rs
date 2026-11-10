@@ -1273,6 +1273,21 @@ impl TaskStore {
         find_with_connection(&connection, id)
     }
 
+    pub(crate) fn note_download_route(
+        &self,
+        id: Uuid,
+        gid: &str,
+        message: &str,
+    ) -> Result<DownloadTask, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        connection.execute(
+            "UPDATE tasks SET status_message = ?1 WHERE id = ?2 AND aria_gid = ?3
+             AND status IN ('parsing', 'queued', 'downloading', 'completed') AND status_message IS NULL",
+            params![message, id.to_string(), gid],
+        )?;
+        find_with_connection(&connection, id)
+    }
+
     pub fn bind_gid(&self, id: Uuid, gid: impl AsRef<str>) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         update_gid(&connection, id, gid.as_ref(), None)?;
@@ -1443,16 +1458,27 @@ impl TaskStore {
         gid: impl AsRef<str>,
         message: impl AsRef<str>,
     ) -> Result<DownloadTask, StoreError> {
+        self.bind_gid_and_fail_with_code(id, gid, message, None)
+    }
+
+    pub(crate) fn bind_gid_and_fail_with_code(
+        &self,
+        id: Uuid,
+        gid: impl AsRef<str>,
+        message: impl AsRef<str>,
+        failure_code: Option<&str>,
+    ) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let changed = connection.execute(
-            "UPDATE tasks SET aria_gid=?1,followed_by_gid=NULL,metadata_gid=NULL,status='failed',error=?2,failure_code=NULL,
+            "UPDATE tasks SET aria_gid=?1,followed_by_gid=NULL,metadata_gid=NULL,status='failed',error=?2,failure_code=?5,
              download_speed=0,upload_speed=0,eta_seconds=NULL,selection_confirmed=0,updated_at=?3
              WHERE id=?4",
             params![
                 gid.as_ref(),
                 message.as_ref(),
                 current_timestamp(),
-                id.to_string()
+                id.to_string(),
+                failure_code
             ],
         )?;
         if changed == 0 {

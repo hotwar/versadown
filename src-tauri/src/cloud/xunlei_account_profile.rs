@@ -14,6 +14,9 @@ pub struct XunleiAccountProfile {
 struct Membership {
     kind: MembershipKind,
     level: Option<u16>,
+    #[cfg(target_os = "macos")]
+    #[serde(skip)]
+    native_vip_type: Option<u16>,
 }
 
 #[derive(Debug, Serialize)]
@@ -40,8 +43,10 @@ fn membership(profile: &Value) -> Option<Membership> {
             number(&row["user_vas"]) == Some(product) && number(&row["is_vip"]) == Some(1)
         })
     };
-    let (kind, row) = if let Some(row) = active(2) {
-        let kind = match number(&row["vas_type"]) {
+    let download = active(2);
+    let download_type = download.and_then(|row| number(&row["vas_type"]));
+    let (kind, row) = if let Some(row) = download {
+        let kind = match download_type {
             Some(5) => MembershipKind::Svip,
             Some(3) => MembershipKind::Platinum,
             _ => MembershipKind::Vip,
@@ -55,10 +60,30 @@ fn membership(profile: &Value) -> Option<Membership> {
     Some(Membership {
         kind,
         level: row.and_then(|r| number(&r["level"])).filter(|n| *n > 0),
+        #[cfg(target_os = "macos")]
+        native_vip_type: download_type,
     })
 }
 
 impl<T: CloudHttpTransport> XunleiClient<'_, T> {
+    #[cfg(target_os = "macos")]
+    pub(crate) fn native_membership_marker(
+        &self,
+        download: &super::XunleiDownload,
+    ) -> Option<(String, String)> {
+        // Only files with their own acceleration credential can use the Mac engine.
+        download.acceleration_token.as_ref()?;
+        let vip_type = self
+            .account_card_profile()
+            .ok()?
+            .membership?
+            .native_vip_type?;
+        Some((
+            crate::xunlei_native::VIP_TYPE_MARKER_HEADER.into(),
+            vip_type.to_string(),
+        ))
+    }
+
     pub fn account_card_profile(&self) -> Result<XunleiAccountProfile, QuarkError> {
         let profile = self.request("GET", format!("{AUTH}/v1/user/me"), None)?;
         let account_id = self.session().user_id;

@@ -488,6 +488,27 @@ impl CloudDownloadDispatch {
                     }
                 }
                 let message = super::commands::share_resolution_failure_message(&error);
+                #[cfg(target_os = "macos")]
+                if let QuarkError::XunleiNativeDownload(
+                    super::XunleiNativeDownloadFailure::UnsupportedCheckpoint,
+                ) = &error
+                {
+                    if let Some(gid) = original_gid
+                        .as_deref()
+                        .filter(|gid| crate::xunlei_native::is_native_gid(Some(gid)))
+                    {
+                        // Dispatch detached the old binding before refreshing the URL.
+                        // Keep the native checkpoint for a retry after Thunder is replaced.
+                        return store
+                            .bind_gid_and_fail_with_code(
+                                id,
+                                gid,
+                                message,
+                                Some(super::commands::cloud_failure_code(&error)),
+                            )
+                            .ok();
+                    }
+                }
                 // A replacement retains the expired GID as its local resume
                 // checkpoint, so it needs the guarded failure transition
                 // above. A first-time cloud submission has no checkpoint:
