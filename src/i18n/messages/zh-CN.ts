@@ -42,6 +42,7 @@ const messages = {
   'video.error.output': '无法保存视频，请检查下载目录、可用空间及同名文件。',
   'video.error.state': '此视频任务当前无法执行该操作。',
   'video.error.desktop': '请在 VersaDown 桌面应用中解析视频播放页。',
+  'download.error.transferredFileUnavailable': '文件已转存到你的网盘，但暂时无法获取下载地址。请稍后重试下载。',
   'cloud.xunlei.membership.vip': 'VIP{level}',
   'cloud.xunlei.membership.platinum': '白金 VIP{level}',
   'cloud.xunlei.membership.svip': 'SVIP{level}',

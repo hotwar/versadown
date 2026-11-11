@@ -965,8 +965,8 @@ mod tests {
             json!({"share_status":"OK","file_info":{"id":"f1","kind":"drive#file","web_content_link":""}}),
             cap(),
             pass(),
-            json!({"task_id":"task1"}),
-            json!({"phase":"PHASE_TYPE_COMPLETE","params":{"trace_file_ids":"[\"personal-id\"]"}}),
+            json!({"restore_status":"RESTORE_START","restore_task_id":"task1","file_id":"target-folder"}),
+            json!({"phase":"PHASE_TYPE_COMPLETE","params":{"trace_file_ids":"{\"f1\":[\"personal-id\"]}"}}),
             cap(),
             json!({
                 "id": "personal-id",
@@ -1006,6 +1006,34 @@ mod tests {
         assert_eq!(captcha["action"], "GET:/drive/v1/files/personal-id");
         assert!(requests[7].url.ends_with("/files/personal-id"));
         assert!(requests[8].url.ends_with("/files/personal-id"));
+    }
+    #[test]
+    fn xunlei_completed_restore_uses_only_the_selected_file_trace() {
+        let credentials = credentials();
+        let http = Http::new(vec![cap()]);
+        let adapter = XunleiShareAdapter {
+            credentials: &credentials,
+            http: &http,
+        };
+        let session = adapter.session().unwrap();
+        let mut receipt = json!({"restore_status":"RESTORE_COMPLETE", "file_id":"target-folder"});
+        for trace in [
+            json!({"other":"unrelated"}),
+            json!({"f1":["a", "b"]}),
+            json!(["f1"]),
+        ] {
+            receipt["params"]["trace_file_ids"] = trace;
+            assert!(matches!(
+                session.restored_file_id(&receipt, "f1"),
+                Err(QuarkError::ShareTransferDownloadUnavailable)
+            ));
+        }
+        receipt["params"]["trace_file_ids"] = json!({"f1":"personal-id"});
+        assert_eq!(
+            session.restored_file_id(&receipt, "f1").unwrap(),
+            "personal-id"
+        );
+        assert_eq!(http.requests.lock().unwrap().len(), 1);
     }
     #[test]
     fn xunlei_share_transfer_rechecks_login_after_successful_no_direct() {
@@ -1286,6 +1314,48 @@ impl XunleiShareSession<'_> {
             error => error,
         })
     }
+    fn restored_file_id(&self, receipt: &Value, source_id: &str) -> Result<String, QuarkError> {
+        let submitted_id = xunlei_restore_trace_id(receipt, source_id);
+        let complete = receipt["restore_status"].as_str() == Some("RESTORE_COMPLETE");
+        if complete {
+            if let Some(id) = &submitted_id {
+                return Ok(id.clone());
+            }
+        } else if receipt.get("restore_status").is_some()
+            && receipt["restore_status"].as_str() != Some("RESTORE_START")
+        {
+            return Err(QuarkError::Provider("迅雷分享转存失败".into()));
+        }
+
+        let task_id = ["restore_task_id", "task_id"]
+            .iter()
+            .find_map(|key| receipt[*key].as_str().filter(|id| !id.is_empty()))
+            .ok_or(if complete {
+                QuarkError::ShareTransferDownloadUnavailable
+            } else {
+                QuarkError::InvalidResponse
+            })?;
+        for _ in 0..20 {
+            let task = self.request(
+                "GET",
+                format!("{DRIVE}/drive/v1/tasks/{}", encoded(task_id)),
+                None,
+            )?;
+            match task["phase"].as_str() {
+                Some("PHASE_TYPE_COMPLETE") => {
+                    return xunlei_restore_trace_id(&task, source_id)
+                        .or(submitted_id)
+                        .ok_or(QuarkError::ShareTransferDownloadUnavailable);
+                }
+                Some("PHASE_TYPE_PENDING" | "PHASE_TYPE_RUNNING") => {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
+                _ => return Err(QuarkError::Provider("迅雷分享转存失败".into())),
+            }
+        }
+        Err(QuarkError::Provider("迅雷分享转存尚未完成".into()))
+    }
+
     fn pass(&self, id: &str, code: Option<&str>) -> Result<Value, QuarkError> {
         self.request(
             "GET",
@@ -1298,6 +1368,32 @@ impl XunleiShareSession<'_> {
         )
     }
 }
+// The restore receipt's top-level file_id may be the destination folder.
+// Only use a trace for the one selected file when recording a cleanup target.
+fn xunlei_restore_trace_id(response: &Value, source_id: &str) -> Option<String> {
+    let trace = ["trace_file_ids", "restore_file_ids"]
+        .iter()
+        .find_map(|key| response["params"].get(*key).or_else(|| response.get(*key)))?;
+    let parsed;
+    let trace = if let Some(encoded) = trace.as_str() {
+        parsed = serde_json::from_str::<Value>(encoded).ok()?;
+        &parsed
+    } else {
+        trace
+    };
+    let target = if trace.is_object() {
+        trace.get(source_id)?
+    } else {
+        trace
+    };
+    let id = match target {
+        Value::Array(ids) if ids.len() == 1 => ids[0].as_str()?,
+        Value::String(id) if trace.is_object() => id,
+        _ => return None,
+    };
+    (!id.trim().is_empty() && id != source_id && id != "0").then(|| id.to_owned())
+}
+
 fn share_already_gone(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
     ["http 404", "not_found", "not_exist", "not exist"]
@@ -1560,46 +1656,33 @@ impl ShareTransfer for XunleiShareAdapter<'_> {
             &session.pass(&entry.plan.canonical_share_id, entry.access_code())?,
             entry.access_code(),
         )?;
-        let value=session.request("POST",format!("{DRIVE}/drive/v1/share/restore"),Some(json!({"share_id":entry.plan.canonical_share_id,"pass_code_token":token,"file_ids":[entry.entry.entry_id],"parent_id":"","specify_parent_id":true,"ancestor_ids":[],"folder_type":"NORMAL"})))?;
-        let task = required(&value, "task_id")?;
-        for _ in 0..20 {
-            let value = session.request(
-                "GET",
-                format!("{DRIVE}/drive/v1/tasks/{}", encoded(&task)),
-                None,
-            )?;
-            match value["phase"].as_str() {
-                Some("PHASE_TYPE_COMPLETE") => {
-                    // Only the completed restore task's trace identifies created objects.
-                    // Never substitute the shared ID or discover objects by name.
-                    let trace: Value =
-                        serde_json::from_str(&required(&value["params"], "trace_file_ids")?)
-                            .map_err(|_| QuarkError::InvalidResponse)?;
-                    let id = if let Some(ids) = trace.as_array().filter(|v| v.len() == 1) {
-                        ids[0].as_str()
-                    } else {
-                        trace.get(&entry.entry.entry_id).and_then(Value::as_str)
-                    }
-                    .filter(|s| !s.is_empty() && *s != entry.entry.entry_id)
-                    .ok_or(QuarkError::InvalidResponse)?;
-                    if let Some(owner) = &owner {
-                        store.record_transfer_with_owner(
-                            &entry.plan.source_for(&entry.entry.entry_id),
-                            id,
-                            owner,
-                        )?;
-                    } else {
-                        store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), id)?;
-                    }
-                    return self.personal_download(id, entry.entry.name.clone());
-                }
-                Some("PHASE_TYPE_PENDING" | "PHASE_TYPE_RUNNING") => {
-                    std::thread::sleep(std::time::Duration::from_millis(250))
-                }
-                _ => return Err(QuarkError::Provider("迅雷分享转存失败".into())),
-            }
+        let receipt = session.request(
+            "POST",
+            format!("{DRIVE}/drive/v1/share/restore"),
+            Some(json!({
+                "share_id": entry.plan.canonical_share_id,
+                "pass_code_token": token,
+                "file_ids": [entry.entry.entry_id],
+                "parent_id": "",
+                "specify_parent_id": true,
+                "ancestor_ids": [],
+                "folder_type": "NORMAL"
+            })),
+        )?;
+        let id = session.restored_file_id(&receipt, &entry.entry.entry_id)?;
+        let source = entry.plan.source_for(&entry.entry.entry_id);
+        if let Some(owner) = owner {
+            store.record_transfer_with_owner(&source, &id, &owner)?;
+        } else {
+            store.record_transfer(&source, &id)?;
         }
-        Err(QuarkError::Provider("迅雷分享转存尚未完成".into()))
+        self.personal_download(&id, entry.entry.name.clone())
+            .map_err(|error| match error {
+                QuarkError::InvalidResponse | QuarkError::SourceFileMissing => {
+                    QuarkError::ShareTransferDownloadUnavailable
+                }
+                other => other,
+            })
     }
 }
 impl RecordedTransferResolver for XunleiShareAdapter<'_> {
@@ -1777,6 +1860,22 @@ const WEB_SIGNATURE_SALTS_19322: [&str; 11] = [
     "MO4U9wvvDmigDsj3nl",
     "jmN3FbGRU9AuQbk33mAdimq",
 ];
+// Official pan.xunlei.com 1.93.24, utils-initial.ddef3a9e719ae0793f69.js,
+// module 30 (code-res), pubguaFIj6W50w0U7t6gIfxVSqP4VppjTgR.
+const WEB_SIGNATURE_SALTS_19324: [&str; 12] = [
+    "ozbRAVToaQ8Wq5DH7Jn",
+    "D3iC1",
+    "YqFjx0uc",
+    "AVYZ2uMkJa3/OuVs85/M",
+    "s690MneC4LYfrcu+",
+    "Cth/UmT76igaOhRRmMHnLSvjSeTrvi2",
+    "1DrjvWQh+l4fdKqD0/DBYbqJAeZES",
+    "PY1Z9j2rzBOb4aTfdQf/",
+    "XTBzwAlzlzNMqAbcGy5qqd8WnCZk2IP2ZVX",
+    "2BnvqFgo9MODPk8pJK97",
+    "zWH1xTadmtNTwNq",
+    "WDZ5DOCCBaLSjhtSniGaaGerOs+xx56d",
+];
 /// Non-secret identity values captured from the official browser/QR flow.
 /// They are retained because Xunlei binds refresh and drive calls to that
 /// profile; callers must never fabricate a replacement profile.
@@ -1862,6 +1961,7 @@ impl XunleiClientProfile {
             self.client_id, self.client_version, WEB_PACKAGE, self.device_id, timestamp
         );
         let salts: &[&str] = match self.client_version.as_str() {
+            "1.93.24" => &WEB_SIGNATURE_SALTS_19324,
             "1.93.22" => &WEB_SIGNATURE_SALTS_19322,
             "1.93.6" => &WEB_SIGNATURE_SALTS_1936,
             _ => &WEB_SIGNATURE_SALTS,
@@ -1886,7 +1986,7 @@ impl XunleiClientProfile {
 
     fn supports_web_signature(&self) -> bool {
         self.is_modern_web()
-            && matches!(self.client_version.as_str(), WEB_VERSION_CODE | "1.93.6" | "1.93.22")
+            && matches!(self.client_version.as_str(), WEB_VERSION_CODE | "1.93.6" | "1.93.22" | "1.93.24")
             && !self.device_id.is_empty()
     }
     /// Headers accepted by the drive APIs.  The official browser does not

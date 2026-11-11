@@ -380,6 +380,35 @@ fn modern_web_19322_signature_matches_official_javascript_vectors() {
     }
 }
 
+#[test]
+fn modern_web_19324_signature_matches_official_javascript_vectors() {
+    let mut profile = modern_session().profile;
+    profile.client_version = "1.93.24".into();
+    for (device, timestamp, expected) in [
+        (
+            "synthetic-device",
+            "1793678400000",
+            "1.52e180e0ef7c34930059ac5114d7e7c1",
+        ),
+        (
+            "test-device-2",
+            "1793678400001",
+            "1.88ddb9d6b2327d2580a669ce6a64a922",
+        ),
+        (
+            "00000000000000000000000000000000",
+            "1700000000000",
+            "1.cf75b2644828932ff1403c87f370625f",
+        ),
+    ] {
+        profile.device_id = device.into();
+        assert_eq!(
+            profile.web_captcha_signature(timestamp).as_deref(),
+            Some(expected)
+        );
+    }
+}
+
 // Break caught: a supported profile must replace old captured metadata for a
 // new action, even when the browser token itself still has time remaining.
 #[test]

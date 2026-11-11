@@ -194,7 +194,24 @@ fn aliyun_forbidden_direct_url_transfers_once_and_reuses_the_personal_copy() {
                 },
                 CloudHttpResponse {
                     status: 200,
+                    body: serde_json::json!({"name":"sample (1).bin","domain_id":"bj29"})
+                        .to_string(),
+                    set_cookies: vec![],
+                },
+                CloudHttpResponse {
+                    status: 200,
+                    body: serde_json::json!({"url":""}).to_string(),
+                    set_cookies: vec![],
+                },
+                CloudHttpResponse {
+                    status: 200,
                     body: serde_json::json!({"url":"https://cdn.example/personal-file"})
+                        .to_string(),
+                    set_cookies: vec![],
+                },
+                CloudHttpResponse {
+                    status: 200,
+                    body: serde_json::json!({"name":"sample (1).bin","domain_id":"bj29"})
                         .to_string(),
                     set_cookies: vec![],
                 },
@@ -226,10 +243,25 @@ fn aliyun_forbidden_direct_url_transfers_once_and_reuses_the_personal_copy() {
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].created_file_id, "personal-file");
     let requests = http.requests.lock().unwrap();
-    assert_eq!(requests.len(), 3);
+    assert_eq!(requests.len(), 5);
     assert!(requests[0].url.ends_with("/v2/file/get_download_url"));
     assert!(requests[1].url.ends_with("/v2/file/copy"));
-    assert!(requests[2].url.ends_with("/v2/file/get_download_url"));
+    assert!(requests[2].url.ends_with("/v2/file/get"));
+    assert!(requests[3].url.ends_with("/v2/file/get_download_url"));
+    assert_eq!(
+        requests[4].url,
+        "https://bj29.api.aliyunpds.com/v2/file/get_download_url"
+    );
+    assert_eq!(requests[3].body, requests[4].body);
+    let signed: serde_json::Value =
+        serde_json::from_str(requests[4].body.as_ref().unwrap()).unwrap();
+    assert_eq!(signed["drive_id"], "drive-7");
+    assert_eq!(signed["file_id"], "personal-file");
+    assert_eq!(signed["file_name"], "sample (1).bin");
+    assert!(requests[2..].iter().all(|request| {
+        request.headers.get("Authorization").map(String::as_str) == Some("Bearer personal")
+            && !request.headers.contains_key("x-share-token")
+    }));
     assert_eq!(
         requests[1].headers.get("Authorization").map(String::as_str),
         Some("Bearer personal")
@@ -251,7 +283,7 @@ fn aliyun_forbidden_direct_url_transfers_once_and_reuses_the_personal_copy() {
 
     assert_eq!(refreshed.url, "https://cdn.example/personal-file-refreshed");
     let requests = http.requests.lock().unwrap();
-    assert_eq!(requests.len(), 4);
+    assert_eq!(requests.len(), 7);
     assert_eq!(
         requests
             .iter()
@@ -324,7 +356,8 @@ fn aliyun_transfer_waits_until_the_personal_copy_has_a_download_url() {
                 },
                 CloudHttpResponse {
                     status: 200,
-                    body: serde_json::json!({}).to_string(),
+                    body: serde_json::json!({"name":"sample (1).bin","domain_id":"bj29"})
+                        .to_string(),
                     set_cookies: vec![],
                 },
                 CloudHttpResponse {
@@ -367,7 +400,7 @@ fn aliyun_transfer_waits_until_the_personal_copy_has_a_download_url() {
             .iter()
             .filter(|request| request.url.ends_with("/v2/file/get_download_url"))
             .count(),
-        4
+        2
     );
 }
 

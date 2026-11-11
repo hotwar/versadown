@@ -28,6 +28,11 @@ describe('download status notifications', () => {
     });
   });
 
+  it('explains when a saved share copy has no download link', () => {
+    expect(notificationForTask(task({ status: 'failed', error: 'download.error.transferredFileUnavailable' }))?.body)
+      .toContain('已转存到你的网盘');
+  });
+
   it('does not create notifications for private or non-terminal tasks', () => {
     expect(notificationForTask(task({ is_private: true }))).toBeNull();
     expect(notificationForTask(task({ source: 'cloud-directory-item://quark/child-1' }))).toBeNull();

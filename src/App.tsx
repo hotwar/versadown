@@ -20,7 +20,7 @@ import { StartupNotice } from './components/StartupNotice';
 import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, submitVideoFormats, defaultSettings, deleteTasks, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, syncMainWindowIcon, takeExternalLinks, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { createTaskUpdateMerger, subscribeToDownloadEvents, type TaskSnapshotScope } from './lib/downloadEvents';
-import { isPrivateTask, normalizeQueueTask, normalizeQueueTasks } from './lib/queueTask';
+import { downloadErrorMessage, isPrivateTask, normalizeQueueTask, normalizeQueueTasks } from './lib/queueTask';
 import { sendDownloadNotification, shouldNotifyTask } from './lib/downloadNotifications';
 import { AiSettingsInput, AppSettings, AppUpdate, DownloadEngineState, DuplicateDownload, ParseResult, PrivacyTaskVisibility, QueueTask, QueueTaskInput, TaskActionResult, TaskCommand } from './lib/types';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
@@ -1214,7 +1214,7 @@ export function App() {
           if (activeGeneration.current === requestGeneration) {
             const first = result.failures[0];
             const prefix = result.failures.length > 1 ? t('download.filesFailedPrefix', { count: result.failures.length }) : '';
-            setNotice({ kind: 'error', message: `${prefix}${first.message}` });
+            setNotice({ kind: 'error', message: `${prefix}${downloadErrorMessage(first.message)}` });
           }
         } else {
           setActiveConfirmation((current) => current?.taskId === planSource && activeGeneration.current === requestGeneration ? null : current);
@@ -1624,7 +1624,7 @@ export function App() {
           if (task) acceptCreated(task, !outcome.duplicate);
           if (outcome.duplicate) enqueueDuplicate(outcome.duplicate);
         }
-        if (result.failures.length) return { id: item.id, resourceIds: result.failures.map(f => f.selectedId), message: result.failures[0].message };
+        if (result.failures.length) return { id: item.id, resourceIds: result.failures.map(f => f.selectedId), message: downloadErrorMessage(result.failures[0].message) };
         return;
       }
       const task = await confirmDownload(

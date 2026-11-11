@@ -66,7 +66,8 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
         | QuarkError::DownloadEngineUnavailable
         | QuarkError::DownloadSubmissionFailed
         | QuarkError::XunleiNativeDownload(_)
-        | QuarkError::BaiduTransferPending => error.to_string(),
+        | QuarkError::BaiduTransferPending
+        | QuarkError::ShareTransferDownloadUnavailable => error.to_string(),
         QuarkError::Transport(message)
             if matches!(
                 message.as_str(),
@@ -108,6 +109,7 @@ pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
         QuarkError::DownloadSubmissionFailed => "download_submission_failed",
         QuarkError::XunleiNativeDownload(failure) => failure.code(),
         QuarkError::BaiduTransferPending => "baidu_transfer_pending",
+        QuarkError::ShareTransferDownloadUnavailable => "share_transfer_download_unavailable",
         QuarkError::InvalidResponse => "invalid_response",
         QuarkError::Storage => "credential_storage_error",
         QuarkError::Transport(_) => "network_error",
