@@ -1,4 +1,8 @@
 const messages = {
+  'buildInfo.label': '开发构建信息',
+  'buildInfo.commit': '基于提交 {commit} 编译',
+  'buildInfo.modified': '* 编译时包含未提交修改',
+  'buildInfo.unavailable': '提交未知',
   'download.xunlei.completedFallback': '已完成 · 普通下载',
   'download.xunlei.unsupportedFallback': '本机迅雷版本不受支持，已改用普通下载。支持的版本为 {versions}。',
   'download.xunlei.unsupportedCheckpoint': '本机迅雷版本无法恢复此断点。请安装受支持的迅雷客户端后继续下载。支持的版本为 {versions}。',

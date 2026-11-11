@@ -1,4 +1,8 @@
 const messages = {
+  'buildInfo.label': 'Development build',
+  'buildInfo.commit': 'Built from commit {commit}',
+  'buildInfo.modified': '* Compiled with uncommitted changes',
+  'buildInfo.unavailable': 'Commit unavailable',
   'download.xunlei.completedFallback': 'Completed · Standard download',
   'download.xunlei.unsupportedFallback': 'This version of Thunder is unsupported. Using standard download. Supported versions include {versions}.',
   'download.xunlei.unsupportedCheckpoint': 'Install a compatible Thunder client to resume this download. Supported builds include {versions}.',

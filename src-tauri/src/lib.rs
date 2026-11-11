@@ -4,6 +4,7 @@ use tauri::{Emitter, Manager};
 mod ai;
 pub mod aria2;
 mod bandwidth;
+mod build_info;
 pub mod cloud;
 mod cloud_directory_events;
 mod commands;
@@ -575,6 +576,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            build_info::get_build_info,
             startup::startup_health,
             external_links::take_external_links,
             launcher_drag::drag_launcher_window,

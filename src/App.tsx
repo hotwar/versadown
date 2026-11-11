@@ -14,6 +14,7 @@ import { CloudWorkspace, type CloudWorkspacePage } from './components/CloudWorks
 import { CloudNavigation } from './components/CloudNavigation';
 import { SettingsPanel } from './components/SettingsPanel';
 import { AboutPanel } from './components/AboutPanel';
+import { BuildIdentityFooter } from './components/BuildIdentityFooter';
 import { EngineStatusToast } from './components/EngineStatusBanner';
 import { StartupNotice } from './components/StartupNotice';
 import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, deleteTasks, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, syncMainWindowIcon, takeExternalLinks, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
@@ -1624,7 +1625,7 @@ export function App() {
   }
 
   return (
-    <main className="app-shell" style={{ WebkitUserSelect: 'none', userSelect: 'none' }}>
+    <main className={`app-shell${import.meta.env.DEV ? ' development-build' : ''}`} style={{ WebkitUserSelect: 'none', userSelect: 'none' }}>
       <header className="app-header" data-native-window-drag={nativeWindowDrag || undefined}>
         <div className="app-header-drag-space" data-tauri-drag-region={nativeWindowDrag ? undefined : true} aria-hidden="true" />
         <div className="brand" data-tauri-drag-region={nativeWindowDrag ? undefined : 'deep'}>
@@ -1771,6 +1772,7 @@ export function App() {
         {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} onNotice={setNotice} configurePrivacyDownload={savePrivacyConfiguration} /></section>}
         {view === 'about' && <section className="view-panel" aria-label={t('about.title')}><AboutPanel icon={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} update={appUpdate} onOpenUpdate={(update) => { void openExternalUrl(update.downloadUrl).catch(() => undefined); }} /></section>}
       </div>
+      {import.meta.env.DEV && <BuildIdentityFooter />}
       {confirmation && <ParseConfirmDialog result={confirmation} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onConfirm={confirm} onSelectionChange={(selectedIds) => setConfirmation((current) => current ? {
         ...current,
         resources: current.resources.map((resource) => ({ ...resource, selected: selectedIds.includes(resource.id) }))

@@ -86,6 +86,8 @@ button,input,textarea{font:inherit}button{color:inherit}
 .window-controls svg{width:16px;height:16px}
 .window-controls button:hover{background:var(--surface-hover)}.window-controls .window-close:hover{background:#e9545d;color:#fff}
 .workspace{display:grid;width:100%;height:calc(100vh - 64px);grid-template-columns:190px minmax(0,1fr);overflow:hidden;transition:grid-template-columns .16s ease}
+.development-build>.workspace{height:calc(100vh - 84px)}
+.build-identity{display:flex;height:20px;align-items:center;justify-content:flex-end;padding:0 12px;background:var(--canvas);color:var(--muted);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;line-height:1;user-select:text;-webkit-user-select:text}
 .workspace>nav{display:flex;min-width:0;min-height:0;flex-direction:column;gap:6px;padding:8px 10px 12px;border-right:1px solid var(--border);background:var(--sidebar)}
 .workspace.sidebar-collapsed{grid-template-columns:0 minmax(0,1fr)}.workspace.sidebar-collapsed>nav{visibility:hidden;overflow:hidden;padding:0;border-right:0;pointer-events:none}
 .workspace>nav button{position:relative;display:grid;min-height:44px;grid-template-columns:28px 1fr auto;align-items:center;gap:6px;padding:0 10px;border:0;border-radius:10px;background:transparent;color:var(--text);cursor:pointer;font-size:15px;text-align:left}
