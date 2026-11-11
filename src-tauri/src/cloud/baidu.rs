@@ -401,9 +401,7 @@ mod tests {
             .iter()
             .find(|f| f.kind == "file" && f.size.unwrap_or(0) > 0)
             .unwrap();
-        let download = client
-            .locatedownload(&parse_file_reference(&file.id).unwrap())
-            .unwrap();
+        let download = client.download(&file.id).unwrap();
         let http = reqwest::blocking::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -899,7 +897,7 @@ mod tests {
             panic!("share plan required")
         };
         let dir = tempfile::tempdir().unwrap();
-        let store = CloudSharePlanStore::new(
+        let store = CloudSharePlanStore::new_for_test(
             crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
         );
         store.upsert(&plan).unwrap();
@@ -937,7 +935,7 @@ mod tests {
             panic!("share plan required")
         };
         let dir = tempfile::tempdir().unwrap();
-        let store = CloudSharePlanStore::new(
+        let store = CloudSharePlanStore::new_for_test(
             crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
         );
         store.upsert(&plan).unwrap();
@@ -1058,7 +1056,7 @@ mod tests {
             .any(|(name, value)| name == "dir" && value == "/BiliDownloader"));
     }
     #[test]
-    fn baidu_share_transfer_records_exact_id_and_downloads_personal_file() {
+    fn baidu_share_transfer_waits_for_the_exact_created_id_before_downloading() {
         let credentials = credentials();
         let http = Http::new(vec![
             listing(),
@@ -1066,7 +1064,8 @@ mod tests {
             json!({"errno":0,"result":{"bdstoken":"write-token"}}),
             json!({"errno":0,"extra":{"list":[{"from_fs_id":11,"to_fs_id":99,"from":"/movie.mp4","to":"/movie (1).mp4"}]}}),
             json!({"errno":0,"uk":7}),
-            json!({"errno":0,"list":[{"fs_id":99,"path":"/movie (1).mp4","isdir":0}]}),
+            json!({"errno":0,"list":[{"fs_id":100,"path":"/movie (1).mp4","isdir":0}]}),
+            json!({"errno":0,"list":[{"fs_id":99,"path":"/movie (2).mp4","isdir":0}]}),
             json!({"urls":[{"url":"https://d.pcs.baidu.com/file?sign=personal","encrypt":0}]}),
         ]);
         let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
@@ -1074,7 +1073,7 @@ mod tests {
             panic!()
         };
         let dir = tempfile::tempdir().unwrap();
-        let store = CloudSharePlanStore::new(
+        let store = CloudSharePlanStore::new_for_test(
             crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
         );
         store.upsert(&plan).unwrap();
@@ -1091,15 +1090,100 @@ mod tests {
             requests[3].headers["Referer"],
             "https://pan.baidu.com/s/1share123"
         );
-        assert!(requests[6].url.contains("method=locatedownload"));
-        assert!(requests[6].url.contains("path=%2Fmovie+%281%29.mp4"));
+        assert!(requests[7].url.contains("method=locatedownload"));
+        assert!(requests[7].url.contains("path=%2Fmovie+%282%29.mp4"));
     }
+    #[test]
+    fn baidu_unlisted_transfer_is_retryable_and_never_locates_a_different_file() {
+        let mut replies = vec![json!({"errno":0,"uk":7})];
+        replies.extend((0..5).map(|_| {
+            json!({"errno":0,"list":[{"fs_id":100,"path":"/movie.mp4","isdir":0}]})
+        }));
+        let http = Http::new(replies);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http)
+            .with_poll_sleep(|_| {});
+
+        assert!(matches!(
+            client.download_transferred_file("99", QuarkError::ShareTransferDownloadUnavailable),
+            Err(QuarkError::ShareTransferDownloadUnavailable)
+        ));
+
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 6);
+        assert!(requests[1..].iter().all(|r| r.url.contains("/api/list?")));
+    }
+
+    #[test]
+    fn baidu_saved_copy_with_no_pcs_url_reports_the_download_stage() {
+        let http = Http::new(vec![
+            json!({"errno":0,"uk":7}),
+            json!({"errno":0,"list":[{"fs_id":99,"path":"/created.mp4","isdir":0}]}),
+            json!({"urls":[]}),
+        ]);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
+        assert!(matches!(
+            client.download_transferred_file("99", QuarkError::ShareTransferDownloadUnavailable),
+            Err(QuarkError::ShareTransferDownloadUnavailable)
+        ));
+        assert!(http.requests.lock().unwrap()[2].url.contains("method=locatedownload"));
+    }
+
+    #[test]
+    fn baidu_replaces_an_unlisted_recorded_copy_once_and_preserves_the_new_receipt() {
+        let owner = json!({"errno":0,"uk":7});
+        let unrelated = json!({"errno":0,"list":[{"fs_id":100,"path":"/movie.mp4","isdir":0}]});
+        let mut replies = vec![listing(), owner.clone(), owner.clone()];
+        replies.extend(vec![unrelated.clone(); 5]); // Old journal ID is absent from root.
+        replies.extend([
+            owner.clone(),
+            json!({"errno":0,"result":{"bdstoken":"write-token"}}),
+            json!({"errno":0,"extra":{"list":[{"from_fs_id":11,"to_fs_id":99}]}}),
+            owner.clone(),
+        ]);
+        replies.extend(vec![unrelated; 5]); // New receipt isn't visible yet either.
+        replies.extend([
+            owner.clone(),
+            owner,
+            json!({"errno":0,"list":[{"fs_id":99,"path":"/movie (1).mp4","isdir":0}]}),
+            json!({"urls":[{"url":"https://d.pcs.baidu.com/file?sign=personal","encrypt":0}]}),
+        ]);
+
+        let credentials = credentials();
+        let http = Http::new(replies);
+        let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
+        let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
+            panic!()
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let store = CloudSharePlanStore::new_for_test(
+            crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
+        );
+        store.upsert(&plan).unwrap();
+        let source = plan.source_for("11");
+        let owner_id = stable_owner_fingerprint(CloudProvider::Baidu, "7").unwrap();
+        store.record_transfer_with_owner(&source, "77", &owner_id).unwrap();
+
+        assert!(matches!(
+            resolve_current_share_download(&store, adapter.as_ref(), &source),
+            Err(QuarkError::ShareTransferDownloadUnavailable)
+        ));
+        let transfers = store.resolve_entry(&source).unwrap().plan.transfers;
+        assert_eq!(transfers.len(), 1);
+        assert_eq!(transfers[0].created_file_id, "99");
+        assert_eq!(transfers[0].cleanup_state, CloudShareCleanupState::Pending);
+
+        resolve_current_share_download(&store, adapter.as_ref(), &source).unwrap();
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.iter().filter(|r| r.url.contains("/share/transfer?")).count(), 1);
+        assert!(requests.last().unwrap().url.contains("path=%2Fmovie+%281%29.mp4"));
+        assert!(!requests.iter().any(|r| r.url.contains("opera=delete")));
+    }
+
     #[test]
     fn baidu_recorded_transfer_refreshes_personal_file_without_share_transfer() {
         let credentials = credentials();
         let http = Http::new(vec![
             listing(),
-            json!({"errno":0,"list":[{"fs_id":99,"path":"/movie (1).mp4","isdir":0}]}),
             json!({"errno":0,"uk":7}),
             json!({"errno":0,"list":[{"fs_id":99,"path":"/movie (1).mp4","isdir":0}]}),
             json!({"urls":[{"url":"https://d.pcs.baidu.com/file?sign=personal","encrypt":0}]}),
@@ -1121,9 +1205,9 @@ mod tests {
         };
         assert_eq!(download.url, "https://d.pcs.baidu.com/file?sign=personal");
         let requests = http.requests.lock().unwrap();
-        assert_eq!(requests.len(), 5);
-        assert!(requests[1].url.contains("/api/list"));
-        assert!(requests[4].url.contains("method=locatedownload"));
+        assert_eq!(requests.len(), 4);
+        assert!(requests[2].url.contains("/api/list"));
+        assert!(requests[3].url.contains("method=locatedownload"));
         assert!(!requests
             .iter()
             .any(|request| request.url.contains("/share/transfer")));
@@ -1177,7 +1261,7 @@ mod tests {
             panic!()
         };
         let dir = tempfile::tempdir().unwrap();
-        let store = CloudSharePlanStore::new(
+        let store = CloudSharePlanStore::new_for_test(
             crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
         );
         store.upsert(&plan).unwrap();
@@ -1212,7 +1296,7 @@ mod tests {
                 panic!()
             };
             let dir = tempfile::tempdir().unwrap();
-            let store = CloudSharePlanStore::new(
+            let store = CloudSharePlanStore::new_for_test(
                 crate::cloud::SystemCredentialStore::new(dir.path().into()).unwrap(),
             );
             store.upsert(&plan).unwrap();
@@ -2128,15 +2212,6 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         self.web_file_manager("delete", &token, json!(paths))
     }
 
-    fn transferred_file_reference(&self, fsid: &str) -> Result<String, QuarkError> {
-        for file in self.directory("/")?.items {
-            if file.kind == "file" && parse_file_reference(&file.id)?.fsid == fsid {
-                return Ok(file.id);
-            }
-        }
-        Err(QuarkError::SourceFileMissing)
-    }
-
     fn file_manager_operation(
         &self,
         operation: &str,
@@ -2269,25 +2344,6 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
 
     pub fn download(&self, id: &str) -> Result<BaiduDownload, QuarkError> {
         let file = parse_file_reference(id)?;
-        // This driver stores BDUSS cookies, not OAuth access tokens. The
-        // OAuth filemetas dlink flow returns 9019 for otherwise valid web
-        // sessions. Use the authenticated PCS protocol (BaiduPCS-Go).
-        self.locatedownload(&file)
-    }
-
-    fn locatedownload(&self, file: &BaiduFileReference) -> Result<BaiduDownload, QuarkError> {
-        let bduss = self
-            .session
-            .cookie
-            .split(';')
-            .map(str::trim)
-            .filter_map(|pair| pair.split_once('='))
-            .find_map(|(name, value)| (name == "BDUSS" && !value.is_empty()).then_some(value))
-            .ok_or(QuarkError::AuthorizationExpired)?;
-        let uid = self
-            .stable_account_id()?
-            .and_then(|value| value.parse::<u64>().ok())
-            .ok_or(QuarkError::InvalidResponse)?;
         // PCS resolves by path, while queued downloads are bound to fs_id.
         // Re-read the original parent before handing it a persisted path:
         // never download a different file that has since reused that name.
@@ -2306,17 +2362,72 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
                 path: parent_path.into(),
             })?
         };
-        let current = self
-            .directory(&parent)?
-            .items
-            .into_iter()
-            .filter(|item| item.kind == "file")
-            .map(|item| parse_file_reference(&item.id))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .find(|current| current.fsid == file.fsid)
-            .ok_or_else(|| QuarkError::SourceFileMissing)?;
-        let file = &current;
+        self.locatedownload(|| {
+            self.file_path_in_directory(&parent, &file.fsid)?
+                .ok_or(QuarkError::SourceFileMissing)
+        })
+    }
+
+    fn file_path_in_directory(
+        &self,
+        parent: &str,
+        fsid: &str,
+    ) -> Result<Option<String>, QuarkError> {
+        for file in self.directory(parent)?.items {
+            if file.kind == CloudFileKind::File {
+                let current = parse_file_reference(&file.id)?;
+                if current.fsid == fsid {
+                    return Ok(Some(current.path));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn download_transferred_file(
+        &self,
+        fsid: &str,
+        unlisted: QuarkError,
+    ) -> Result<BaiduDownload, QuarkError> {
+        self.locatedownload(|| {
+            // The transfer receipt can precede visibility in the root listing.
+            // Retry only successful listings that omit this exact ID.
+            for attempt in 0..=4 {
+                if attempt > 0 {
+                    (self.poll_sleep)(transfer_poll_delay(attempt - 1));
+                }
+                if let Some(path) = self.file_path_in_directory("/", fsid)? {
+                    return Ok(path);
+                }
+            }
+            Err(unlisted)
+        })
+        .map_err(|error| match error {
+            QuarkError::InvalidResponse => QuarkError::ShareTransferDownloadUnavailable,
+            other => other,
+        })
+    }
+
+    // Cookie-based sessions use authenticated PCS (BaiduPCS-Go); OAuth
+    // filemetas dlinks can return 9019 for an otherwise valid BDUSS. Resolve
+    // the current path from the private fs_id immediately before signing.
+    fn locatedownload(
+        &self,
+        resolve_path: impl FnOnce() -> Result<String, QuarkError>,
+    ) -> Result<BaiduDownload, QuarkError> {
+        let bduss = self
+            .session
+            .cookie
+            .split(';')
+            .map(str::trim)
+            .filter_map(|pair| pair.split_once('='))
+            .find_map(|(name, value)| (name == "BDUSS" && !value.is_empty()).then_some(value))
+            .ok_or(QuarkError::AuthorizationExpired)?;
+        let uid = self
+            .stable_account_id()?
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or(QuarkError::InvalidResponse)?;
+        let path = resolve_path()?;
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|_| QuarkError::InvalidResponse)?
@@ -2333,7 +2444,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             ("esl", "1"),
             ("app_id", "250528"),
             ("method", "locatedownload"),
-            ("path", file.path.as_str()),
+            ("path", path.as_str()),
             ("ver", "4.0"),
             ("clienttype", "17"),
             ("channel", "0"),
@@ -2368,8 +2479,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             .or_else(|| candidates.first())
             .cloned()
             .ok_or(QuarkError::InvalidResponse)?;
-        let name = file
-            .path
+        let name = path
             .rsplit('/')
             .next()
             .filter(|name| !name.is_empty())
@@ -3470,11 +3580,8 @@ impl ShareTransfer for BaiduShareAdapter<'_> {
         } else {
             store.record_transfer(&entry.plan.source_for(&entry.entry.entry_id), &id)?;
         }
-        let reference = encode_reference(BaiduFileReference {
-            fsid: id,
-            path: required(file, "to")?,
-        })?;
-        let download = client.download(&reference)?;
+        let download =
+            client.download_transferred_file(&id, QuarkError::ShareTransferDownloadUnavailable)?;
         Ok(super::commands::ResolvedCloudDownload {
             url: download.url,
             name: entry.entry.name.clone(),
@@ -3499,16 +3606,17 @@ impl RecordedTransferResolver for BaiduShareAdapter<'_> {
         // Transfers are created in root. Resolve the journalled fs_id from
         // that directory, never by the share's original name (ondup=newcopy
         // may have renamed it), and never perform another transfer here.
-        let reference = client.transferred_file_reference(created_file_id)?;
-        let download = client.download(&reference)?;
-        Ok(ShareOperationResult {
-            result: Ok(RecordedTransferDownload::Available(
-                super::commands::ResolvedCloudDownload {
+        let result = client
+            .download_transferred_file(created_file_id, QuarkError::SourceFileMissing)
+            .map(|download| {
+                RecordedTransferDownload::Available(super::commands::ResolvedCloudDownload {
                     url: download.url,
                     name: entry.entry.name.clone(),
                     headers: download.headers.into_iter().collect(),
-                },
-            )),
+                })
+            });
+        Ok(ShareOperationResult {
+            result,
             updated_context: None,
         })
     }

@@ -430,14 +430,18 @@ fn refresh_reusable_transfer(
     let refreshed = adapter
         .recorded_capability()
         .ok_or(QuarkError::ProviderUnsupported)?
-        .refresh_recorded_transfer(entry, &record.created_file_id)?;
-    if let Some(context) = refreshed.updated_context {
-        store.update_provider_context(source, &context)?;
-        entry.plan.provider_context = context;
-    }
-    match refreshed.result {
+        .refresh_recorded_transfer(entry, &record.created_file_id)
+        .and_then(|refreshed| {
+            if let Some(context) = refreshed.updated_context {
+                store.update_provider_context(source, &context)?;
+                entry.plan.provider_context = context;
+            }
+            refreshed.result
+        });
+    match refreshed {
         Ok(RecordedTransferDownload::Available(mut download)) => {
-            validate_direct_url(&download.url)?;
+            validate_direct_url(&download.url)
+                .map_err(|_| QuarkError::ShareTransferDownloadUnavailable)?;
             download.name = entry.entry.name.clone();
             Ok(Some(download))
         }
@@ -448,6 +452,7 @@ fn refresh_reusable_transfer(
             store.forget_unavailable_reusable_transfer(source, &record.created_file_id, &owner)?;
             Ok(None)
         }
+        Err(QuarkError::InvalidResponse) => Err(QuarkError::ShareTransferDownloadUnavailable),
         Err(error) => Err(error),
     }
 }

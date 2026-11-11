@@ -783,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn aliyun_personal_download_url_recycle_bin_file_is_not_retried() {
+    fn aliyun_distinguishes_missing_recorded_files_from_new_copies() {
         struct RecycleBinHttp(std::sync::atomic::AtomicUsize);
         impl CloudHttpTransport for RecycleBinHttp {
             fn send(&self, _: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
@@ -815,6 +815,10 @@ mod tests {
             Err(QuarkError::SourceFileMissing)
         ));
         assert_eq!(http.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(matches!(
+            adapter.personal_download_after_copy(&session, "file", "file.bin"),
+            Err(QuarkError::ShareTransferDownloadUnavailable)
+        ));
     }
 
     #[test]
@@ -1446,15 +1450,23 @@ impl<'a, S: CredentialStore + ?Sized, T: CloudHttpTransport + ?Sized> AliyunClie
     /// Always asks the service for a fresh short-lived download URL.
     pub fn download(&self, id: &str) -> Result<(String, String), QuarkError> {
         let (session, _, _) = self.refreshed_validated_session()?;
+        self.download_with_session(&session, id)
+    }
+
+    fn download_with_session(
+        &self,
+        session: &AliyunSession,
+        id: &str,
+    ) -> Result<(String, String), QuarkError> {
         let metadata = self.api(
-            &session,
+            session,
             "/v2/file/get",
             json!({"drive_id":session.drive_id,"file_id":id}),
         )?;
         let name = required(&metadata, "name")?;
         let body =
             json!({"drive_id":session.drive_id,"file_id":id,"file_name":name,"expire_sec":900});
-        let value = self.api(&session, "/v2/file/get_download_url", body.clone())?;
+        let value = self.api(session, "/v2/file/get_download_url", body.clone())?;
         if let Some(url) = direct_download_url(&value) {
             return Ok((url, name));
         }
@@ -1466,7 +1478,7 @@ impl<'a, S: CredentialStore + ?Sized, T: CloudHttpTransport + ?Sized> AliyunClie
         let fallback = self.send(
             "POST",
             format!("{resource_api}/v2/file/get_download_url"),
-            Self::bearer_headers(&session),
+            Self::bearer_headers(session),
             Some(body),
         )?;
         direct_download_url(&fallback)
@@ -1476,11 +1488,10 @@ impl<'a, S: CredentialStore + ?Sized, T: CloudHttpTransport + ?Sized> AliyunClie
 }
 
 fn direct_download_url(value: &Value) -> Option<String> {
-    value
-        .get("url")
-        .or_else(|| value.get("download_url"))
-        .and_then(Value::as_str)
-        .filter(|url| url.starts_with("https://"))
+    ["url", "download_url"]
+        .iter()
+        .filter_map(|key| value[*key].as_str())
+        .find(|url| url.starts_with("https://"))
         .map(str::to_owned)
 }
 
@@ -1798,58 +1809,16 @@ impl AliyunShareAdapter<'_> {
         }
         Ok(session)
     }
-    fn personal_raw(
-        &self,
-        session: &AliyunSession,
-        path: &str,
-        body: Value,
-    ) -> Result<CloudHttpResponse, QuarkError> {
-        self.http.send(CloudHttpRequest {
-            method: "POST",
-            url: format!("{API}{path}"),
-            headers: BTreeMap::from([
-                (
-                    "Authorization".into(),
-                    format!("Bearer {}", session.access_token),
-                ),
-                ("Referer".into(), WEB_REFERER.into()),
-                ("User-Agent".into(), "Mozilla/5.0".into()),
-            ]),
-            body: Some(body.to_string()),
-        })
-    }
-    fn personal_request(
-        &self,
-        session: &AliyunSession,
-        path: &str,
-        body: Value,
-    ) -> Result<Value, QuarkError> {
-        let response = self.personal_raw(session, path, body)?;
-        if aliyun_source_file_missing(&response) {
-            return Err(QuarkError::SourceFileMissing);
-        }
-        let value = response_json(&response)?;
-        match value.get("code").and_then(Value::as_str).unwrap_or("") {
-            "" => Ok(value),
-            "AccessTokenInvalid"
-            | "AccessTokenExpired"
-            | "InvalidParameter.AccessToken"
-            | "InvalidToken" => Err(QuarkError::AuthorizationExpired),
-            _ => Err(QuarkError::Provider("阿里云盘个人文件请求失败".into())),
-        }
-    }
     fn personal_download(
         &self,
         session: &AliyunSession,
         file_id: &str,
         name: &str,
     ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
-        let body = json!({"drive_id":session.drive_id,"file_id":file_id,"expire_sec":900});
+        let client = AliyunClient::new(self.credentials, self.http);
         for attempt in 0..=ALIYUN_TRANSIENT_RETRY_DELAYS_MS.len() {
             let result = (|| {
-                let value =
-                    self.personal_request(session, "/v2/file/get_download_url", body.clone())?;
-                let url = required(&value, "url").or_else(|_| required(&value, "download_url"))?;
+                let (url, _) = client.download_with_session(session, file_id)?;
                 super::share::validate_direct_url(&url)?;
                 Ok(super::commands::ResolvedCloudDownload {
                     url,
@@ -1891,10 +1860,11 @@ impl AliyunShareAdapter<'_> {
                 {
                     aliyun_transient_retry_pause(attempt);
                 }
+                Err(QuarkError::SourceFileMissing | QuarkError::InvalidResponse) => break,
                 result => return result,
             }
         }
-        Err(QuarkError::InvalidResponse)
+        Err(QuarkError::ShareTransferDownloadUnavailable)
     }
     fn raw(
         &self,

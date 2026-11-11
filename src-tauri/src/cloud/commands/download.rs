@@ -1030,6 +1030,10 @@ pub(crate) fn directory_download_failure_fields(
             "网盘中的源文件已不存在，请刷新网盘列表后重新创建下载",
         ),
         QuarkError::DownloadCheckpointInvalid => ("download_checkpoint_invalid", "本地下载文件或续传断点已缺失或失效，无法继续下载；请重新创建下载任务从头下载（不会自动覆盖已有文件）"),
+        QuarkError::ShareTransferDownloadUnavailable => (
+            "share_transfer_download_unavailable",
+            "download.error.transferredFileUnavailable",
+        ),
         QuarkError::BaiduTransferPending => (
             "baidu_transfer_pending",
             "百度转存仍在进行或结果未知，请稍后在网盘中查看，确认后再重试",

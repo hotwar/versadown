@@ -366,7 +366,14 @@ fn read_share_protection_key(_create: bool) -> Result<[u8; 32], QuarkError> {
 /// credential store. This replaces the platform-specific adapter while leaving the transactional plan
 /// repository intact on Windows, Linux and macOS.
 pub(crate) fn protect(input: &[u8], encrypt: bool) -> Result<Vec<u8>, QuarkError> {
-    let mut key = share_protection_key(encrypt)?;
+    protect_with_key(input, encrypt, share_protection_key(encrypt)?)
+}
+
+pub(super) fn protect_with_key(
+    input: &[u8],
+    encrypt: bool,
+    mut key: [u8; 32],
+) -> Result<Vec<u8>, QuarkError> {
     let cipher = XChaCha20Poly1305::new_from_slice(&key).map_err(|_| QuarkError::Storage)?;
     key.zeroize();
     if encrypt {

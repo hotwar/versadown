@@ -42,6 +42,7 @@ const messages = {
   'video.error.output': 'Could not save the video. Check the destination, free space, and any existing file.',
   'video.error.state': 'This action is unavailable for the current video task.',
   'video.error.desktop': 'Open the playback page in the VersaDown desktop app to inspect it.',
+  'download.error.transferredFileUnavailable': 'The file was saved to your cloud drive, but its download link is unavailable. Retry the download later.',
   'cloud.xunlei.membership.vip': 'VIP{level}',
   'cloud.xunlei.membership.platinum': 'Platinum VIP{level}',
   'cloud.xunlei.membership.svip': 'SVIP{level}',

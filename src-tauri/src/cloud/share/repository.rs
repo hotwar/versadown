@@ -6,11 +6,25 @@ use std::path::{Path, PathBuf};
 /// Connections are short-lived; the service serializes its mutation closure.
 pub struct SqliteSharePlanRepository {
     root: PathBuf,
+    #[cfg(test)]
+    test_key: Option<[u8; 32]>,
 }
 
 impl SqliteSharePlanRepository {
     pub fn new(root: &Path) -> Self {
-        Self { root: root.into() }
+        Self {
+            root: root.into(),
+            #[cfg(test)]
+            test_key: None,
+        }
+    }
+
+    fn protect(&self, input: &[u8], encrypt: bool) -> Result<Vec<u8>, QuarkError> {
+        #[cfg(test)]
+        if let Some(key) = self.test_key {
+            return crate::cloud::credentials::protect_with_key(input, encrypt, key);
+        }
+        crate::cloud::credentials::protect(input, encrypt)
     }
 
     fn open(&self) -> Result<Connection, QuarkError> {
@@ -40,7 +54,7 @@ impl SqliteSharePlanRepository {
     }
 
     fn load(&self) -> Result<PlanDocument, QuarkError> {
-        Self::read_document(&self.open()?)
+        self.read_document(&self.open()?)
     }
 
     fn save(&self, document: &PlanDocument) -> Result<(), QuarkError> {
@@ -49,11 +63,11 @@ impl SqliteSharePlanRepository {
         let transaction = connection
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|_| QuarkError::Storage)?;
-        Self::write_document(&transaction, document)?;
+        self.write_document(&transaction, document)?;
         transaction.commit().map_err(|_| QuarkError::Storage)
     }
 
-    fn read_document(connection: &Connection) -> Result<PlanDocument, QuarkError> {
+    fn read_document(&self, connection: &Connection) -> Result<PlanDocument, QuarkError> {
         let mut document = PlanDocument::default();
         document.sequence = connection
             .query_row(
@@ -77,7 +91,7 @@ impl SqliteSharePlanRepository {
             .map_err(|_| QuarkError::Storage)?;
         for row in rows {
             let (provider, fingerprint, order, payload) = row.map_err(|_| QuarkError::Storage)?;
-            let bytes = Zeroizing::new(crate::cloud::credentials::protect(&payload, false)?);
+            let bytes = Zeroizing::new(self.protect(&payload, false)?);
             let mut plan: CloudSharePlan =
                 serde_json::from_slice(&bytes).map_err(|_| QuarkError::Storage)?;
             if plan.provider.key() != provider
@@ -93,7 +107,7 @@ impl SqliteSharePlanRepository {
                 })
                 .map_err(|_| QuarkError::Storage)?;
             for row in rows {
-                let bytes = Zeroizing::new(crate::cloud::credentials::protect(
+                let bytes = Zeroizing::new(self.protect(
                     &row.map_err(|_| QuarkError::Storage)?,
                     false,
                 )?);
@@ -113,10 +127,11 @@ impl SqliteSharePlanRepository {
     }
 
     fn write_document(
+        &self,
         transaction: &Transaction<'_>,
         document: &PlanDocument,
     ) -> Result<(), QuarkError> {
-        let previous = Self::read_document(transaction)?;
+        let previous = self.read_document(transaction)?;
         for (key, stored) in &previous.plans {
             if !document.plans.contains_key(key) {
                 transaction
@@ -139,7 +154,7 @@ impl SqliteSharePlanRepository {
                     && serde_json::to_vec(&old).ok().as_deref() == Some(bytes.as_slice())
             });
             if !unchanged {
-                let ciphertext = crate::cloud::credentials::protect(&bytes, true)?;
+                let ciphertext = self.protect(&bytes, true)?;
                 transaction.execute("INSERT INTO share_plans(provider,share_fingerprint,last_used_order,created_at_ms,last_used_at_ms,pinned,secret_payload) VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(provider,share_fingerprint) DO UPDATE SET last_used_order=excluded.last_used_order,created_at_ms=excluded.created_at_ms,last_used_at_ms=excluded.last_used_at_ms,pinned=excluded.pinned,secret_payload=excluded.secret_payload", params![plan.provider.key(), plan.share_fingerprint, stored.last_used_order, plan.created_at_ms, plan.last_used_at_ms, stored.plan.is_pinned(), ciphertext]).map_err(|_| QuarkError::Storage)?;
             }
             for (ordinal, journal) in journals.iter().enumerate() {
@@ -153,7 +168,7 @@ impl SqliteSharePlanRepository {
                 {
                     continue;
                 }
-                let ciphertext = crate::cloud::credentials::protect(&bytes, true)?;
+                let ciphertext = self.protect(&bytes, true)?;
                 transaction.execute("INSERT INTO share_journals(provider,share_fingerprint,ordinal,entry_fingerprint,owner_fingerprint,owner_scheme,cleanup_state,secret_payload) VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(provider,share_fingerprint,ordinal) DO UPDATE SET entry_fingerprint=excluded.entry_fingerprint,owner_fingerprint=excluded.owner_fingerprint,owner_scheme=excluded.owner_scheme,cleanup_state=excluded.cleanup_state,secret_payload=excluded.secret_payload", params![plan.provider.key(), plan.share_fingerprint, ordinal as u64, journal.entry_fingerprint, journal.owner_fingerprint, serde_json::to_string(&journal.owner_scheme).map_err(|_| QuarkError::Storage)?, serde_json::to_string(&journal.cleanup_state).map_err(|_| QuarkError::Storage)?, ciphertext]).map_err(|_| QuarkError::Storage)?;
             }
             transaction.execute("DELETE FROM share_journals WHERE provider=?1 AND share_fingerprint=?2 AND ordinal>=?3", params![plan.provider.key(), plan.share_fingerprint, journals.len() as u64]).map_err(|_| QuarkError::Storage)?;
@@ -267,6 +282,15 @@ impl CloudSharePlanStore {
             mutation: Mutex::new(()),
             now_ms: Arc::new(now_ms),
         }
+    }
+
+    /// Exercise encrypted SQLite transactions without accessing the OS keychain.
+    /// Reopening the fixture uses the same test-only key.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(credentials: SystemCredentialStore) -> Self {
+        let mut store = Self::new(credentials);
+        store.repository.as_mut().unwrap().test_key = Some([9; 32]);
+        store
     }
 
     pub(super) fn load(&self) -> Result<PlanDocument, QuarkError> {
