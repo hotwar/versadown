@@ -1,5 +1,5 @@
 export type TaskStatus = 'draft' | 'parsing' | 'awaiting_user' | 'queued' | 'downloading' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'recycled' | 'paused';
-export type TaskKind = 'file' | 'folder' | 'magnet' | 'torrent' | 'ed2k' | 'ftp' | 'hls' | 'dash' | 'cloud';
+export type TaskKind = 'file' | 'folder' | 'magnet' | 'torrent' | 'ed2k' | 'ftp' | 'hls' | 'dash' | 'cloud' | 'web_video';
 export type DuplicateDownloadState = 'existing_active' | 'resume_available' | 'completed_files_present' | 'completed_files_missing' | 'overwrite_required';
 export type TaskCommand = 'pause' | 'resume' | 'cancel' | 'retry' | 'reauthorize' | 'retry_cleanup' | 'open_directory' | 'open_file' | 'play_videos' | 'copy_link' | 'details' | 'delete' | 'move_to_private' | 'move_to_normal';
 
@@ -106,7 +106,27 @@ export interface ConfirmResource {
   index?: number;
 }
 
+export interface VideoFormat {
+  id: string;
+  width: number;
+  height: number;
+  ext: string;
+  bytes: number | null;
+  estimated: boolean;
+}
+
+export interface VideoPreview {
+  previewId: string;
+  pageUrl: string;
+  title: string;
+  site: string;
+  duration: number | null;
+  thumbnail: string | null;
+  formats: VideoFormat[];
+}
+
 export interface ParseResult {
+  video?: VideoPreview;
   taskId: string;
   title?: string;
   requiresConfirmation: boolean;
@@ -118,10 +138,10 @@ export interface ParseResult {
   fileListPending?: boolean;
 }
 
-export type DownloadInputKind = 'direct' | 'ed2k' | 'ftp' | 'hls' | 'dash' | 'magnet' | 'torrent' | 'thunder' | 'cloud_share' | 'quark_share' | 'pik_pak_share';
+export type DownloadInputKind = 'direct' | 'web_video' | 'ed2k' | 'ftp' | 'hls' | 'dash' | 'magnet' | 'torrent' | 'thunder' | 'cloud_share' | 'quark_share' | 'pik_pak_share';
 
 export type ScanDownloadResult =
-  | { input: string; valid: true; kind: DownloadInputKind; message?: never }
+  | { input: string; valid: true; kind: DownloadInputKind; canProbeVideo?: boolean; message?: never }
   | { input: string; valid: false; kind?: never; message: string };
 
 export type CloudShareProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc';

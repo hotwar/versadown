@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { BatchTaskCommand, displayTaskName, DownloadQueue } from './components/DownloadQueue';
 import { NewDownloadDialog } from './components/NewDownloadDialog';
-import { selectedResourceIds, type DownloadDraftItem } from './components/useDownloadDraftBatch';
+import { selectedResourceIds, type DraftSubmissionFailure, type DownloadDraftItem } from './components/useDownloadDraftBatch';
 import { ParseConfirmDialog } from './components/ParseConfirmDialog';
 import { DuplicateDownloadDialog } from './components/DuplicateDownloadDialog';
 import { RemoveTaskDialog } from './components/RemoveTaskDialog';
@@ -17,7 +17,7 @@ import { AboutPanel } from './components/AboutPanel';
 import { BuildIdentityFooter } from './components/BuildIdentityFooter';
 import { EngineStatusToast } from './components/EngineStatusBanner';
 import { StartupNotice } from './components/StartupNotice';
-import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, defaultSettings, deleteTasks, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, syncMainWindowIcon, takeExternalLinks, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
+import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, submitVideoFormats, defaultSettings, deleteTasks, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, syncMainWindowIcon, takeExternalLinks, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
 import { createTaskUpdateMerger, subscribeToDownloadEvents, type TaskSnapshotScope } from './lib/downloadEvents';
 import { isPrivateTask, normalizeQueueTask, normalizeQueueTasks } from './lib/queueTask';
@@ -1092,8 +1092,10 @@ export function App() {
     return () => { disposed = true; unlisten.forEach((stop) => stop()); };
   }, []);
 
-  async function parse(input: string, accessCode?: string, confirmationPlacement: 'modal' | 'header' = 'modal') {
-    const result = await parseDownload(input, accessCode, settings.privacyDownloadEnabled ?? false);
+  async function parse(input: string, accessCode?: string, confirmationPlacement: 'modal' | 'header' = 'modal', probeVideo = false) {
+    const result = probeVideo
+      ? await parseDownload(input, accessCode, true, true)
+      : await parseDownload(input, accessCode, settings.privacyDownloadEnabled ?? false);
     if (result.task) { addNewDownloadTask(result.task); setSelectedTaskId(result.task.id); }
     if (result.confirmation) {
       if (confirmationPlacement === 'header') showHeaderConfirmation(result.confirmation);
@@ -1147,6 +1149,27 @@ export function App() {
     const activeGeneration = placement === 'header' ? headerConfirmationGeneration : confirmationGeneration;
     const setActiveConfirmation = placement === 'header' ? setHeaderConfirmation : setConfirmation;
     const planKey = `${placement}:${activeGeneration.current}`;
+    if (activeConfirmation.video) {
+      if (shareConfirmationsInFlight.current.has(planKey)) return;
+      shareConfirmationsInFlight.current.add(planKey);
+      const generation = activeGeneration.current;
+      try {
+        const failed = await submitVideoFormats(activeConfirmation.video, selectedIds, destinationDirectory, privateDownload, task => {
+          addNewDownloadTask(task);
+          if (activeGeneration.current === generation) setSelectedTaskId(task.id);
+        });
+        if (activeGeneration.current !== generation) return;
+        if (failed.length) {
+          setActiveConfirmation({ ...activeConfirmation, resources: activeConfirmation.resources.map(r => ({ ...r, selected: failed.some(f => f.selectedId === r.id) })) });
+          setNotice({ kind: 'error', message: failed[0].message });
+        } else {
+          setActiveConfirmation(null); setHeaderPanel(null); setSearchInput(''); setView('downloads'); setDownloadTab('active');
+        }
+      } catch (error) {
+        if (activeGeneration.current === generation) setNotice({ kind: 'error', message: String(error instanceof Error ? error.message : error) });
+      } finally { shareConfirmationsInFlight.current.delete(planKey); }
+      return;
+    }
     if (activeConfirmation.taskId.startsWith('cloud-share://')) {
       const planSource = activeConfirmation.taskId;
       const requestGeneration = activeGeneration.current;
@@ -1542,6 +1565,11 @@ export function App() {
     privateDownload = false,
     postProcessingNote?: string,
   ) {
+    const includesVideo = items.some(item => item.result?.confirmation?.video);
+    const closeDialog = () => {
+      setNewDownloadOpen(false);
+      setNewDownloadInput('');
+    };
     let firstCreated = false;
     const accepted = new Set<string>();
     const acceptCreated = (task: QueueTask, newlyCreated = true) => {
@@ -1551,8 +1579,7 @@ export function App() {
       accepted.add(task.id);
       if (firstCreated) return;
       firstCreated = true;
-      setNewDownloadOpen(false);
-      setNewDownloadInput('');
+      if (!includesVideo) closeDialog();
       setHeaderPanel(null);
       setSearchInput('');
       setView('downloads');
@@ -1578,6 +1605,11 @@ export function App() {
       const prepared = item.result?.confirmation;
       if (!prepared) throw new Error(t('download.error.taskNotParsed', { input: item.input }));
       const ids = selectedResourceIds(item);
+      if (prepared.video) {
+        const failed = await submitVideoFormats(prepared.video, ids, destinationDirectory, privateDownload, acceptCreated, postProcessingNote);
+        if (failed.length) return { id: item.id, resourceIds: failed.map(f => f.selectedId), message: failed[0].message };
+        return;
+      }
       if (prepared.taskId.startsWith('cloud-share://')) {
         const result = await confirmCloudShareDownload(
           prepared.taskId,
@@ -1592,7 +1624,7 @@ export function App() {
           if (task) acceptCreated(task, !outcome.duplicate);
           if (outcome.duplicate) enqueueDuplicate(outcome.duplicate);
         }
-        if (result.failures.length) throw new Error(result.failures.map(failure => failure.message).join('；'));
+        if (result.failures.length) return { id: item.id, resourceIds: result.failures.map(f => f.selectedId), message: result.failures[0].message };
         return;
       }
       const task = await confirmDownload(
@@ -1606,22 +1638,24 @@ export function App() {
       acceptCreated(task);
     }));
 
-    const failures = outcomes.flatMap((outcome) => {
-      if (outcome.status !== 'rejected') return [];
+    const failures = outcomes.flatMap<DraftSubmissionFailure>((outcome, index) => {
+      if (outcome.status === 'fulfilled') return outcome.value ? [outcome.value] : [];
       const reason = outcome.reason;
       const message = reason instanceof Error
         ? reason.message
         : typeof reason === 'object' && reason !== null && 'message' in reason && typeof reason.message === 'string'
           ? reason.message
           : String(reason);
-      return [message];
+      return [{ id: items[index].id, message }];
     });
     if (failures.length) {
-      const message = t('download.error.tasksSubmissionFailed', { count: failures.length, detail: failures[0] });
+      if (includesVideo) return failures;
+      const message = t('download.error.tasksSubmissionFailed', { count: failures.length, detail: failures[0].message });
       setNotice({ kind: 'error', message });
       if (!firstCreated) throw new Error(message);
     }
     if (!firstCreated) throw new Error(t('download.error.noTaskAdded'));
+    if (includesVideo) closeDialog();
   }
 
   return (
@@ -1702,8 +1736,8 @@ export function App() {
               ...current,
               resources: current.resources.map((resource) => ({ ...resource, selected: selectedIds.includes(resource.id) }))
             } : current)} onClose={() => { dismissHeaderConfirmation(); setHeaderPanel(null); }} />
-              : headerPanel === 'download' ? <NewDownloadDialog open placement="header" initialInput={searchInput} onScan={scanDownloadInputs} onParse={async (input, accessCode) => {
-                const result = await parse(input, accessCode, 'header');
+              : headerPanel === 'download' ? <NewDownloadDialog open placement="header" initialInput={searchInput} onScan={scanDownloadInputs} onParse={async (input, accessCode, probeVideo) => {
+                const result = await parse(input, accessCode, 'header', probeVideo);
                 setView('downloads');
                 setDownloadTab('active');
                 return result;
@@ -1786,7 +1820,7 @@ export function App() {
         onRestartMissing={() => void resolveDuplicate('restart_missing')}
         onClose={() => dismissDuplicate(duplicate.task.id)}
       />}
-      <NewDownloadDialog open={newDownloadOpen} placement="modal" initialInput={newDownloadInput} onScan={scanDownloadInputs} onParse={(input, accessCode) => parseDownload(input, accessCode, true)} onDiscardPrepared={discardPreparedDownload} onSubmitBatch={submitPreparedBatch} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onClose={() => { setNewDownloadOpen(false); setNewDownloadInput(''); }} />
+      <NewDownloadDialog open={newDownloadOpen} placement="modal" initialInput={newDownloadInput} onScan={scanDownloadInputs} onParse={(input, accessCode, probeVideo) => probeVideo ? parseDownload(input, accessCode, true, true) : parseDownload(input, accessCode, true)} onDiscardPrepared={discardPreparedDownload} onSubmitBatch={submitPreparedBatch} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onClose={() => { setNewDownloadOpen(false); setNewDownloadInput(''); }} />
       {detailsTask && <TaskDetailsDialog task={detailsTask} onClose={() => setDetailsTaskId(null)} />}
       {pendingPurgeTasks.length > 0 && <RemoveTaskDialog taskNames={pendingPurgeTasks.map(displayTaskName)} onConfirm={(deleteFiles) => void confirmTaskRemoval(deleteFiles)} onClose={() => setPendingPurgeTaskIds(null)} />}
       {notice && <div className={`task-toast ${notice.kind}`} role="status">{notice.message}</div>}

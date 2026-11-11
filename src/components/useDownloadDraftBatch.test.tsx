@@ -202,3 +202,17 @@ it('toggling a partially selected share selects every file, then clears them all
   expect(result.current.items[0].selected).toBe(false);
   expect(result.current.items[0].result?.confirmation?.resources.every(resource => !resource.selected)).toBe(true);
 });
+
+it('does not prepare anything when a slow site scan finishes after closing the dialog', async () => {
+  const pending = deferred<ScanDownloadResult[]>();
+  const prepare = vi.fn();
+  const { result } = renderHook(() => useDownloadDraftBatch({scan: () => pending.promise, prepare, discard:vi.fn()}));
+  let scan: Promise<void>;
+  act(() => { scan = result.current.start('https://example.test/page'); });
+  await act(async () => { await result.current.discardAll(); });
+  await act(async () => {
+    pending.resolve([{input:'https://example.test/page',kind:'web_video',valid:true}]);
+    await scan;
+  });
+  expect(prepare).not.toHaveBeenCalled();
+});

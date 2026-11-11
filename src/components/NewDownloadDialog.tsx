@@ -3,7 +3,8 @@ import { isTauriRuntime, listPersistedTasks } from '../lib/api';
 import { formatBytes } from '../lib/downloadEvents';
 import { ConfirmResource, ParseDownloadResult, ScanDownloadResult } from '../lib/types';
 import { ResourceFileRow } from './ResourceFileRow';
-import { canExpandDownloadDraft, DownloadDraftItem, useDownloadDraftBatch } from './useDownloadDraftBatch';
+import { VideoFormatCard } from './VideoFormatCard';
+import { canExpandDownloadDraft, DownloadDraftItem, DraftSubmissionFailure, useDownloadDraftBatch } from './useDownloadDraftBatch';
 import { t, useTranslation } from '../i18n';
 
 export type NewDownloadDialogPlacement = 'launcher' | 'modal' | 'header';
@@ -11,13 +12,13 @@ export type NewDownloadDialogPlacement = 'launcher' | 'modal' | 'header';
 export interface NewDownloadDialogProps {
   open: boolean;
   placement?: NewDownloadDialogPlacement;
-  onParse(input: string, accessCode?: string): void | Promise<ParseDownloadResult | void>;
+  onParse(input: string, accessCode?: string, probeVideo?: boolean): void | Promise<ParseDownloadResult | void>;
   onScan?(input: string): Promise<ScanDownloadResult[]>;
   onClose(): void;
   onOpenTaskList?(): void | Promise<void>;
   initialInput?: string;
   onDiscardPrepared?(reference: string): Promise<void>;
-  onSubmitBatch?(items: DownloadDraftItem[], destinationDirectory?: string, privateDownload?: boolean, postProcessingNote?: string): void | Promise<void>;
+  onSubmitBatch?(items: DownloadDraftItem[], destinationDirectory?: string, privateDownload?: boolean, postProcessingNote?: string): void | Promise<void | DraftSubmissionFailure[]>;
   downloadDirectory?: string;
   browseDirectory?(currentDirectory: string): Promise<string | null | undefined>;
   privacyEnabled?: boolean;
@@ -39,7 +40,8 @@ type DownloadBatch = { entries: ScanDownloadResult[]; index: number };
 function directAutoStarts(entry: ScanDownloadResult, text: string): boolean {
   return entry.valid
     && entry.input === text
-    && entry.kind === 'direct';
+    && entry.kind === 'direct'
+    && !entry.canProbeVideo;
 }
 
 export function NewDownloadDialog(props: NewDownloadDialogProps) {
@@ -287,7 +289,7 @@ function BatchNewDownloadDialog({
   const { t } = useTranslation();
   const batch = useDownloadDraftBatch({
     scan: onScan ?? (async input => [{ input, valid: true, kind: 'direct' }]),
-    prepare: async (input, accessCode) => (await onParse(input, accessCode)) ?? { confirmation: { taskId: input, title: input, requiresConfirmation: true, resources: [], processing: [] } },
+    prepare: async (input, accessCode, probeVideo) => (await (probeVideo ? onParse(input, accessCode, true) : onParse(input, accessCode))) ?? { confirmation: { taskId: input, title: input, requiresConfirmation: true, resources: [], processing: [] } },
     discard: onDiscardPrepared ?? (async () => {}),
     concurrency: 4,
   });
@@ -320,7 +322,7 @@ function BatchNewDownloadDialog({
     setDestination(undefined);
     setManualInput(initialInput);
     setScanning(Boolean(initialInput.trim()));
-    if (initialInput.trim()) void batch.start(initialInput).finally(() => setScanning(false));
+    void batch.start(initialInput).finally(() => setScanning(false));
   }, [open, initialInput]);
 
   useEffect(() => {
@@ -365,12 +367,20 @@ function BatchNewDownloadDialog({
   async function submit(privateDownload = false) {
     if (!canSubmit || submitting || !onSubmitBatch) return;
     const selected = batch.items.filter(item => item.selected);
+    const ids = selected.map(item => item.id);
+    batch.markSubmitted(ids);
     setSubmitting(true);
     setSubmitError(null);
     try {
-      await onSubmitBatch(selected, destination, privateDownload, postProcessingNote);
-      batch.markSubmitted(selected.map(item => item.id));
+      const failures = await onSubmitBatch(selected, destination, privateDownload, postProcessingNote);
+      if (failures?.length) {
+        batch.applySubmissionFailures(selected, failures);
+        setSubmitting(false);
+        return;
+      }
+      await batch.discardAll(ids[0]);
     } catch (reason) {
+      batch.markSubmitted(ids, false);
       setSubmitError(reason instanceof Error ? reason.message : String(reason));
       setSubmitting(false);
     }
@@ -392,20 +402,25 @@ function BatchNewDownloadDialog({
   }
 
   if (!open) return null;
-  const selectedCount = batch.items.filter(item => item.selected).length;
+  const selectedCount = batch.items.filter(item => item.selected).reduce((count, item) =>
+    count + (item.result?.confirmation?.video ? item.result.confirmation.resources.filter(r => r.selected).length : 1), 0);
   const hasUnresolvedBitTorrentFileList = batch.items.some(item => item.selected
     && item.status === 'ready'
     && item.result?.confirmation?.isBitTorrent
     && (item.result.confirmation.fileListPending ?? batchItemResources(item).length === 0)
     && batchItemResources(item).length === 0);
   const canSubmit = batch.canSubmit && !hasUnresolvedBitTorrentFileList;
-  const dialog = <aside ref={dialogRef} className={`new-download-dialog batch-download-dialog ${placement}`} role="dialog" aria-modal={placement === 'modal' || undefined} aria-label={t('download.new')} onKeyDown={trapFocus}>
+  const dialog = <aside ref={dialogRef} className={`new-download-dialog batch-download-dialog ${placement}${batch.items.some(i => i.result?.confirmation?.video) ? ' has-video-options' : ''}`} role="dialog" aria-modal={placement === 'modal' || undefined} aria-label={t('download.new')} onKeyDown={trapFocus}>
     <div className="launcher-title"><span>{t('download.newTask')}</span>{batch.items.length > 0 && <small>{selectedCount ? t('download.selection.count', { count: selectedCount }) : t('download.selectTasks')}</small>}<button type="button" aria-label={placement === 'modal' ? t('download.closeNew') : t('download.collapseInput')} disabled={submitting || closing} onClick={() => void requestClose()}>×</button></div>
     {!batch.items.length && !scanning ? <form className="batch-manual-input" onSubmit={scanManualInput}><label htmlFor="batch-download-input">{t('download.content')}</label><textarea id="batch-download-input" aria-label={t('download.content')} value={manualInput} onChange={event => setManualInput(event.target.value)} placeholder={t('download.inputPlaceholder')} /><div className="new-download-actions"><button type="submit" className="primary" disabled={!manualInput.trim()}>{t('download.parseTask')}</button></div></form> : <section className="batch-download-list" aria-label={t('download.pendingTasks')}>
       {batch.items.map(item => {
         const title = batchItemTitle(item);
         const resources = batchItemResources(item);
+        const video = item.result?.confirmation?.video;
+        if (video && item.status === 'ready') return <VideoFormatCard key={item.id} video={video} selected={item.selected} formatIds={resources.filter(r => r.selected).map(r => r.id)}
+          onSelectVideo={() => batch.toggleItem(item.id)} onSelectFormat={id => batch.toggleResource(item.id, id)} onRemove={() => batch.remove(item.id)} disabled={submitting || closing} submissionError={item.error} onReparse={() => batch.retry(item.id)} />;
         const existingTask = Boolean(item.result?.duplicate);
+        const busy = submitting || closing;
         const fileListPending = Boolean(item.result?.confirmation?.isBitTorrent
           && (item.result.confirmation.fileListPending ?? resources.length === 0));
         const waitingForBitTorrentFileList = fileListPending && resources.length === 0;
@@ -421,18 +436,24 @@ function BatchNewDownloadDialog({
         const resourceBytes = resources.reduce((total, resource) => total + batchResourceBytes(resource.size), 0);
         const partiallySelected = item.selected && resources.some(resource => !resource.selected);
         const rootRow = <div className="batch-download-row batch-tree-root">
-            <BatchSelectionCheckbox ariaLabel={t('batch.selectNamed', { name: item.input })} checked={item.selected && !partiallySelected} indeterminate={partiallySelected} disabled={existingTask} onChange={() => batch.toggleItem(item.id)} />
+            <BatchSelectionCheckbox ariaLabel={t('batch.selectNamed', { name: item.input })} checked={item.selected && !partiallySelected} indeterminate={partiallySelected} disabled={existingTask || busy} onChange={() => batch.toggleItem(item.id)} />
             {canExpand ? <button type="button" className="batch-expand" aria-label={t(item.expanded ? 'batch.collapseNamed' : 'batch.expandNamed', { name: title })} aria-expanded={item.expanded} onClick={() => batch.toggleExpanded(item.id)}><svg className={item.expanded ? 'expanded' : ''} aria-hidden="true" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7" /></svg></button> : <span className="batch-expand-placeholder" />}
             <span className={`batch-root-icon${item.result?.confirmation?.isBitTorrent ? ' torrent' : ''}`} aria-hidden="true">{item.result?.confirmation?.isBitTorrent ? 'BT' : resources.length > 1 ? '▱' : '↓'}</span>
             <div className="batch-download-name"><strong title={title}>{title}</strong><small>{loadingStatus ? <BatchLoadingStatus>{loadingStatus}</BatchLoadingStatus> : itemStatus}</small></div>
             {resources.length > 0 && <small className="batch-root-size">{formatBytes(resourceBytes)}</small>}
-            {item.status === 'failed' && <button type="button" className="batch-retry-button" onClick={() => batch.retry(item.id)}>{t('common.retryAction')}</button>}
-            <button type="button" aria-label={t('batch.removeNamed', { name: title })} onClick={() => batch.remove(item.id)}>×</button>
+            {item.status === 'failed' && <button type="button" className="batch-retry-button" disabled={busy} onClick={() => batch.retry(item.id)}>{t('common.retryAction')}</button>}
+            <button type="button" aria-label={t('batch.removeNamed', { name: title })} disabled={busy} onClick={() => batch.remove(item.id)}>×</button>
           </div>;
         return <article key={item.id} className={`batch-download-item ${item.status}${item.expanded && canExpand ? ' expanded' : ''}`}>
-          {item.expanded && canExpand ? <BatchResourceList resources={resources} disabled={existingTask} rootName={title} rootRow={rootRow} onToggle={resourceId => batch.toggleResource(item.id, resourceId)} /> : rootRow}
+          {item.expanded && canExpand ? <BatchResourceList resources={resources} disabled={existingTask || busy} rootName={title} rootRow={rootRow} onToggle={resourceId => batch.toggleResource(item.id, resourceId)} /> : rootRow}
+          {item.canProbeVideo && item.status !== 'parsing' && <div className="batch-video-probe">
+            <button type="button" disabled={busy} onClick={() => batch.retry(item.id, !item.probeVideo)}>
+              {t(item.probeVideo ? 'video.useDirect' : 'video.probe')}
+            </button>
+          </div>}
+          {item.status === 'ready' && item.error && <p className="parse-failure" role="alert">{item.error}</p>}
           {item.status === 'access_code_required' && <div className="batch-access-code">
-            <span>{item.error}</span><input type="password" aria-label={t('batch.accessCodeFor', { name: title })} autoComplete="off" value={item.accessCode} onChange={event => batch.setAccessCode(item.id, event.target.value)} /><button type="button" className="batch-retry-button" disabled={!item.accessCode.trim()} onClick={() => batch.retry(item.id)}>{t('download.parseAgain')}</button>
+            <span>{item.error}</span><input type="password" aria-label={t('batch.accessCodeFor', { name: title })} autoComplete="off" disabled={busy} value={item.accessCode} onChange={event => batch.setAccessCode(item.id, event.target.value)} /><button type="button" className="batch-retry-button" disabled={busy || !item.accessCode.trim()} onClick={() => batch.retry(item.id)}>{t('download.parseAgain')}</button>
           </div>}
         </article>;
       })}
@@ -527,9 +548,10 @@ function LegacyNewDownloadDialog({ open, placement = 'launcher', onParse, onScan
     setBatch({ ...currentBatch, index: nextIndex });
   }
 
-  async function parseCandidate(candidate: string, currentBatch?: DownloadBatch) {
+  async function parseCandidate(candidate: string, currentBatch?: DownloadBatch, probeVideo = false) {
     try {
-      const result = await onParse(candidate, accessCode.trim() || undefined);
+      const code = accessCode.trim() || undefined;
+      const result = await (probeVideo ? onParse(candidate, code, true) : onParse(candidate, code));
       if (result?.shareAccessCodeRequired) {
         setAccessCodePrompt(result.shareAccessCodeRequired.message);
         setIsSubmitting(false);
@@ -554,7 +576,7 @@ function LegacyNewDownloadDialog({ open, placement = 'launcher', onParse, onScan
     }
     setIsSubmitting(true);
     setError(null);
-    await parseCandidate(entry.input, currentBatch);
+    await parseCandidate(entry.input, currentBatch, entry.kind === 'web_video');
   }
 
   async function submit(event: FormEvent) {
@@ -630,6 +652,10 @@ function LegacyNewDownloadDialog({ open, placement = 'launcher', onParse, onScan
           {placement === 'launcher' && <button type="button" onClick={openTaskList} disabled={isSubmitting}>{t('download.openTaskList')}</button>}
           {batch && <span role="status">{t('download.processingBatch', { current: batch.index + 1, total: batch.entries.length })}</span>}
           {batchEntry?.valid && <span>{t('download.validLinkConfirmation')}</span>}
+          {batchEntry?.valid && batchEntry.canProbeVideo && <button type="button" disabled={isSubmitting} onClick={() => {
+            setIsSubmitting(true);
+            void parseCandidate(batchEntry.input, batch!, true);
+          }}>{t('video.probe')}</button>}
           {batchEntry && !batchEntry.valid && <span role="alert" className="parse-failure">{batchEntry.message}</span>}
           {error && <span role="alert" className="parse-failure">{error}</span>}
           {accessCodePrompt ? <div className="new-download-tab-access-code">

@@ -900,7 +900,7 @@ impl EngineRuntime {
             return;
         };
         for mut task in tasks {
-            if task.kind == "ftp" {
+            if matches!(task.kind.as_str(), "ftp" | "web_video") {
                 continue;
             }
             if !matches!(

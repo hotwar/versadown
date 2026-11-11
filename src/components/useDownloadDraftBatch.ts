@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { ConfirmResource, ParseDownloadResult, ScanDownloadResult } from '../lib/types';
+import { ConfirmResource, ParseDownloadResult, ScanDownloadResult, VideoFormat } from '../lib/types';
+import { t } from '../i18n';
 
 export type DownloadDraftStatus = 'parsing' | 'ready' | 'access_code_required' | 'failed';
 
@@ -7,6 +8,8 @@ export interface DownloadDraftItem {
   id: string;
   input: string;
   kind?: string;
+  canProbeVideo?: boolean;
+  probeVideo?: boolean;
   status: DownloadDraftStatus;
   selected: boolean;
   result?: ParseDownloadResult;
@@ -14,17 +17,44 @@ export interface DownloadDraftItem {
   accessCode: string;
   expanded: boolean;
   submitted: boolean;
+  completedVideoSizes?: ReadonlySet<string>;
   generation: number;
 }
 
 interface Options {
   scan(input: string): Promise<ScanDownloadResult[]>;
-  prepare(input: string, accessCode?: string): Promise<ParseDownloadResult>;
+  prepare(input: string, accessCode?: string, probeVideo?: boolean): Promise<ParseDownloadResult>;
   discard(reference: string): Promise<void>;
   concurrency?: number;
 }
 
-type WorkItem = { id: string; generation: number; accessCodeRetry?: boolean };
+export interface DraftSubmissionFailure {
+  id: string;
+  message: string;
+  resourceIds?: string[];
+}
+
+type WorkItem = { id: string; generation: number; accessCodeRetry?: boolean; superseded?: string };
+
+function sizeKey(format: VideoFormat): string {
+  return `${format.width}x${format.height}`;
+}
+
+// Extractor format IDs can change when a preview expires. Keep completed
+// resolutions out of this draft even if the refreshed list uses different IDs.
+function refreshVideoSelection(result: ParseDownloadResult, previous: DownloadDraftItem): ParseDownloadResult {
+  const next = result.confirmation;
+  const old = previous.result?.confirmation;
+  if (!next?.video || (!old?.video && !previous.completedVideoSizes?.size)) return result;
+  const formats = next.video.formats.filter(f => !previous.completedVideoSizes?.has(sizeKey(f)));
+  if (!formats.length) throw new Error(t('video.error.formatGone'));
+  const oldIds = new Set(old?.resources.filter(r => r.selected).map(r => r.id));
+  const oldSizes = old?.video && new Set(old.video.formats.filter(f => oldIds.has(f.id)).map(sizeKey));
+  const selected = new Set(formats.filter((f, index) => oldSizes ? oldSizes.has(sizeKey(f)) : index === 0).map(f => f.id));
+  const available = new Set(formats.map(f => f.id));
+  const resources = next.resources.filter(r => available.has(r.id)).map(r => ({ ...r, selected: selected.has(r.id) }));
+  return { confirmation: { ...next, video: { ...next.video, formats }, resources } };
+}
 
 function errorMessage(reason: unknown): string {
   return reason instanceof Error ? reason.message : String(reason);
@@ -34,16 +64,8 @@ function isRejectedAccessCode(message: string): boolean {
   return /(?:访问码|分享码).*(?:错误|不正确|缺失)|提取码.*(?:错误|不正确|失败|缺失)/.test(message);
 }
 
-function preparedReference(item: DownloadDraftItem): string | undefined {
-  if (item.result?.confirmation) return item.result.confirmation.taskId;
-  if (item.result?.task) return item.result.task.id;
-  return undefined;
-}
-
-function resultReference(result: ParseDownloadResult): string | undefined {
-  if (result.confirmation) return result.confirmation.taskId;
-  if (result.task) return result.task.id;
-  return undefined;
+function resultReference(result?: ParseDownloadResult): string | undefined {
+  return result?.confirmation?.taskId ?? result?.task?.id;
 }
 
 function hasRelativeDirectoryPath(path: string): boolean {
@@ -56,6 +78,7 @@ export function hasExpandableResourceTree(resources: readonly Pick<ConfirmResour
 }
 
 export function canExpandDownloadDraft(result: ParseDownloadResult): boolean {
+  if (result.confirmation?.video) return false;
   const task = result.task ?? result.duplicate?.task;
   if (task?.kind === 'folder') return true;
   const resources = result.confirmation?.resources
@@ -79,6 +102,10 @@ function withResources(item: DownloadDraftItem, resources: ConfirmResource[], se
 // file selects the item, and toggling the item selects or clears every file.
 function toggledItem(item: DownloadDraftItem): DownloadDraftItem {
   const resources = item.result?.confirmation?.resources ?? [];
+  if (item.result?.confirmation?.video) {
+    const choices = resources.some(r => r.selected) ? resources : resources.map((r, i) => ({ ...r, selected: i === 0 }));
+    return withResources(item, choices, !item.selected);
+  }
   if (!resources.length) return { ...item, selected: !item.selected };
   const selected = !(item.selected && resources.every(resource => resource.selected));
   return withResources(item, resources.map(resource => ({ ...resource, selected })), selected);
@@ -90,7 +117,6 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
   const queueRef = useRef<WorkItem[]>([]);
   const activeRef = useRef(0);
   const sessionRef = useRef(0);
-  const abandonedRef = useRef(new Set<string>());
 
   const replaceItems = useCallback((update: (current: DownloadDraftItem[]) => DownloadDraftItem[]) => {
     const next = update(itemsRef.current);
@@ -105,25 +131,45 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
       const item = itemsRef.current.find(candidate => candidate.id === work.id && candidate.generation === work.generation);
       if (!item) continue;
       activeRef.current += 1;
-      void prepare(item.input, item.accessCode.trim() || undefined)
+      const prepareItem = async () => {
+        if (work.superseded) {
+          await discard(work.superseded);
+          // A removed or closed draft must not start a second extraction.
+          if (!itemsRef.current.some(candidate => candidate.id === work.id && candidate.generation === work.generation)) return;
+          replaceItems(current => current.map(candidate => candidate.id === work.id ? { ...candidate, result: undefined } : candidate));
+        }
+        const accessCode = item.accessCode.trim() || undefined;
+        return item.probeVideo ? prepare(item.input, accessCode, true) : prepare(item.input, accessCode);
+      };
+      void prepareItem()
         .then(result => {
+          if (!result) return;
           const current = itemsRef.current.find(candidate => candidate.id === work.id && candidate.generation === work.generation);
-          if (!current || abandonedRef.current.has(work.id)) {
+          if (!current) {
             const reference = resultReference(result);
             if (reference) void discard(reference).catch(() => undefined);
             return;
           }
+          let prepared: ParseDownloadResult;
+          try {
+            prepared = refreshVideoSelection(result, item);
+          } catch (error) {
+            const reference = resultReference(result);
+            if (reference) void discard(reference).catch(() => undefined);
+            throw error;
+          }
           replaceItems(current => current.map(candidate => {
             if (candidate.id !== work.id || candidate.generation !== work.generation) return candidate;
-            if (result.shareAccessCodeRequired) {
-              return { ...candidate, result, status: 'access_code_required', error: result.shareAccessCodeRequired.message };
+            if (prepared.shareAccessCodeRequired) {
+              return { ...candidate, result: prepared, status: 'access_code_required', error: prepared.shareAccessCodeRequired.message };
             }
             return {
               ...candidate,
-              result,
+              result: prepared,
+              selected: candidate.selected && (!prepared.confirmation?.video || prepared.confirmation.resources.some(r => r.selected)),
               status: 'ready',
               error: undefined,
-              expanded: candidate.expanded || canExpandDownloadDraft(result),
+              expanded: candidate.expanded || canExpandDownloadDraft(prepared),
             };
           }));
         })
@@ -134,7 +180,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
             if (work.accessCodeRetry && isRejectedAccessCode(message)) {
               return { ...candidate, status: 'access_code_required', accessCode: '', error: message };
             }
-            return { ...candidate, status: 'failed', error: message };
+            return { ...candidate, status: 'failed', selected: candidate.probeVideo ? false : candidate.selected, error: message };
           }));
         })
         .finally(() => {
@@ -144,9 +190,27 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
     }
   };
 
+  // Detach the drafts synchronously so late scans and parse results cannot
+  // re-enter a closed/replaced dialog. In-flight completions release their own references.
+  const discardAll = useCallback(async (sessionItem?: string) => {
+    if (sessionItem && !sessionItem.startsWith(`${sessionRef.current}-`)) return;
+    ++sessionRef.current;
+    const abandoned = itemsRef.current.filter(item => !item.submitted);
+    itemsRef.current = [];
+    queueRef.current = [];
+    const references = abandoned.map(item => resultReference(item.result)).filter((ref): ref is string => !!ref);
+    await Promise.allSettled([...new Set(references)].map(reference => discard(reference)));
+  }, [discard]);
+
   const start = useCallback(async (input: string) => {
-    const session = ++sessionRef.current;
-    const scanned = await scan(input);
+    void discardAll();
+    const session = sessionRef.current;
+    setItems([]);
+    if (!input.trim()) return;
+    let scanned: ScanDownloadResult[];
+    try { scanned = await scan(input); }
+    catch (error) { scanned = [{ input, valid: false, message: errorMessage(error) }]; }
+    if (session !== sessionRef.current) return;
     const candidates: ScanDownloadResult[] = scanned.length
       ? scanned
       : [{ input, valid: false, message: '未发现受支持的有效下载链接' }];
@@ -154,6 +218,8 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
       id: `${session}-${index}`,
       input: entry.input,
       kind: entry.valid ? entry.kind : undefined,
+      canProbeVideo: entry.valid && entry.canProbeVideo,
+      probeVideo: entry.valid && entry.kind === 'web_video',
       status: entry.valid ? 'parsing' : 'failed',
       selected: entry.valid,
       error: entry.valid ? undefined : entry.message,
@@ -166,15 +232,17 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
     setItems(next);
     queueRef.current = next.filter(item => item.status === 'parsing').map(item => ({ id: item.id, generation: item.generation }));
     pumpRef.current();
-  }, [scan]);
+  }, [scan, discardAll]);
 
-  const retry = useCallback((id: string) => {
+  const retry = useCallback((id: string, probeVideo?: boolean) => {
     let work: WorkItem | undefined;
     replaceItems(current => current.map(item => {
-      if (item.id !== id) return item;
+      if (item.id !== id || item.status === 'parsing' || (probeVideo !== undefined && !item.canProbeVideo)) return item;
       const generation = item.generation + 1;
-      work = { id, generation, accessCodeRetry: item.status === 'access_code_required' };
-      return { ...item, status: 'parsing', error: undefined, result: undefined, generation };
+      const mode = probeVideo ?? item.probeVideo;
+      const superseded = item.result?.confirmation?.taskId;
+      work = { id, generation, superseded, accessCodeRetry: item.status === 'access_code_required' };
+      return { ...item, status: 'parsing', selected: mode || probeVideo !== undefined || item.selected, probeVideo: mode, error: undefined, result: superseded ? item.result : undefined, generation };
     }));
     if (work) {
       queueRef.current.push(work);
@@ -184,7 +252,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
 
   const remove = useCallback((id: string) => {
     const item = itemsRef.current.find(candidate => candidate.id === id);
-    const reference = item && !item.submitted ? preparedReference(item) : undefined;
+    const reference = item && !item.submitted ? resultReference(item.result) : undefined;
     replaceItems(current => current.filter(candidate => candidate.id !== id));
     if (reference) void discard(reference).catch(() => undefined);
   }, [discard, replaceItems]);
@@ -204,6 +272,9 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
   const toggleResource = useCallback((id: string, resourceId: string) => {
     replaceItems(current => current.map(item => {
       if (item.id !== id || !item.result?.confirmation) return item;
+      if (item.result.confirmation.video && !item.selected) {
+        return withResources(item, item.result.confirmation.resources.map(r => ({ ...r, selected: r.id === resourceId })), true);
+      }
       const resources = item.result.confirmation.resources.map(resource => resource.id === resourceId
         ? { ...resource, selected: !resource.selected }
         : resource);
@@ -231,20 +302,31 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
     }));
   }, [replaceItems]);
 
-  const markSubmitted = useCallback((ids: string[]) => {
-    const submitted = new Set(ids);
-    replaceItems(current => current.map(item => submitted.has(item.id) ? { ...item, submitted: true } : item));
+  const markSubmitted = useCallback((ids: string[], submitted = true) => {
+    const targets = new Set(ids);
+    replaceItems(current => current.map(item => targets.has(item.id) ? { ...item, submitted } : item));
   }, [replaceItems]);
 
-  const discardAll = useCallback(async () => {
-    const abandoned = itemsRef.current.filter(item => !item.submitted);
-    abandoned.forEach(item => abandonedRef.current.add(item.id));
-    queueRef.current = queueRef.current.filter(work => !abandonedRef.current.has(work.id));
-    const references = abandoned
-      .map(preparedReference)
-      .filter((reference): reference is string => Boolean(reference));
-    await Promise.allSettled(Array.from(new Set(references)).map(reference => discard(reference)));
-  }, [discard]);
+  const applySubmissionFailures = useCallback((selected: DownloadDraftItem[], failures: DraftSubmissionFailure[]) => {
+    const attempted = new Map(selected.map(item => [item.id, selectedResourceIds(item)]));
+    const rejected = new Map(failures.map(failure => [failure.id, failure]));
+    replaceItems(current => current.flatMap(item => {
+      if (!attempted.has(item.id)) return [item];
+      const failure = rejected.get(item.id);
+      if (!failure) return [];
+      const confirmation = item.result?.confirmation;
+      if (!confirmation || !failure.resourceIds) return [{ ...item, submitted: false, error: failure.message }];
+      const failedIds = new Set(failure.resourceIds);
+      const completed = new Set(attempted.get(item.id)?.filter(id => !failedIds.has(id)));
+      const resources = confirmation.resources.filter(r => !completed.has(r.id));
+      const video = confirmation.video && { ...confirmation.video, formats: confirmation.video.formats.filter(f => !completed.has(f.id)) };
+      const completedVideoSizes = new Set(item.completedVideoSizes);
+      for (const format of confirmation.video?.formats ?? []) {
+        if (completed.has(format.id)) completedVideoSizes.add(sizeKey(format));
+      }
+      return [{ ...item, completedVideoSizes, submitted: false, error: failure.message, result: { confirmation: { ...confirmation, video, resources } } }];
+    }));
+  }, [replaceItems]);
 
   const canSubmit = useMemo(() => {
     const selected = items.filter(item => item.selected);
@@ -252,5 +334,5 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
       && (!item.result?.confirmation?.resources.length || item.result.confirmation.resources.some(resource => resource.selected)));
   }, [items]);
 
-  return { items, canSubmit, start, retry, remove, toggleItem, setAccessCode, toggleExpanded, toggleResource, updateResources, markSubmitted, discardAll };
+  return { items, canSubmit, start, retry, remove, toggleItem, setAccessCode, toggleExpanded, toggleResource, updateResources, markSubmitted, applySubmissionFailures, discardAll };
 }

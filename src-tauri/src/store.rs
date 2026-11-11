@@ -31,6 +31,8 @@ pub enum StoreError {
     NotFound(Uuid),
     #[error("invalid task status stored in database")]
     InvalidStoredStatus,
+    #[error("invalid video transfer engine stored in database")]
+    InvalidStoredVideoEngine,
     #[error("cannot transition task from {from:?} to {to:?}")]
     InvalidTransition { from: TaskStatus, to: TaskStatus },
     #[error("value for {field} is outside SQLite's signed 64-bit range")]
@@ -399,6 +401,21 @@ impl TaskStore {
         )?;
         migrate(&mut connection)?;
         connection.execute_batch("CREATE TABLE IF NOT EXISTS cloud_download_accounts (id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL, account_id TEXT NOT NULL);")?;
+        let schema = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        schema.execute_batch("CREATE TABLE IF NOT EXISTS video_task_formats (
+            task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+            selector TEXT NOT NULL, media_id TEXT,
+            engine TEXT NOT NULL DEFAULT 'native'
+        );")?;
+        if !column_exists(&schema, "video_task_formats", "media_id")? {
+            schema.execute_batch("ALTER TABLE video_task_formats ADD COLUMN media_id TEXT")?;
+        }
+        if !column_exists(&schema, "video_task_formats", "engine")? {
+            // Existing yt-dlp partial files belong to its native downloader.
+            // Preserve that binding when opening a task created before aria2 support.
+            schema.execute_batch("ALTER TABLE video_task_formats ADD COLUMN engine TEXT NOT NULL DEFAULT 'native'")?;
+        }
+        schema.commit()?;
         Ok(Self {
             connection: Mutex::new(connection),
             leaf_gates: Mutex::new(HashMap::new()),
@@ -408,6 +425,47 @@ impl TaskStore {
     pub fn create(&self, new_task: NewTask) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         Self::create_with_connection(&connection, new_task)
+    }
+
+    pub(crate) fn create_video(&self, task: NewTask, selector: &str, media_id: &str) -> Result<DownloadTask, StoreError> {
+        let mut conn = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let tx = conn.transaction()?;
+        let task = Self::create_with_connection(&tx, task)?;
+        tx.execute("INSERT INTO video_task_formats (task_id, selector, media_id, engine) VALUES (?1, ?2, ?3, 'aria2')",
+                   params![task.id.to_string(), selector, media_id])?;
+        tx.commit()?;
+        Ok(task)
+    }
+
+    pub(crate) fn video_selector(&self, id: Uuid) -> Result<(String, Option<String>), StoreError> {
+        let conn = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok(conn.query_row("SELECT selector, media_id FROM video_task_formats WHERE task_id = ?1",
+                          [id.to_string()], |row| Ok((row.get(0)?, row.get(1)?)))?)
+    }
+
+    pub(crate) fn video_engine(
+        &self,
+        id: Uuid,
+    ) -> Result<crate::web_video::VideoTransferEngine, StoreError> {
+        use crate::web_video::VideoTransferEngine;
+        let conn = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let engine: String = conn.query_row(
+            "SELECT engine FROM video_task_formats WHERE task_id = ?1",
+            [id.to_string()],
+            |row| row.get(0),
+        )?;
+        match engine.as_str() {
+            "native" => Ok(VideoTransferEngine::Native),
+            "aria2" => Ok(VideoTransferEngine::Aria2),
+            _ => Err(StoreError::InvalidStoredVideoEngine),
+        }
+    }
+
+    pub(crate) fn recover_video_downloads(&self) -> Result<(), StoreError> {
+        let conn = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        conn.execute("UPDATE tasks SET status='paused', download_speed=0, eta_seconds=NULL
+                      WHERE kind='web_video' AND status IN ('queued','downloading','processing','parsing')", [])?;
+        Ok(())
     }
 
     fn create_with_connection(
@@ -1025,21 +1083,22 @@ impl TaskStore {
     /// Cloud tasks persist only `cloud://provider/file-id`, so this never
     /// compares an expiring signed download URL or a session credential.
     pub fn find_by_source(&self, source: &str) -> Result<Option<DownloadTask>, StoreError> {
+        self.find_by_source_for_kind(source, None)
+    }
+
+    pub(crate) fn find_by_source_for_kind(
+        &self,
+        source: &str,
+        kind: Option<&str>,
+    ) -> Result<Option<DownloadTask>, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        connection
+        Ok(connection
             .query_row(
-                &format!("{TASK_SELECT} WHERE source = ?1 ORDER BY rowid DESC LIMIT 1"),
-                [source],
+                &format!("{TASK_SELECT} WHERE source = ?1 AND (?2 IS NULL OR kind = ?2) ORDER BY rowid DESC LIMIT 1"),
+                params![source, kind],
                 task_from_row,
             )
-            .map(Some)
-            .or_else(|error| {
-                if matches!(error, rusqlite::Error::QueryReturnedNoRows) {
-                    Ok(None)
-                } else {
-                    Err(StoreError::Database(error))
-                }
-            })
+            .optional()?)
     }
 
     /// Returns the output path reserved for this task before its download is
@@ -2216,6 +2275,107 @@ mod tests {
         cloud::CloudProvider,
         models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem},
     };
+
+    #[test]
+    fn video_tasks_keep_their_persisted_transfer_engine() {
+        use crate::web_video::VideoTransferEngine;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("tasks.sqlite");
+        let store = TaskStore::open_path(&path).unwrap();
+        let mut legacy = store
+            .create_video(
+                NewTask {
+                    kind: "web_video".into(),
+                    ..NewTask::direct("https://youtu.be/62xlzGs8LXA")
+                },
+                "401+140",
+                "62xlzGs8LXA",
+            )
+            .unwrap();
+        legacy.status = TaskStatus::Failed;
+        legacy.completed_length = 45_098_095;
+        legacy.error = Some("video.error.network".into());
+        store.apply_transfer_snapshot(legacy.clone()).unwrap();
+        let ordinary = store
+            .create(NewTask::direct("https://example.test/archive.zip"))
+            .unwrap();
+        drop(store);
+        // Reproduce the schema of the user's native download with partial data.
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("ALTER TABLE video_task_formats DROP COLUMN engine")
+            .unwrap();
+        drop(connection);
+
+        let store = TaskStore::open_path(&path).unwrap();
+        assert_eq!(
+            store.video_engine(legacy.id).unwrap(),
+            VideoTransferEngine::Native
+        );
+        assert_eq!(
+            store.video_selector(legacy.id).unwrap(),
+            ("401+140".into(), Some("62xlzGs8LXA".into()))
+        );
+        let saved = store.find(legacy.id).unwrap();
+        assert_eq!(
+            (saved.status, saved.completed_length, saved.error),
+            (TaskStatus::Failed, legacy.completed_length, legacy.error)
+        );
+        assert_eq!(store.find(ordinary.id).unwrap().status, ordinary.status);
+        let fresh = store
+            .create_video(
+                NewTask {
+                    kind: "web_video".into(),
+                    ..NewTask::direct("https://youtu.be/62xlzGs8LXA")
+                },
+                "401+140",
+                "62xlzGs8LXA",
+            )
+            .unwrap();
+        assert_eq!(
+            store.video_engine(fresh.id).unwrap(),
+            VideoTransferEngine::Aria2
+        );
+        drop(store);
+
+        let reopened = TaskStore::open_path(&path).unwrap();
+        assert_eq!(
+            reopened.video_engine(legacy.id).unwrap(),
+            VideoTransferEngine::Native
+        );
+        assert_eq!(
+            reopened.video_engine(fresh.id).unwrap(),
+            VideoTransferEngine::Aria2
+        );
+    }
+
+    #[test]
+    fn unrecognized_video_engine_is_not_reassigned() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create_video(
+                NewTask {
+                    kind: "web_video".into(),
+                    ..NewTask::direct("https://youtu.be/62xlzGs8LXA")
+                },
+                "401+140",
+                "62xlzGs8LXA",
+            )
+            .unwrap();
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE video_task_formats SET engine = 'unknown-engine' WHERE task_id = ?1",
+                [task.id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            store.video_engine(task.id),
+            Err(StoreError::InvalidStoredVideoEngine)
+        ));
+    }
 
     #[test]
     fn migration_repairs_missing_output_reservation_table() {

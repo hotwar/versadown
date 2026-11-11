@@ -21,7 +21,8 @@ marker="$(mktemp)"
 trap 'rm -f "$marker"' EXIT
 
 cd "$repo_root"
-pnpm exec tauri build --bundles deb,rpm,appimage --config src-tauri/tauri.linux.conf.json --ci
+node scripts/prepare-video-tools.mjs
+pnpm exec tauri build --bundles deb,rpm,appimage --config .tools/video-bundle.config.json --ci
 
 mapfile -d '' deb_files < <(find "$bundle_dir/deb" -maxdepth 1 -type f -name '*.deb' -newer "$marker" -print0)
 mapfile -d '' rpm_files < <(find "$bundle_dir/rpm" -maxdepth 1 -type f -name '*.rpm' -newer "$marker" -print0)

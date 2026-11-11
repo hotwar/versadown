@@ -36,6 +36,7 @@ mod processing;
 mod store;
 mod startup;
 mod update;
+mod web_video;
 mod webview_memory;
 mod window_icon;
 #[cfg(windows)]
@@ -313,6 +314,7 @@ pub fn run() {
             if !startup_health.credentials_unavailable {
                 commands::purge_tianyi_local_state(&store, &cloud).map_err(std::io::Error::other)?;
             }
+            store.recover_video_downloads()?;
             store.recover_interrupted_cloud_directories()?;
             // aria2 persists the short-lived direct URL it received from a
             // cloud provider. Do this before the native session is loaded so
@@ -334,16 +336,11 @@ pub fn run() {
             // calls cannot race a later `manage` call.
             app.manage(std::sync::Arc::clone(&cloud));
             cloud.start_authorization_maintenance();
+            let resources = app.path().resource_dir()?;
+            web_video::set_resource_dir(&resources);
             let sidecar = engine_binary::EngineBinary::for_current_target()
                 .and_then(|binary| {
-                    binary.resolve(
-                        std::path::Path::new(env!("CARGO_MANIFEST_DIR")),
-                        &app.path().resource_dir().map_err(|_| {
-                            engine_binary::EngineBinaryError::Missing(std::path::PathBuf::from(
-                                "resource directory",
-                            ))
-                        })?,
-                    )
+                    binary.resolve(std::path::Path::new(env!("CARGO_MANIFEST_DIR")), &resources)
                 })
                 .map_err(std::io::Error::other)?;
             let default_destination = if background_ui_test.as_deref() == Some("1") {
@@ -447,6 +444,7 @@ pub fn run() {
                 cloud_download_dispatch: cloud_download_dispatch.clone(),
                 baidu_range_gateway: std::sync::Arc::clone(&baidu_range_gateway),
             });
+            let video_events = events.clone();
             let runtime = std::sync::Arc::new(EngineRuntime::new(
                 launch_config,
                 std::sync::Arc::clone(&store),
@@ -454,7 +452,12 @@ pub fn run() {
                 events,
             ));
             runtime.set_cloud_upload_limit(cloud_upload_limit);
+            let web_video = std::sync::Arc::new(web_video::VideoDownloads::new(
+                store.clone(), settings.aria2.max_concurrent_downloads,
+                move |task| crate::aria2::EventSink::task_updated(&*video_events, &task),
+            ));
             app.manage(commands::AppState {
+                web_video,
                 store,
                 runtime: std::sync::Arc::clone(&runtime),
                 settings: std::sync::Mutex::new(settings),
@@ -578,6 +581,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             build_info::get_build_info,
             startup::startup_health,
+            web_video::submit_video_download,
+            web_video::discard_video_preview,
             external_links::take_external_links,
             launcher_drag::drag_launcher_window,
             launcher_input::set_launcher_input_regions,

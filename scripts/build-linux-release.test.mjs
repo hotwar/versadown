@@ -28,6 +28,7 @@ function createFixture(t) {
   const fakeUname = join(root, 'bin', 'uname');
   for (const path of [script, sidecar, fakePnpm, fakeUname]) mkdirSync(dirname(path), { recursive: true });
   copyFileSync(sourceScript, script);
+  writeFileSync(join(root, 'scripts', 'prepare-video-tools.mjs'), '');
   writeFileSync(sidecar, '#!/bin/sh\nexit 0\n');
   chmodSync(sidecar, 0o755);
   writeFileSync(fakePnpm, `#!/usr/bin/env node
@@ -66,7 +67,7 @@ test('builds only Linux bundles and publishes all packages with valid checksums'
   const fixture = createFixture(t);
   const result = runFixture(fixture);
   assert.equal(result.status, 0, result.stderr);
-  assert.equal(readFileSync(join(fixture.root, 'pnpm-args'), 'utf8'), 'exec tauri build --bundles deb,rpm,appimage --config src-tauri/tauri.linux.conf.json --ci');
+  assert.equal(readFileSync(join(fixture.root, 'pnpm-args'), 'utf8'), 'exec tauri build --bundles deb,rpm,appimage --config .tools/video-bundle.config.json --ci');
 
   const output = join(fixture.root, 'artifacts', 'linux');
   const deb = 'VersaDown_0.1.0_amd64.deb';

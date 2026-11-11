@@ -1,3 +1,4 @@
+import { videoMessage } from '../lib/webVideo';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { DownloadFile, QueueTask, TaskCommand } from '../lib/types';
@@ -246,6 +247,7 @@ function cloudTaskSubtitle(source: string | undefined): string | undefined {
 }
 
 function taskSubtitle(task: QueueTask): string | undefined {
+  if (task.kind === 'web_video') return task.error ? videoMessage(task.error) : t('video.taskKind');
   if (task.error) return xunleiDownloadMessage(task.error);
   const cloudSubtitle = cloudTaskSubtitle(task.source);
   if (task.source?.toLowerCase().startsWith('cloud://xunlei/') && task.statusMessage === '正在使用迅雷svip加速') {

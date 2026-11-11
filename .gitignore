@@ -21,3 +21,4 @@ vite.config.d.ts
 src-tauri/gen/
 visual-dist/
 .tmp-*/
+src-tauri/binaries/video-*/

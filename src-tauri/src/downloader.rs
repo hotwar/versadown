@@ -42,6 +42,8 @@ pub enum DownloadError {
     Input(#[from] InputValidationError),
     #[error("分享链接必须先通过网盘分享解析流程处理")]
     CloudShareInput,
+    #[error("video.error.formats")]
+    VideoPageInput,
 }
 
 const MAX_TORRENT_BYTES: usize = 16 * 1024 * 1024;
@@ -132,6 +134,7 @@ pub fn prepare_download(input: &str, store: &TaskStore) -> Result<ParseOutcome, 
     };
     let mut new_task = NewTask::direct(candidate.source.clone());
     new_task.kind = match &candidate.kind {
+        CandidateKind::WebVideo => return Err(DownloadError::VideoPageInput),
         CandidateKind::Ed2k => "ed2k",
         CandidateKind::Ftp => "ftp",
         CandidateKind::Hls => "hls",
@@ -143,7 +146,7 @@ pub fn prepare_download(input: &str, store: &TaskStore) -> Result<ParseOutcome, 
     .to_string();
     new_task.name = readable_task_name(&new_task.source, &new_task.kind)
         .unwrap_or_else(|| new_task.name.clone());
-    if let Some(task) = store.find_by_source(&new_task.source)? {
+    if let Some(task) = store.find_by_source_for_kind(&new_task.source, Some(&new_task.kind))? {
         if task.status != TaskStatus::Recycled {
             return Ok(ParseOutcome {
                 duplicate: Some(duplicate_state(store, &task)?),
@@ -223,6 +226,27 @@ mod tests {
             repeated.duplicate,
             Some(crate::DuplicateDownloadState::OverwriteRequired)
         );
+    }
+
+    #[test]
+    fn ordinary_download_does_not_reuse_an_embedded_video_with_the_same_page_url() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let url = "https://news.example.org/article.html";
+        let add_video = |selector| {
+            let task = NewTask { kind: "web_video".into(), ..NewTask::direct(url) };
+            store.create_video(task, selector, "embedded-clip").unwrap()
+        };
+        let video = add_video("480");
+        let direct = prepare_download(url, &store).unwrap();
+        assert!(direct.duplicate.is_none());
+        assert_eq!(direct.task.kind, "file");
+        assert_ne!(direct.task.id, video.id);
+
+        // A newer quality for the same video must not hide the earlier HTTP task either.
+        add_video("1080");
+        let repeated = prepare_download(url, &store).unwrap();
+        assert!(repeated.duplicate.is_some());
+        assert_eq!(repeated.task.id, direct.task.id);
     }
 
     #[test]

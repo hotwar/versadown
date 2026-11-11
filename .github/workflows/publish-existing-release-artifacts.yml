@@ -58,6 +58,13 @@ jobs:
           merge-multiple: true
           github-token: ${{ github.token }}
           run-id: ${{ inputs.source_run_id }}
+      - uses: actions/download-artifact@v4
+        if: ${{ hashFiles('scripts/prepare-video-tools.mjs') != '' }}
+        with:
+          name: video-tool-sources
+          path: artifacts/video-sources
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.source_run_id }}
       - name: Verify and publish all desktop platform assets
         env:
           GH_TOKEN: ${{ github.token }}
@@ -81,6 +88,9 @@ jobs:
             sha256sum --check SHA256SUMS.macos-x86_64
           )
           assets=(artifacts/macos/*.dmg artifacts/macos/*.app.zip artifacts/macos/SHA256SUMS.macos-* artifacts/linux/*.deb artifacts/linux/*.rpm artifacts/linux/*.AppImage artifacts/linux/SHA256SUMS artifacts/windows/*.exe artifacts/windows/SHA256SUMS.windows)
+          if [[ -f scripts/prepare-video-tools.mjs ]]; then
+            assets+=(artifacts/video-sources/VersaDown-video-tool-sources.tar.gz)
+          fi
           for asset in "${assets[@]}"; do
             test -f "$asset"
           done

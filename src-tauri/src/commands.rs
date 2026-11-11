@@ -25,6 +25,7 @@ use crate::{
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ParseDownloadOutcome {
     Task(ParseOutcome),
+    WebVideo(crate::web_video::VideoPreview),
     ShareConfirmation(CloudShareConfirmation),
     AccessCodeRequired {
         provider: CloudProvider,
@@ -33,6 +34,7 @@ pub enum ParseDownloadOutcome {
 }
 
 pub struct AppState {
+    pub(crate) web_video: Arc<crate::web_video::VideoDownloads>,
     pub store: Arc<TaskStore>,
     pub runtime: Arc<crate::EngineRuntime>,
     pub settings: Mutex<AppSettings>,
@@ -296,7 +298,7 @@ fn share_action_parse_outcome(action: TaskActionOutcome) -> ParseDownloadOutcome
     })
 }
 
-fn proxy_url(proxy: &ProxySettings) -> Result<Option<String>, String> {
+pub(crate) fn proxy_url(proxy: &ProxySettings) -> Result<Option<String>, String> {
     if !proxy.enabled {
         return Ok(None);
     }
@@ -527,6 +529,11 @@ pub(crate) fn download_submission_options(
 }
 
 fn fail_invalid_task_submission(store: &TaskStore, task: &DownloadTask) -> Result<(), String> {
+    // Video tasks persist a playback page and a separate format selection.
+    // Handing the page to aria2 would write HTML to the reserved video path.
+    if task.kind == "web_video" {
+        return Err("video.error.state".into());
+    }
     match crate::validate_task_source(&task.kind, &task.source) {
         Ok(()) => Ok(()),
         Err(error) => {
@@ -580,8 +587,8 @@ fn fail_engine_submission_text(store: &TaskStore, task: &DownloadTask, error: St
 }
 
 #[tauri::command]
-pub fn scan_download_inputs(input: String) -> Vec<crate::ScannedInput> {
-    crate::scan_download_inputs(&input)
+pub async fn scan_download_inputs(input: String) -> Vec<crate::ScannedInput> {
+    crate::web_video::routing::scan(&input).await
 }
 
 const MAX_DROPPED_TORRENT_BYTES: usize = 16 * 1024 * 1024;
@@ -643,12 +650,17 @@ pub async fn parse_download(
     input: String,
     access_code: Option<String>,
     require_confirmation: Option<bool>,
+    probe_video: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<ParseDownloadOutcome, String> {
+    let probe_video = probe_video.unwrap_or(false);
     if let Some(candidate) =
         crate::parser::extract_cloud_share_candidate(&input, access_code.as_deref())
             .map_err(|error| error.to_string())?
     {
+        if probe_video {
+            return Err("video.error.unsupported".into());
+        }
         let provider = candidate.provider;
         return match crate::cloud::commands::inspect_cloud_share(app.clone(), candidate)
             .await
@@ -696,6 +708,11 @@ pub async fn parse_download(
                 })
             }
         };
+    }
+    if let Some(page) = crate::web_video::routing::resolve(input.trim(), probe_video).await? {
+        let (proxy, _) = crate::web_video::network_options(&state)?;
+        let preview = state.web_video.prepare(page, proxy.as_deref()).await?;
+        return Ok(ParseDownloadOutcome::WebVideo(preview));
     }
     let mut outcome = prepare_download(&input, &state.store).map_err(|error| error.to_string())?;
     if outcome.duplicate.is_some() {
@@ -1108,15 +1125,15 @@ pub async fn confirm_download_command(
 ) -> Result<DownloadTaskPayload, String> {
     let private_download = private_download.unwrap_or(false);
     ensure_private_download_enabled(&state, private_download)?;
+    let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
+    let current = state.store.find(id).map_err(|error| error.to_string())?;
+    ensure_private_task_access(&state, &current)?;
+    fail_invalid_task_submission(&state.store, &current)?;
     let service = state
         .runtime
         .service()
         .await
         .map_err(|error| error.to_string())?;
-    let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
-    let current = state.store.find(id).map_err(|error| error.to_string())?;
-    ensure_private_task_access(&state, &current)?;
-    fail_invalid_task_submission(&state.store, &current)?;
     state
         .store
         .set_private(id, private_download)
@@ -2252,6 +2269,10 @@ async fn run_local_task_action(
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let mut current = state.store.find(id).map_err(|error| error.to_string())?;
     ensure_private_task_access(&state, &current)?;
+    if current.kind == "web_video" {
+        let task = state.web_video.control(&state, current, &action).await?;
+        return task_action_outcome(&state.store, task, None);
+    }
     if action == "retry_cleanup" {
         let task = crate::cloud::commands::cleanup_cloud_share_task(app.clone(), id, true)
             .await
@@ -3656,6 +3677,7 @@ fn purge_recycled_task_records(
         }
         tasks.push(task);
     }
+    for task in &tasks { crate::web_video::clear_partial(store, task)?; }
     let native_checkpoints = tasks
         .iter()
         .map(|task| recorded_xunlei_checkpoint_paths(store, task))

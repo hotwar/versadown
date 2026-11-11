@@ -75,7 +75,15 @@
 - AI 仅在规则无法可靠理解文本/网页时接收当前任务的脱敏可读文本；绝不发送 Cookie、凭据、密码、二维码、短信或本地文件。
 - 任何服务商拒绝嵌入式授权时应转为系统浏览器或服务商允许流程；不得抓取 OAuth token。
 
+## 网页视频下载
+
+在“新建下载”里粘贴一个或多个播放页，分别勾选视频和清晰度。YouTube 和哔哩哔哩支持短链，哔哩哔哩支持分 P。其他点播站点由本机 yt-dlp 识别。普通网页可点“查找网页中的视频”。
+
+Windows、Linux 和 macOS 安装包内置 yt-dlp、FFmpeg 和 QuickJS。首次使用即可解析播放页、选择清晰度并下载。高清画面和声音分开提供时，VD 会把它们合并到同一个文件。可选清晰度取决于网站向当前用户提供的格式。组件随 VD 更新，许可证和对应源码见[第三方组件说明](src-tauri/video-tool-notices/SOURCE.md)。
+
 ## 开发环境
+
+从源码运行开发版时可使用 `.tools/video` Python 虚拟环境中的 `yt-dlp[default,curl-cffi]`，以及本机的 FFmpeg 和 Node.js 22+。打包脚本直接下载并校验 yt-dlp 的官方可执行文件；Windows 和 Linux 的 QuickJS 也使用官方二进制。精简版 FFmpeg 和兼容 macOS 12 的 QuickJS 会缓存编译结果，macOS 构建机另需 CMake。
 
 ### macOS（Apple Silicon / Intel）
 
@@ -132,7 +140,7 @@ pnpm run build:linux:release
 
 ### Windows
 
-Windows 10/11、WebView2 runtime、Node 24+、Rust stable MSVC、Visual Studio C++ Build Tools。项目构建时会使用 Tauri 的 Windows WiX 打包链。
+Windows 10/11、WebView2 runtime、Node 24+、Rust stable MSVC、Visual Studio C++ Build Tools。本地生成 NSIS 安装包时，FFmpeg 使用 MSYS2 UCRT64 的 GCC、binutils 和 MSYS make；可用 `VD_MSYS2_ROOT` 指定 MSYS2 目录。CI 使用 MinGW-w64 交叉编译 FFmpeg，并在 Windows 上运行和验证打包后的工具。
 
 ```powershell
 # 验证仓库内置的 Aria2 Next 原生媒体 sidecar

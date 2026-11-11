@@ -39,17 +39,77 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential curl wget file pkg-config libssl-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev libxdo-dev librsvg2-dev patchelf libfuse2
       - run: pnpm install --frozen-lockfile
+      - name: Cache native video tools
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/binaries/video-linux
+          key: video-tools-ubuntu22-${{ runner.arch }}-${{ hashFiles('scripts/prepare-video-extractor.mjs', 'scripts/prepare-video-ffmpeg.mjs', 'scripts/prepare-video-js.mjs', 'scripts/video-tool-sources.mjs') }}
+          restore-keys: video-tools-ubuntu22-${{ runner.arch }}-
       - name: Build Linux packages
         env:
           APPIMAGE_EXTRACT_AND_RUN: '1'
         run: pnpm run build:linux:release
+      - name: Download and merge 1080p with the installed Debian tools
+        run: |
+          dpkg-deb -x artifacts/linux/*.deb "$RUNNER_TEMP/vd-deb"
+          tools="$(find "$RUNNER_TEMP/vd-deb" -type d -path '*/binaries/video-linux')"
+          python3 scripts/smoke-video-tools.py "$tools"
+      - name: Collect corresponding video tool sources and build recipes
+        run: node scripts/pack-video-tool-sources.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: video-tool-sources
+          path: artifacts/video-sources/VersaDown-video-tool-sources.tar.gz
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         with:
           name: linux-x86_64-release
           path: artifacts/linux/*
           if-no-files-found: error
 
+  windows-ffmpeg:
+    name: Build Windows FFmpeg
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    outputs:
+      sha256: ${{ steps.verify.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Cache the Windows FFmpeg binary and checksum
+        uses: actions/cache@v4
+        with:
+          path: |
+            src-tauri/binaries/video-windows/ffmpeg.exe
+            src-tauri/binaries/video-windows/ffmpeg.exe.sha256
+          key: win64-ffmpeg-jammy-mingw-${{ hashFiles('scripts/prepare-video-ffmpeg.mjs', 'scripts/video-tool-sources.mjs') }}
+      - name: Verify cached FFmpeg or compile the pinned source
+        run: |
+          exe=src-tauri/binaries/video-windows/ffmpeg.exe
+          if [[ -s "$exe" && -s "$exe.sha256" ]] && [[ "$(cat "$exe.sha256")" == "$(sha256sum "$exe" | cut -d' ' -f1)" ]]; then
+            exit 0
+          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64 make xz-utils
+          node scripts/prepare-video-ffmpeg.mjs --cross-windows-x64
+          sha256sum "$exe" | cut -d' ' -f1 > "$exe.sha256"
+      - name: Record verified PE for the native Windows job
+        id: verify
+        run: |
+          exe=src-tauri/binaries/video-windows/ffmpeg.exe
+          file "$exe" | grep -E 'PE32\+.*x86-64'
+          echo "sha256=$(sha256sum "$exe" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-ffmpeg-build-input
+          path: src-tauri/binaries/video-windows/ffmpeg.exe
+          if-no-files-found: error
+          retention-days: 2
+
   windows:
+    needs: windows-ffmpeg
     name: Windows · x86_64 installer
     runs-on: windows-2022
     timeout-minutes: 120
@@ -75,7 +135,13 @@ jobs:
             throw "Tag $env:GITHUB_REF_NAME does not match application version $packageVersion."
           }
       - run: pnpm install --frozen-lockfile
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-ffmpeg-build-input
+          path: src-tauri/binaries/video-windows
       - name: Build Windows installer
+        env:
+          VD_WINDOWS_FFMPEG_SHA256: ${{ needs.windows-ffmpeg.outputs.sha256 }}
         run: pnpm run build:windows:installer
       - name: Prepare Windows release asset
         shell: pwsh
@@ -93,6 +159,14 @@ jobs:
             "$installerHash  $installerName`n",
             [System.Text.Encoding]::ASCII
           )
+      - name: Download and merge 1080p from a clean Windows installation
+        shell: pwsh
+        run: |
+          $installer = (Get-ChildItem 'artifacts/windows/*.exe').FullName
+          $destination = Join-Path $env:RUNNER_TEMP 'vd-installed'
+          $setup = Start-Process -FilePath $installer -ArgumentList '/S',"/D=$destination" -PassThru -Wait
+          if ($setup.ExitCode -ne 0) { throw "Installer exited with code $($setup.ExitCode)." }
+          python scripts/smoke-video-tools.py (Join-Path $destination 'binaries/video-windows')
       - uses: actions/upload-artifact@v4
         with:
           name: windows-x86_64-release
@@ -139,6 +213,12 @@ jobs:
           CARGO_PROFILE_DEV_DEBUG: '0'
           CARGO_PROFILE_TEST_DEBUG: '0'
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --test engine_binary --test aria2_live --test parser_policy --test window_config --test window_lifecycle --test engine_runtime --test ftp_download --test cloud_provider_contract --test aria2_bt --test magnet_metadata
+      - name: Cache native video tools
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/binaries/video-macos
+          key: video-tools-${{ matrix.runner }}-${{ runner.arch }}-${{ hashFiles('scripts/prepare-video-extractor.mjs', 'scripts/prepare-video-ffmpeg.mjs', 'scripts/prepare-video-js.mjs', 'scripts/video-tool-sources.mjs') }}
+          restore-keys: video-tools-${{ matrix.runner }}-${{ runner.arch }}-
       - name: Build macOS packages
         # Tauri uses Developer ID and notarization credentials when supplied.
         # Without them the artifacts are unsigned developer distributions.
@@ -166,7 +246,10 @@ jobs:
           CARGO_PROFILE_TEST_DEBUG: '0'
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --features native-smoke --test macos_native_smoke
       - name: Smoke test the packaged application
-        run: python3 scripts/smoke-macos.py src-tauri/target/release/bundle/macos/VersaDown.app
+        run: |
+          app=src-tauri/target/release/bundle/macos/VersaDown.app
+          python3 scripts/smoke-macos.py "$app"
+          python3 scripts/smoke-video-tools.py "$app/Contents/Resources/binaries/video-macos"
       - uses: actions/upload-artifact@v4
         with:
           name: macos-${{ matrix.arch }}-release
@@ -193,6 +276,10 @@ jobs:
           pattern: macos-*-release
           path: artifacts/macos
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: video-tool-sources
+          path: artifacts/video-sources
       - name: Publish GitHub Release after all builds succeed
         env:
           GH_TOKEN: ${{ github.token }}
@@ -215,7 +302,7 @@ jobs:
             sha256sum --check SHA256SUMS.macos-arm64
             sha256sum --check SHA256SUMS.macos-x86_64
           )
-          assets=(artifacts/macos/*.dmg artifacts/macos/*.app.zip artifacts/macos/SHA256SUMS.macos-* artifacts/linux/*.deb artifacts/linux/*.rpm artifacts/linux/*.AppImage artifacts/linux/SHA256SUMS artifacts/windows/*.exe artifacts/windows/SHA256SUMS.windows)
+          assets=(artifacts/macos/*.dmg artifacts/macos/*.app.zip artifacts/macos/SHA256SUMS.macos-* artifacts/linux/*.deb artifacts/linux/*.rpm artifacts/linux/*.AppImage artifacts/linux/SHA256SUMS artifacts/windows/*.exe artifacts/windows/SHA256SUMS.windows artifacts/video-sources/VersaDown-video-tool-sources.tar.gz)
           for asset in "${assets[@]}"; do
             test -f "$asset"
           done

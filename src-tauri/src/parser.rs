@@ -96,7 +96,7 @@ fn cloud_provider_for_url(url: &Url) -> Option<CloudProvider> {
         .map(|descriptor| descriptor.provider)
 }
 
-fn registered_share_provider(url: &Url) -> Option<CloudProvider> {
+pub(crate) fn registered_share_provider(url: &Url) -> Option<CloudProvider> {
     crate::cloud::ProviderRegistry::global()
         .all()
         .iter()
@@ -167,6 +167,7 @@ fn normalize_access_code(value: &str) -> Result<String, ShareInputError> {
 #[serde(rename_all = "snake_case")]
 pub enum CandidateKind {
     Direct,
+    WebVideo,
     Ed2k,
     Ftp,
     Hls,
@@ -227,6 +228,8 @@ pub enum InputValidationError {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScannedInput {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub can_probe_video: bool,
     pub input: String,
     pub valid: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -238,6 +241,7 @@ pub struct ScannedInput {
 impl ScannedInput {
     fn valid(candidate: ValidatedCandidate) -> Self {
         Self {
+            can_probe_video: false,
             input: candidate.source,
             valid: true,
             kind: Some(candidate.kind),
@@ -247,6 +251,7 @@ impl ScannedInput {
 
     fn invalid(input: String, error: InputValidationError) -> Self {
         Self {
+            can_probe_video: false,
             input,
             valid: false,
             kind: None,
@@ -314,6 +319,7 @@ pub fn validate_download_input(input: &str) -> Result<ValidatedCandidate, InputV
             target_kind,
             CandidateKind::Torrent
                 | CandidateKind::Thunder
+                | CandidateKind::WebVideo
                 | CandidateKind::CloudShare
                 | CandidateKind::QuarkShare
                 | CandidateKind::PikPakShare
@@ -341,6 +347,9 @@ pub fn validate_download_input(input: &str) -> Result<ValidatedCandidate, InputV
                 _ => CandidateKind::CloudShare,
             };
             return Ok(validated(kind, source.to_string()));
+        }
+        if let Some(page) = crate::web_video::playback_url(&url) {
+            return Ok(validated(CandidateKind::WebVideo, page.url.into()));
         }
         let normalized = normalize_queryless_unicode_path(source, &url);
         let path = url.path().to_ascii_lowercase();
@@ -377,6 +386,9 @@ pub fn validate_task_source(kind: &str, source: &str) -> Result<(), InputValidat
     let candidate = validate_download_input(source)?;
     let valid_kind = match kind {
         "file" => candidate.kind == CandidateKind::Direct,
+        "web_video" => candidate.kind == CandidateKind::WebVideo
+            || (candidate.kind == CandidateKind::Direct
+                && Url::parse(source).ok().as_ref().and_then(crate::web_video::manual_page).is_some()),
         "ed2k" => candidate.kind == CandidateKind::Ed2k,
         "ftp" => candidate.kind == CandidateKind::Ftp,
         "hls" => candidate.kind == CandidateKind::Hls,

@@ -1,4 +1,6 @@
 import { AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, PrivacyTaskVisibility, QueueTask, ScanDownloadResult, TaskActionResult, TaskCommand } from './types';
+import { videoConfirmation, videoMessage } from './webVideo';
+import type { VideoPreview } from './types';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { version as appVersion } from '../../src-tauri/tauri.conf.json';
 import type { ThemeId } from './theme';
@@ -29,6 +31,7 @@ function id() { return `local-${Date.now()}-${Math.random().toString(16).slice(2
 
 export function parseLocally(input: string): ParseDownloadResult {
   const trimmed = input.trim();
+  if (/^https?:\/\/(?:(?:www\.|m\.|music\.)?youtube\.com\/(?:watch\?|shorts\/|embed\/|live\/)|youtu\.be\/|(?:www\.|m\.)?bilibili\.com\/video\/|b23\.tv\/)/i.test(trimmed)) throw new Error(t('video.error.desktop'));
   const isMulti = /^(magnet:|thunder:)/i.test(trimmed) || /\.torrent(?:\?|$)/i.test(trimmed) || /(?:pan\.quark\.cn|mypikpak\.com|pikpak\.me)/i.test(trimmed);
   if (isMulti) {
     const resources: ConfirmResource[] = [
@@ -80,7 +83,7 @@ type NativeAccessCodeRequiredOutcome = {
   message: string;
 };
 
-type NativeParseOutcome = NativeTaskParseOutcome | NativeShareConfirmationOutcome | NativeAccessCodeRequiredOutcome;
+type NativeParseOutcome = NativeTaskParseOutcome | NativeShareConfirmationOutcome | NativeAccessCodeRequiredOutcome | ({ kind: 'web_video' } & VideoPreview);
 
 function duplicateResult(result: NativeTaskOutcome): TaskActionResult {
   const { duplicate, queueTask, ...task } = result;
@@ -89,15 +92,20 @@ function duplicateResult(result: NativeTaskOutcome): TaskActionResult {
     : { task, ...(queueTask ? { queueTask } : {}) };
 }
 
-export async function parseDownload(input: string, accessCode?: string, requireConfirmation = false): Promise<ParseDownloadResult> {
-  if (!isTauriRuntime()) return parseLocally(input);
-  const result = await invoke<NativeParseOutcome>('parse_download', { input, accessCode, ...(requireConfirmation ? { requireConfirmation } : {}) })
+export async function parseDownload(input: string, accessCode?: string, requireConfirmation = false, probeVideo = false): Promise<ParseDownloadResult> {
+  if (!isTauriRuntime()) {
+    if (probeVideo) throw new Error(t('video.error.desktop'));
+    return parseLocally(input);
+  }
+  const result = await invoke<NativeParseOutcome>('parse_download', { input, accessCode, ...(requireConfirmation ? { requireConfirmation } : {}), ...(probeVideo ? { probeVideo } : {}) })
     .catch((error: unknown) => {
       if (isXunleiVerificationReason(error) || isXunleiVerificationFailure(error)) {
         throw new Error(xunleiVerificationMessage(typeof error === 'string' ? error : (error as { message?: unknown }).message));
       }
+      if (typeof error === 'string' && error.startsWith('video.error.')) throw new Error(videoMessage(error));
       throw error;
     });
+  if (result.kind === 'web_video') return { confirmation: videoConfirmation(result) };
   if (result.kind === 'share_confirmation') {
     return {
       confirmation: {
@@ -135,7 +143,12 @@ export async function parseDownload(input: string, accessCode?: string, requireC
 }
 
 export async function discardPreparedDownload(taskId: string): Promise<void> {
-  if (isTauriRuntime()) await invoke('discard_prepared_download', { taskId });
+  if (!isTauriRuntime()) return;
+  if (taskId.startsWith('video-page:')) {
+    await invoke('discard_video_preview', { previewId: taskId.slice('video-page:'.length) });
+    return;
+  }
+  await invoke('discard_prepared_download', { taskId });
 }
 
 export async function scanDownloadInputs(input: string): Promise<ScanDownloadResult[]> {
@@ -189,6 +202,19 @@ export async function confirmDownload(taskId: string, selectedIds: string[] = []
   return invoke<QueueTask>('confirm_download_command', { taskId, selectedIds, ...(destinationDirectory ? { destinationDirectory } : {}), ...(privateDownload ? { privateDownload } : {}), ...(postProcessingNote?.trim() ? { postProcessingNote } : {}) });
 }
 
+export async function submitVideoFormats(video: VideoPreview, ids: string[], destinationDirectory: string | undefined, privateDownload: boolean, onCreated: (task: QueueTask) => void, postProcessingNote?: string) {
+  if (!isTauriRuntime()) throw new Error(t('video.error.desktop'));
+  const selected = video.formats.filter(format => ids.includes(format.id));
+  if (!selected.length) throw new Error(t('video.error.formats'));
+  const outcomes = await Promise.allSettled(selected.map(async format => {
+    const task = await invoke<QueueTask>('submit_video_download', { previewId: video.previewId, formatId: format.id, destinationDirectory, privateDownload, postProcessingNote });
+    onCreated(task);
+  }));
+  const failures = outcomes.flatMap((result, i) => result.status === 'rejected' ? [{ selectedId: selected[i].id, message: videoMessage(result.reason) }] : []);
+  if (!failures.length) await discardPreparedDownload('video-page:' + video.previewId).catch(() => undefined);
+  return failures;
+}
+
 export async function setTaskPrivacy(taskId: string, isPrivate: boolean): Promise<QueueTask | undefined> {
   if (!isTauriRuntime()) return undefined;
   return invoke<QueueTask>('set_task_private', { taskId, isPrivate });
@@ -202,7 +228,10 @@ export async function listPersistedTasks(scope?: PersistedTaskScope): Promise<Qu
 
 export async function runTaskAction(taskId: string, action: Extract<TaskCommand, 'pause' | 'resume' | 'cancel' | 'retry' | 'retry_cleanup'>): Promise<TaskActionResult> {
   if (!isTauriRuntime()) return {};
-  return duplicateResult(await invoke<NativeTaskOutcome>('task_action', { taskId, action }));
+  return duplicateResult(await invoke<NativeTaskOutcome>('task_action', { taskId, action }).catch(error => {
+    if (typeof error === 'string' && error.startsWith('video.error.')) throw new Error(videoMessage(error));
+    throw error;
+  }));
 }
 
 export async function openTaskDirectory(taskId: string): Promise<void> {

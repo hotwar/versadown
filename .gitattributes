@@ -1,0 +1,2 @@
+# Keep verbatim upstream license texts byte-for-byte on every platform.
+src-tauri/video-tool-notices/*.txt -text -whitespace

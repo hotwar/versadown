@@ -31,7 +31,7 @@ signing_keychain=""
 signing_dir=""
 cleanup_signing() {
   if [[ -n "$engine_backup" && -d "$engine_backup" ]]; then
-    cp -p "$engine_backup"/aria2-next-*-apple-darwin src-tauri/binaries/
+    cp -pR "$engine_backup/." src-tauri/binaries/
     rm -rf "$engine_backup"
   fi
   if [[ -n "$signing_keychain" ]]; then
@@ -62,18 +62,35 @@ sign_bundled_engines() {
   [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]] || return 0
   trap cleanup_signing EXIT
   engine_backup="$(mktemp -d)"
-  cp -p src-tauri/binaries/aria2-next-*-apple-darwin "$engine_backup/"
+  local tools=(
+    src-tauri/binaries/aria2-next-*-apple-darwin
+    src-tauri/binaries/video-macos/{yt-dlp,ffmpeg,qjs}
+  )
+  local tool rel
+  for tool in "${tools[@]}"; do
+    rel="${tool#src-tauri/binaries/}"
+    mkdir -p "$(dirname "$engine_backup/$rel")"
+    cp -p "$tool" "$engine_backup/$rel"
+  done
   import_signing_certificate
-  local engine
-  for engine in src-tauri/binaries/aria2-next-*-apple-darwin; do
-    codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$engine"
-    codesign --verify --strict "$engine"
+  for tool in "${tools[@]}"; do
+    if [[ "$tool" == */yt-dlp ]]; then
+      codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
+        --entitlements src-tauri/macos/yt-dlp.entitlements.plist "$tool"
+    else
+      codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$tool"
+    fi
+    codesign --verify --strict "$tool"
   done
 }
 
+if [[ "$mode" != quick ]]; then
+  node scripts/prepare-video-tools.mjs
+fi
+
 if [[ "$mode" == release ]]; then
   sign_bundled_engines
-  pnpm exec tauri build --bundles app --ci
+  pnpm exec tauri build --bundles app --config .tools/video-bundle.config.json --ci
   profile=release
 else
   pnpm run build
@@ -82,7 +99,7 @@ else
   cargo build --locked --manifest-path src-tauri/Cargo.toml --features custom-protocol
   [[ "$mode" == quick ]] && exit 0
   sign_bundled_engines
-  pnpm exec tauri bundle --debug --features custom-protocol --bundles app --ci
+  pnpm exec tauri bundle --debug --features custom-protocol --bundles app --config .tools/video-bundle.config.json --ci
   profile=debug
 fi
 
