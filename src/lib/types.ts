@@ -110,6 +110,7 @@ export interface VideoFormat {
   id: string;
   width: number;
   height: number;
+  label?: string | null;
   ext: string;
   bytes: number | null;
   estimated: boolean;

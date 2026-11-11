@@ -18,6 +18,9 @@ const BATCH_SIZE: usize = 64;
 const CACHE_SIZE: usize = 512;
 const CACHE_TTL: Duration = Duration::from_secs(120);
 const OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+// Standalone yt-dlp unpacks its runtime on launch. Cold starts can exceed
+// 10 seconds on macOS; don't silently route a supported page to a file download.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
 const MATCH_ERROR: &str = "video.error.extract";
 
 #[derive(Default)]
@@ -101,7 +104,7 @@ async fn probe(urls: &[&str]) -> Result<HashMap<String, String>, String> {
         };
         tokio::try_join!(write, read, child.wait())
     };
-    let (_, length, status) = tokio::time::timeout(Duration::from_secs(10), read_and_wait)
+    let (_, length, status) = tokio::time::timeout(PROBE_TIMEOUT, read_and_wait)
         .await
         .map_err(|_| MATCH_ERROR)?
         .map_err(|_| MATCH_ERROR)?;

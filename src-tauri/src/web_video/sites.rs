@@ -15,6 +15,23 @@ impl PlaybackPage {
     /// Keep explicit playback URLs (including Bilibili's part number). Only
     /// short links and manually inspected webpages can resolve to another page.
     pub(super) fn resolve(self, reported: Option<&str>) -> Option<Self> {
+        if let Some((_, destination)) = short_link(&self.url) {
+            // Let yt-dlp follow the redirect. Only persist a canonical page
+            // on this platform, never a temporary CDN URL from its metadata.
+            let canonical = reported
+                .and_then(|s| Url::parse(s).ok())
+                .filter(|url| url.domain().is_some_and(|host| {
+                    host == destination || host.ends_with(&format!(".{destination}"))
+                }))
+                .and_then(|url| manual_page(&url));
+            return Some(if let Some(mut page) = canonical {
+                page.site = self.site;
+                page.inspect_embeds = false;
+                page
+            } else {
+                self
+            });
+        }
         let is_short = self.url.host_str() == Some("b23.tv");
         if !is_short && !self.inspect_embeds {
             return Some(self);
@@ -43,13 +60,38 @@ pub(crate) fn playback_url(url: &Url) -> Option<PlaybackPage> {
     {
         return None;
     }
-    FAST_PATHS.iter().find_map(|(site, matcher)| {
-        matcher(url).map(|url| PlaybackPage {
-            site: (*site).into(),
-            url,
-            inspect_embeds: false,
+    FAST_PATHS.iter()
+        .find_map(|(site, matcher)| {
+            matcher(url).map(|url| PlaybackPage {
+                site: (*site).into(),
+                url,
+                inspect_embeds: false,
+            })
         })
-    })
+        .or_else(|| short_link(url).map(|(site, _)| PlaybackPage {
+            site: site.to_owned(),
+            url: url.clone(),
+            inspect_embeds: false,
+        }))
+}
+
+// These official share links have no dedicated rule in yt-dlp 2026.10.26.
+// Route only the short-link endpoints automatically; generic extraction still
+// performs all redirect and media inspection, including access verification.
+fn short_link(url: &Url) -> Option<(&'static str, &'static str)> {
+    let parts: Vec<_> = url.path().trim_matches('/').split('/').collect();
+    if !parts.iter().all(|p| {
+        !p.is_empty() && p.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+    }) {
+        return None;
+    }
+    match (url.host_str()?, parts.as_slice()) {
+        ("v.douyin.com", [_]) => Some(("Douyin", "douyin.com")),
+        ("xhslink.com" | "www.xhslink.com", [_] | ["a" | "o", _]) => {
+            Some(("XiaoHongShu", "xiaohongshu.com"))
+        }
+        _ => None,
+    }
 }
 
 /// URLs that can enter explicit webpage extraction. Protocol handlers, cloud share
@@ -207,6 +249,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn official_short_links_enter_video_flow_and_preserve_page_verification_queries() {
+        for (input, site, canonical) in [
+            ("https://v.douyin.com/abc123/", "Douyin", "https://www.douyin.com/video/1234567890"),
+            ("https://xhslink.com/a/abc123?source=copy", "XiaoHongShu", "https://www.xiaohongshu.com/discovery/item/abc123?xsec_token=test%2Btoken&xsec_source=pc_share"),
+        ] {
+            let page = playback_url(&input.parse().unwrap()).unwrap();
+            assert_eq!(page.site, site);
+            let resolved = page.clone().resolve(Some(canonical)).unwrap();
+            assert_eq!(resolved.url.as_str(), canonical);
+            assert_eq!(resolved.site, site);
+            for unrelated in ["https://cdn.example.org/payload.mp4?token=test", "https://douyin.com.example.org/video/1"] {
+                assert_eq!(page.clone().resolve(Some(unrelated)).unwrap().url.as_str(), input);
+            }
+        }
+        for input in ["https://xhslink.com/", "https://v.douyin.com/", "https://v.douyin.com.example.org/abc123", "https://user:pass@v.douyin.com/abc123"] {
+            assert!(playback_url(&input.parse().unwrap()).is_none(), "{input}");
+        }
+    }
+
+    #[test]
     fn webpage_scan_and_manual_probe_preserve_other_download_handlers() {
         for direct in [
             "ftp://host.example/a",
@@ -241,8 +303,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "exercises the installed yt-dlp executable, without network"]
+    #[ignore = "requires prepared bundled yt-dlp, without network"]
     async fn installed_extractor_classifies_a_mixed_batch_offline() {
+        super::super::extractor::set_resource_dir(std::path::Path::new(env!("CARGO_MANIFEST_DIR")));
         let urls = [
             "https://youtu.be/jNQXAC9IVRw?t=3",
             "https://www.bilibili.com/video/BV1bK411W797?p=2",

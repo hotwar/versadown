@@ -37,11 +37,13 @@ export interface DraftSubmissionFailure {
 type WorkItem = { id: string; generation: number; accessCodeRetry?: boolean; superseded?: string };
 
 function sizeKey(format: VideoFormat): string {
+  if (!format.width && !format.height) return `format:${format.id}`;
   return `${format.width}x${format.height}`;
 }
 
 // Extractor format IDs can change when a preview expires. Keep completed
 // resolutions out of this draft even if the refreshed list uses different IDs.
+// Without dimensions, only an exact format ID identifies the same choice.
 function refreshVideoSelection(result: ParseDownloadResult, previous: DownloadDraftItem): ParseDownloadResult {
   const next = result.confirmation;
   const old = previous.result?.confirmation;

@@ -1,6 +1,7 @@
-"""Download and merge a two-track 1080p fixture using only tools from an installer."""
+"""Check offline site matching and merge a local fixture with installer tools."""
 import functools
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import json
 import os
 from pathlib import Path
 import re
@@ -10,6 +11,40 @@ import tempfile
 import threading
 
 
+def check_site_matching(tools):
+    # This checks the installed extractor's URL contract, not live site availability.
+    fixtures = Path(__file__).resolve().parents[1] / "src-tauri/tests/fixtures"
+    cases = json.loads((fixtures / "video-site-urls.json").read_text(encoding="utf-8"))
+    executable = Path(tools).resolve() / ("yt-dlp.exe" if os.name == "nt" else "yt-dlp")
+    result = subprocess.run(
+        [str(executable), "--ignore-config", "--no-plugin-dirs", "--no-cache-dir",
+         "--encoding", "utf-8", "--list-extractors", "--batch-file", "-"],
+        input="\n".join(case["url"] for case in cases) + "\n",
+        env=dict(os.environ, PATH=""), capture_output=True, text=True, encoding="utf-8", timeout=60)
+    if result.returncode:
+        raise RuntimeError(result.stderr)
+    diagnostic = {"generic", "generic:quoted-html", "DRM", "Piracy", "Liability",
+                  "CommonMistakes", "UnicodeBOM", "youtube:truncated_id", "youtube:truncated_url"}
+    matches = {case["url"]: set() for case in cases}
+    seen = set()
+    extractor = None
+    for line in result.stdout.splitlines():
+        if line.startswith("  "):
+            url = line[2:]
+            seen.add(url)
+            if extractor:
+                matches[url].add(extractor)
+        else:
+            extractor = line if line and line not in diagnostic and not line.endswith(" (CURRENTLY BROKEN)") else None
+    if seen != set(matches):
+        raise AssertionError("yt-dlp did not report every site-matching input")
+    for case in cases:
+        expected = {case["extractor"]} if case["extractor"] else set()
+        if matches[case["url"]] != expected:
+            raise AssertionError(f"{case['site']}: expected {expected}, got {matches[case['url']]}")
+    print(f"Bundled yt-dlp passed {len(cases)} offline site-matching cases; no live availability claim.")
+
+
 def check(tools):
     def tool(name):
         path = tools / (name + (".exe" if os.name == "nt" else ""))
@@ -17,6 +52,7 @@ def check(tools):
             raise FileNotFoundError(path)
         return str(path)
 
+    check_site_matching(tools)
     # Hide runner-installed FFmpeg, JS runtimes and Python from the child processes.
     environment = dict(os.environ, PATH="", NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")
     fixtures = Path(__file__).resolve().parents[1] / "src-tauri/tests/fixtures"

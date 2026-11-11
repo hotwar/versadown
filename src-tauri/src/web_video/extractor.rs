@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -19,6 +19,8 @@ pub(crate) struct VideoFormat {
     pub id: String,
     pub width: u32,
     pub height: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
     pub ext: String,
     pub bytes: Option<u64>,
     pub estimated: bool,
@@ -42,6 +44,7 @@ pub struct VideoPreview {
 struct Format {
     #[serde(default)]
     format_id: String,
+    format_note: Option<String>,
     width: Option<f64>,
     height: Option<f64>,
     ext: Option<String>,
@@ -180,6 +183,7 @@ fn quality(f: &Format, ext: &str, audio: Option<&Format>) -> VideoFormat {
         ),
         width: f.width.unwrap_or_default().round() as u32,
         height: f.height.unwrap_or_default().round() as u32,
+        label: None,
         ext: container.into(),
         bytes: match audio {
             Some(track) => f
@@ -201,6 +205,7 @@ fn choices(raw: &Extracted, can_merge: bool) -> Result<Vec<VideoFormat>, String>
         .filter(|f| f.is_audio_track())
         .collect();
     let mut qualities = BTreeMap::new();
+    let mut unspecified = Vec::new();
     let mut needs_merge = false;
     for f in playable {
         let Some(ext) = f.video_ext() else {
@@ -220,7 +225,22 @@ fn choices(raw: &Extracted, can_merge: bool) -> Result<Vec<VideoFormat>, String>
         } else {
             None
         };
-        let choice = quality(f, ext, track);
+        let mut choice = quality(f, ext, track);
+        if !choice.valid() {
+            continue;
+        }
+        if choice.width == 0 && choice.height == 0 {
+            // Some extractors (e.g. IQIYI) only report quality IDs. They are
+            // distinct selections, not duplicate resolutions. Keep yt-dlp's
+            // quality order and never infer dimensions from an opaque ID.
+            let label = f.format_note.as_deref()
+                .map(str::trim)
+                .filter(|note| !note.is_empty() && !note.chars().any(char::is_control))
+                .unwrap_or(&f.format_id);
+            choice.label = Some(label.chars().take(80).collect());
+            unspecified.push(choice);
+            continue;
+        }
         let key = (choice.height, choice.width);
         // Keep one format per pixel size. Prefer AVC, then frame rate, then yt-dlp's order.
         let codec = f.vcodec.as_deref().unwrap_or_default();
@@ -228,12 +248,12 @@ fn choices(raw: &Extracted, can_merge: bool) -> Result<Vec<VideoFormat>, String>
             codec.starts_with("avc") || codec == "h264",
             f.fps.unwrap_or_default() as u32,
         );
-        if choice.valid() && qualities.get(&key).is_none_or(|(old, _)| rank >= *old) {
+        if qualities.get(&key).is_none_or(|(old, _)| rank >= *old) {
             qualities.insert(key, (rank, choice));
         }
     }
 
-    if qualities.is_empty() {
+    if qualities.is_empty() && unspecified.is_empty() {
         let error = if needs_merge {
             "video.error.ffmpeg"
         } else if raw.has_drm == Some(true) || formats.iter().any(|f| f.has_drm == true) {
@@ -248,6 +268,15 @@ fn choices(raw: &Extracted, can_merge: bool) -> Result<Vec<VideoFormat>, String>
         };
         return Err(error.into());
     }
+    let mut label_counts = HashMap::new();
+    for choice in &unspecified {
+        *label_counts.entry(choice.label.clone()).or_insert(0) += 1;
+    }
+    for choice in &mut unspecified {
+        if label_counts[&choice.label] > 1 {
+            choice.label = Some(format!("{} · {}", choice.label.as_deref().unwrap_or_default(), choice.id));
+        }
+    }
     // DASH and HLS variants sometimes describe the same resolution differently.
     // Prefer the measured rectangle over a matching height- or width-only label.
     let (widths, heights): (HashSet<_>, HashSet<_>) = qualities
@@ -255,9 +284,7 @@ fn choices(raw: &Extracted, can_merge: bool) -> Result<Vec<VideoFormat>, String>
         .filter(|(h, w)| *h > 0 && *w > 0)
         .map(|&(h, w)| (w, h))
         .unzip();
-    let has_other_choices = qualities.len() > 1;
     qualities.retain(|&(h, w), _| match (h, w) {
-        (0, 0) => !has_other_choices,
         (0, width) => !widths.contains(&width),
         (height, 0) => !heights.contains(&height),
         _ => true,
@@ -266,12 +293,14 @@ fn choices(raw: &Extracted, can_merge: bool) -> Result<Vec<VideoFormat>, String>
         .into_values()
         .rev()
         .map(|(_, format)| format)
+        .chain(unspecified.into_iter().rev())
         .collect())
 }
 
 fn preview(page: PlaybackPage, raw: Extracted, can_merge: bool) -> Result<VideoPreview, String> {
     match raw.kind.as_deref() {
-        Some("playlist" | "multi_video" | "compat_list") => {
+        Some("multi_video") => return Err("video.error.multipart".into()),
+        Some("playlist" | "compat_list") => {
             return Err("video.error.collection".into())
         }
         None | Some("video") => (),
@@ -498,10 +527,26 @@ fn classify_message(message: &str) -> &'static str {
     } else if text.contains("requested format is not available") {
         "video.error.formatGone"
     } else if contains(&[
+        "fresh cookies",
+        "cookies are no longer valid",
+        "cookies have expired",
+    ]) {
+        "video.error.session"
+    } else if contains(&[
+        "geo-restricted",
+        "not available from your location",
+        "not available in your country",
+        "not available in your region",
+        "not available in your location",
+        "blocked in your country",
+    ]) {
+        "video.error.region"
+    } else if contains(&[
         "sign in",
         "log in",
         "login",
         "logged-in",
+        "logged in",
         "members-only",
         "members only",
         "not a bot",
@@ -509,7 +554,10 @@ fn classify_message(message: &str) -> &'static str {
         "video.error.restricted"
     } else if text.contains("http error 429") {
         "video.error.rateLimited"
-    } else if contains(&["http error 401", "http error 403", "http error 412"]) {
+    } else if contains(&[
+        "http error 401", "http error 403", "http error 412",
+        "your ip address is blocked",
+    ]) {
         "video.error.accessDenied"
     } else if contains(&[
         "http error 5",
@@ -533,7 +581,6 @@ fn classify_message(message: &str) -> &'static str {
         "private video",
         "not available",
         "http error 404",
-        "geo-restricted",
     ]) {
         "video.error.unavailable"
     } else if contains(&["no video formats", "only images are available"]) {
@@ -787,7 +834,9 @@ mod tests {
             {"format_id":"720","ext":"mp4","height":720.0,"filesize_approx":125.5,"has_drm":"maybe"}
         ]);
         let p = preview(page(), data(formats), true).unwrap();
-        assert_eq!(p.formats.len(), 1);
+        assert_eq!(p.formats.len(), 2);
+        assert_eq!(p.formats[1].id, "default");
+        assert_eq!(p.formats[1].label.as_deref(), Some("default"));
         assert_eq!(
             (
                 &*p.formats[0].id,
@@ -808,7 +857,7 @@ mod tests {
             ),
             (
                 json!({"_type":"multi_video","formats":null}),
-                "video.error.collection",
+                "video.error.multipart",
             ),
             (json!({"_type":"video","_has_drm":true}), "video.error.drm"),
             (
@@ -858,7 +907,52 @@ mod tests {
             .iter()
             .map(|f| (f.width, f.height))
             .collect::<Vec<_>>();
-        assert_eq!(kept, [(0, 720), (426, 240), (320, 240), (720, 0)]);
+        assert_eq!(kept, [(0, 720), (426, 240), (320, 240), (720, 0), (0, 0)]);
+    }
+
+    #[test]
+    fn unnamed_dimensions_keep_every_quality_and_its_exact_selector() {
+        // Shape from IQIYI's vidl formats: no invented resolution or quality mapping.
+        let raw = data(json!([
+            {"format_id":"96","ext":"mp4","protocol":"m3u8_native"},
+            {"format_id":"1","ext":"mp4","protocol":"m3u8_native"},
+            {"format_id":"4","ext":"mp4","protocol":"m3u8_native"},
+            {"format_id":"hls","ext":"mp4","format_note":"Original"}
+        ]));
+        let result = preview(page(), raw, true).unwrap();
+        assert_eq!(result.formats.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(), ["hls", "4", "1", "96"]);
+        assert_eq!(result.formats.iter().map(|f| f.label.as_deref()).collect::<Vec<_>>(), [Some("Original"), Some("4"), Some("1"), Some("96")]);
+        for format in result.formats {
+            assert_eq!((format.width, format.height), (0, 0));
+            assert_eq!(exact_selector(&format.id).unwrap(), format!(r#"all[format_id="{}"]"#, format.id));
+        }
+    }
+
+    #[test]
+    fn duplicate_unknown_quality_labels_remain_distinguishable() {
+        let raw = data(json!([
+            {"format_id":"http-1","ext":"mp4","format_note":"Original"},
+            {"format_id":"hls-2","ext":"mp4","format_note":"Original"}
+        ]));
+        let result = preview(page(), raw, true).unwrap();
+        assert_eq!(result.formats[0].label.as_deref(), Some("Original · hls-2"));
+        assert_eq!(result.formats[1].label.as_deref(), Some("Original · http-1"));
+    }
+
+    #[test]
+    fn site_session_and_location_errors_are_distinct_from_unavailable_media() {
+        for (message, expected) in [
+            ("ERROR: [Douyin] Fresh cookies (not necessarily logged in) are needed", "video.error.session"),
+            ("ERROR: The provided cookies are no longer valid", "video.error.session"),
+            ("ERROR: This video is only available for logged in users", "video.error.restricted"),
+            ("ERROR: This video is not available from your location due to geo restriction", "video.error.region"),
+            ("ERROR: This video is not available in your country", "video.error.region"),
+            ("ERROR: [TikTok] Your IP address is blocked from accessing this post", "video.error.accessDenied"),
+            ("ERROR: This video has been removed", "video.error.unavailable"),
+            ("ERROR: failed to load cookies", "video.error.extract"),
+        ] {
+            assert_eq!(diagnostic(message), expected, "{message}");
+        }
     }
     #[test]
     fn missing_media_url_does_not_create_a_default_stream_or_mask_a_dependency_error() {

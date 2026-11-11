@@ -5,6 +5,7 @@ export function videoResolutionLabel(format: VideoFormat): string {
   if (format.width > 0 && format.height > 0) return `${format.width} × ${format.height}`;
   if (format.height > 0) return `${format.height}p`;
   if (format.width > 0) return t('video.widthOnly', { width: format.width });
+  if (format.label) return t('video.namedQuality', { label: format.label });
   return t('video.unknownResolution');
 }
 

@@ -6,7 +6,8 @@ use std::time::Duration;
 async fn bundled_tools_download_a_public_page_with_audio() {
     extractor::set_resource_dir(Path::new(env!("CARGO_MANIFEST_DIR")));
     let source = std::env::var("VERSADOWN_VIDEO_TEST_URL").expect("provide one public video URL");
-    let page = playback_url(&source.parse().unwrap()).expect("provide a supported playback URL");
+    let page = routing::resolve(&source, true).await.unwrap()
+        .expect("provide a supported playback URL");
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let engine = VideoDownloads::new(store.clone(), 1, |_| {});
@@ -319,6 +320,7 @@ fn confirmation_uses_only_the_source_and_formats_from_that_preview() {
         id: "dash-720+audio".into(),
         width: 1280,
         height: 720,
+        label: None,
         ext: "mp4".into(),
         bytes: None,
         estimated: false,
