@@ -33,7 +33,7 @@ struct AddParams {
 #[derive(Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct TaskParams {
-    #[schemars(length(min = 36, max = 36))]
+    #[schemars(length(min = 1, max = 256))]
     task_id: String,
 }
 
@@ -41,8 +41,9 @@ struct TaskParams {
 #[serde(deny_unknown_fields)]
 struct ListParams {
     status: Option<String>,
-    #[schemars(length(max = 4096))]
+    #[schemars(length(max = 256))]
     query: Option<String>,
+    #[schemars(length(max = 256))]
     parent_id: Option<String>,
     #[schemars(length(max = 4096))]
     cursor: Option<String>,
@@ -227,6 +228,12 @@ mod tests {
             assert!(tool.output_schema.as_ref().unwrap().contains_key("allOf"));
             assert!(tool.output_schema.as_ref().unwrap().contains_key("$defs"));
         }
+        let status = tools.iter().find(|tool| tool.name == "vd_task_status").unwrap();
+        assert_eq!(status.input_schema["properties"]["task_id"]["minLength"],json!(1));
+        assert_eq!(status.input_schema["properties"]["task_id"]["maxLength"],json!(256));
+        let list = tools.iter().find(|tool| tool.name == "vd_task_list").unwrap();
+        assert_eq!(list.input_schema["properties"]["query"]["maxLength"],json!(256));
+        assert_eq!(list.input_schema["properties"]["parent_id"]["maxLength"],json!(256));
         assert!(parse_tool_request("add",json!({"url":"https://example.com/a","directory":"x","request_id":"x","token":"secret"}),"en").is_err());
         assert!(parse_tool_request("health",json!({"command":"cancel"}),"en").is_err());
     }

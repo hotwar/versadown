@@ -3,6 +3,8 @@
 // No existing application process, user database, account, or download is touched.
 // GUI integration below is CDP/Tauri invocation, not manual desktop interaction.
 // MCP coverage uses a real stdio process and a protocol test client, not an LLM app.
+// VD_AGENT_RESTART_ONLY=1 runs the host-crash/restart case without the full matrix.
+// VD_AGENT_UI_CHECK=1 pauses before shutdown for an external native desktop check.
 const assert = require('node:assert/strict');
 const crypto = require('node:crypto');
 const fs = require('node:fs');
@@ -257,22 +259,29 @@ async function main() {
     res.writeHead(range ? 206 : 200, headers);
     if (req.method === 'HEAD') { res.end(); return; }
     if (!req.url.startsWith('/slow')) { res.end(payload.subarray(start, end + 1)); return; }
+    const nativeFixture = req.url.startsWith('/slow-native');
+    const restartFixture = req.url.startsWith('/slow-restart');
+    const chunkSize = nativeFixture ? 8192 : restartFixture ? 16384 : 32768;
     let offset = start;
     const timer = setInterval(() => {
-      const next = Math.min(offset + 32768, end + 1);
+      const next = Math.min(offset + chunkSize, end + 1);
       res.write(payload.subarray(offset, next));
       offset = next;
       if (offset > end) { clearInterval(timer); res.end(); }
-    }, 40);
+    }, nativeFixture ? 100 : restartFixture ? 50 : 40);
     res.on('close', () => clearInterval(timer));
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   const origin = `http://127.0.0.1:${server.address().port}`;
-  let host, spawnError, target;
+  let host, spawnError, target, debugPort;
+  let hostGeneration = 0;
   const ownedMcp = [];
-  try {
-    const debugPort = await availablePort();
-    const hostLog = fs.openSync(path.join(root, 'host.log'), 'a');
+  const startOwnedHost = async () => {
+    spawnError = undefined;
+    target = undefined;
+    debugPort = await availablePort();
+    const hostLogName = hostGeneration++ === 0 ? 'host.log' : `host-restart-${hostGeneration - 1}.log`;
+    const hostLog = fs.openSync(path.join(root, hostLogName), 'a');
     try {
       host = spawn(hostBinary, [], {
         cwd: artifacts, windowsHide: true, stdio: ['ignore', hostLog, hostLog], env: { ...env,
@@ -296,6 +305,9 @@ async function main() {
       } catch { return false; }
     });
     assert(target, 'Manager GUI must render');
+  };
+  try {
+    await startOwnedHost();
     const invoke = (command, args = {}) => evaluate(target, `window.__TAURI_INTERNALS__.invoke(${JSON.stringify(command)}, ${JSON.stringify(args)})`);
     const initialSettings = await invoke('get_settings');
     assert.equal(initialSettings.agentAccess.enabled, false, 'Fresh profiles must default to disabled');
@@ -318,6 +330,106 @@ async function main() {
     assert.equal(health.capabilities.private_tasks, false);
     assert(health.capabilities.operations.includes('result'));
     pass('isolated host default-off authorization and real download engine health');
+
+    const verifyHostRestart = async () => {
+      const previousHealth = await success('health');
+      const previousConnection = { ...connection };
+      const restartArgs = ['add', `${origin}/slow-restart.bin`, '--directory', directory, '--request-id', 'host-crash-restart'];
+      const task = await success(...restartArgs);
+      const before = await until('restart fixture has transferred bytes and remains in flight', async () => {
+        const current = await status(task.id);
+        return current.status === 'downloading' && current.completed_length >= 262144
+          && current.completed_length < payload.length && current;
+      });
+      const previousHost = host;
+      const oldPid = previousHost.pid;
+      // This is a crash boundary, intentionally bypassing normal exit/session
+      // flushing. The helper only targets this script's host and descendants.
+      terminateOwnedProcessTree(previousHost);
+      await until('crashed fixture host exits', () => previousHost.exitCode !== null || previousHost.signalCode !== null, 10000);
+      target = undefined;
+      await startOwnedHost();
+      await until('restarted host publishes new credentials', () => {
+        if (!fs.existsSync(discovery)) return false;
+        try {
+          const candidate = JSON.parse(fs.readFileSync(discovery, 'utf8'));
+          if (candidate.token === previousConnection.token) return false;
+          connection = candidate;
+          return true;
+        } catch { return false; }
+      });
+      const restoredHealth = await until('restarted host engine becomes available', async () => {
+        const response = await cli('health');
+        return response.code === 0 && response.json.data?.engine_available && response.json.data;
+      });
+      assert.notEqual(restoredHealth.instance_id, previousHealth.instance_id);
+      const replayed = await success(...restartArgs);
+      assert.equal(replayed.id, task.id, 'Restarted idempotency replay must return the durable task');
+      const replayedAgain = await success(...restartArgs);
+      assert.equal(replayedAgain.id, task.id);
+      const matching = (await success('list', '--query', 'slow-restart.bin', '--limit', '100')).tasks;
+      assert.deepEqual(matching.map(item => item.id), [task.id], 'Restart must not create a duplicate task');
+      await success('--timeout', '40', 'wait', task.id);
+      const result = await success('result', task.id);
+      assert.equal(result.files.length, 1);
+      assert.equal(path.resolve(result.files[0].path), path.join(directory, 'slow-restart.bin'));
+      assert.equal(result.files[0].exists, true);
+      assert.equal(digest(fs.readFileSync(result.files[0].path)), digest(payload));
+      const retainedOutputs = fs.readdirSync(directory).filter(name => name.startsWith('slow-restart.bin'));
+      assert.deepEqual(retainedOutputs, ['slow-restart.bin'], 'Crash recovery must not leave duplicate outputs/checkpoints after completion');
+      pass('owned host/engine crash and same-profile restart preserve task, request and file', {
+        taskId: task.id, oldPid, newPid: host.pid, bytesBeforeCrash: before.completed_length,
+        previousInstance: previousHealth.instance_id, restoredInstance: restoredHealth.instance_id,
+        sha256: digest(payload), evidence: 'real process-tree termination and restart; no synthetic crash hook',
+      });
+    };
+
+    const waitForNativeCheck = async () => {
+      if (process.env.VD_AGENT_UI_CHECK !== '1') return;
+      const task = await success('add', `${origin}/slow-native.bin`, '--directory', directory, '--request-id', 'native-ui-check');
+      await until('native fixture has transferred bytes', async () => (await status(task.id)).completed_length > 0);
+      await success('pause', task.id);
+      await waitStatus(task.id, 'paused');
+      const snapshot = await invoke('manager_window_snapshot');
+      if (!snapshot.visible || snapshot.minimized) {
+        await invoke('activate_launcher_menu_for_test', { action: 'launcher.hide_manager' });
+      }
+      const shown = await invoke('manager_window_snapshot');
+      assert.equal(shown.visible, true, 'Native verification fixture window must be visible');
+      assert.equal(shown.minimized, false);
+      const readyPath = path.join(root, 'native-ready.json');
+      const markerPath = path.join(root, 'native-done.marker');
+      assert.equal(fs.existsSync(markerPath), false, 'Native completion marker must be created by the external check');
+      fs.writeFileSync(readyPath, JSON.stringify({
+        host_pid: host.pid, host_binary: hostBinary, profile: data, output_directory: directory,
+        task_id: task.id, task_name: 'slow-native.bin', discovery_path: discovery, debug_port: debugPort,
+        ready_at: new Date().toISOString(), completion_marker: markerPath, timeout_seconds: 180,
+        evidence: 'Fixture prepared and window shown via CDP; external native interaction must be recorded separately',
+      }, null, 2));
+      console.log(`NATIVE_READY ${readyPath}`);
+      await until('external native desktop verification marker', () => fs.existsSync(markerPath), 180000);
+      const after = await status(task.id);
+      fs.writeFileSync(path.join(root, 'native-after.json'), JSON.stringify({ task: after, marker_received_at: new Date().toISOString() }, null, 2));
+      pass('external native verification handoff marker received', {
+        taskId: task.id, statusAfter: after.status, readyPath,
+        evidence: 'Marker only; external native screenshots/actions are separate evidence',
+      });
+    };
+
+    const shutDownOwnedHost = async () => {
+      await invoke('activate_launcher_menu_for_test', { action: 'launcher.quit' });
+      await until('owned host exits', () => host.exitCode !== null, 20000);
+      assert.equal(host.exitCode, 0);
+      await failure('HOST_UNAVAILABLE', 3, 'health');
+      pass('graceful isolated host shutdown and stale discovery');
+    };
+
+    if (process.env.VD_AGENT_RESTART_ONLY === '1') {
+      await verifyHostRestart();
+      await waitForNativeCheck();
+      await shutDownOwnedHost();
+      return;
+    }
     if (process.env.VD_TEST_INTERRUPT_ONLY === '1') {
       const task = await success('add', `${origin}/slow-interrupt.bin`, '--directory', directory, '--request-id', 'interrupt-only');
       await until('interrupt fixture has transferred bytes', async () => (await status(task.id)).completed_length > 0);
@@ -534,6 +646,8 @@ async function main() {
       sha256: digest(payload), client: 'JSON-RPC acceptance client; not an LLM desktop client',
     });
 
+    await verifyHostRestart();
+
     // Use the real shell parsers, including a Chinese directory and spaces.
     const ps = process.env.VD_TEST_PWSH || 'powershell.exe';
     const psQuote = value => "'" + value.replaceAll("'", "''") + "'";
@@ -556,11 +670,8 @@ async function main() {
       assert.equal(result.code, 2); assert.equal(JSON.parse(result.stdout).error.code, 'INVALID_ARGUMENT');
     }
     pass('PowerShell/cmd/Git Bash Chinese paths, JSON and nonzero exits');
-    await invoke('activate_launcher_menu_for_test', { action: 'launcher.quit' });
-    await until('owned host exits', () => host.exitCode !== null, 20000);
-    assert.equal(host.exitCode, 0);
-    await failure('HOST_UNAVAILABLE', 3, 'health');
-    pass('graceful isolated host shutdown and stale discovery');
+    await waitForNativeCheck();
+    await shutDownOwnedHost();
   } finally {
     for (const session of ownedMcp) {
       terminateOwnedProcessTree(session.child);
