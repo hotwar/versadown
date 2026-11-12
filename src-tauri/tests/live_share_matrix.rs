@@ -69,6 +69,7 @@ struct MatrixContext {
 struct MatrixTransport {
     inner: ReqwestTransport,
     uc_case: Option<String>,
+    uc_token: std::sync::Mutex<Option<String>>,
 }
 
 impl MatrixTransport {
@@ -78,6 +79,7 @@ impl MatrixTransport {
             uc_case: (case.provider == CloudProvider::Uc
                 && std::env::var("VERSADOWN_LIVE_UC_DIAGNOSTICS").as_deref() == Ok("1"))
             .then(|| case.id.clone()),
+            uc_token: std::sync::Mutex::new(None),
         })
     }
 
@@ -126,6 +128,14 @@ impl MatrixTransport {
             Ok(response) => {
                 let json: serde_json::Value =
                     serde_json::from_str(&response.body).unwrap_or_default();
+                if phase == "uc-share-token" {
+                    if let Some(token) = json.pointer("/data/stoken").and_then(|v| v.as_str()) {
+                        let mut previous = self.uc_token.lock().expect("diagnostic token state");
+                        let changed = previous.as_deref().map(|old| old != token);
+                        println!("LIVE_UC_CONTEXT case={case} phase={phase} token_changed={changed:?}");
+                        *previous = Some(token.to_owned());
+                    }
+                }
                 let code = json["code"]
                     .as_i64()
                     .map(|code| code.to_string())
@@ -141,10 +151,53 @@ impl MatrixTransport {
                     .pointer("/data/csrf_token")
                     .and_then(serde_json::Value::as_str)
                     .is_some_and(|value| !value.is_empty());
+                let message = json["message"]
+                    .as_str()
+                    .or_else(|| json["error"].as_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase();
+                let tags = [
+                    ("parameter", ["参数", "parameter"]),
+                    ("folder", ["目录", "文件夹"]),
+                    ("missing", ["不存在", "missing"]),
+                    ("permission", ["权限", "permission"]),
+                    ("verification", ["验证", "verify"]),
+                    ("login", ["登录", "login"]),
+                    ("risk", ["风控", "risk"]),
+                    ("quota", ["空间", "quota"]),
+                    ("busy", ["繁忙", "频繁"]),
+                    ("transfer", ["转存", "保存"]),
+                    ("self", ["自己", "own"]),
+                    ("invalid", ["非法", "invalid"]),
+                    ("expired", ["失效", "expired"]),
+                ]
+                .iter()
+                .filter(|(_, words)| words.iter().any(|word| message.contains(*word)))
+                .map(|(tag, _)| *tag)
+                .collect::<Vec<_>>()
+                .join("-");
+                // Chinese-only diagnostic text cannot contain the ASCII
+                // cookie/token/URL values that a provider might echo.
+                let chinese_message: String = message
+                    .chars()
+                    .filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c))
+                    .take(80)
+                    .collect();
+                let is_owner = ["/data/is_owner", "/data/share/is_owner", "/is_owner"]
+                    .iter()
+                    .filter_map(|path| json.pointer(path))
+                    .find_map(|value| value.as_bool().or_else(|| match value.as_i64() {
+                        Some(0) => Some(false),
+                        Some(1) => Some(true),
+                        _ => None,
+                    }));
                 println!(
-                    "LIVE_SHARE case={case} provider=uc phase={phase} state=http-{}-code-{code}-header_csrf-{header_csrf}-cookie_csrf-{cookie_csrf}-issued_csrf-{issued_cookie_csrf}-json_csrf-{json_csrf} resources=0 bytes=0",
+                    "LIVE_SHARE case={case} provider=uc phase={phase} state=http-{}-code-{code}-header_csrf-{header_csrf}-cookie_csrf-{cookie_csrf}-issued_csrf-{issued_cookie_csrf}-json_csrf-{json_csrf}-tags-{tags} resources=0 bytes=0",
                     response.status,
                 );
+                if !chinese_message.is_empty() || is_owner.is_some() {
+                    println!("LIVE_UC_DETAIL case={case} phase={phase} owner={is_owner:?} message_zh={chinese_message}");
+                }
             }
             Err(error) => println!(
                 "LIVE_SHARE case={case} provider=uc phase={phase} state={} resources=0 bytes=0",
@@ -157,6 +210,18 @@ impl MatrixTransport {
 impl CloudHttpTransport for MatrixTransport {
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
         let state = self.uc_request_state(&request);
+        if let (Some(case), Some((phase, _, _))) = (&self.uc_case, &state) {
+            let transfer_cookie = request
+                .headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("cookie"))
+                .is_some_and(|(_, cookie)| cookie.split(';').any(|pair| {
+                    pair.trim().split_once('=').is_some_and(|(name, value)| {
+                        name == "UDRIVE_TRANSFER_SESS" && !value.is_empty()
+                    })
+                }));
+            println!("LIVE_UC_CONTEXT case={case} phase={phase} transfer_session={transfer_cookie}");
+        }
         let response = self.inner.send(request);
         self.report_uc(state, response.as_ref());
         response

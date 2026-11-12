@@ -8,6 +8,7 @@
 cargo test --locked --manifest-path src-tauri/Cargo.toml --lib parser::tests
 cargo test --locked --manifest-path src-tauri/Cargo.toml --test parser_policy
 cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::share::tests
+cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::uc::tests
 pnpm exec vitest run src/components/useDownloadDraftBatch.test.tsx src/components/NewDownloadDialog.test.tsx src/components/ParseConfirmDialog.test.tsx src/lib/api.test.ts --exclude '.worktrees/**'
 ```
 
@@ -50,7 +51,9 @@ cargo test --locked --manifest-path src-tauri/Cargo.toml --test live_share_matri
 
 此步骤按服务商需要将文件保存到当前账号，每例最多选择一个文件、读取最多 64 KiB，并保留加密转存记录供重复运行复用。它不建立生产下载任务，也不删除云文件。`inspect-report.json` 与 `range-report.json` 只记录案例、网盘、阶段、状态、资源数与字节数；筛选单例可设置 `VERSADOWN_LIVE_SHARE_CASE`。
 
-UC 返回需要网页授权时，可另设 `VERSADOWN_LIVE_UC_DIAGNOSTICS=1`，记录接口分类、HTTP 状态、业务码及必要授权字段是否存在。诊断不输出字段值、Cookie 或签名下载地址。缺少分享取链所需会话信息时，应通过 VD 的官方网页授权恢复，再重跑该案例。
+UC 返回需要网页授权时，可另设 `VERSADOWN_LIVE_UC_DIAGNOSTICS=1`，记录接口分类、HTTP 状态、业务码及必要授权字段是否存在。诊断不输出字段值、Cookie 或签名下载地址。诊断应区分本地接口判断与服务端实际拒绝：基础登录有效时，不应仅因缺少可选字段而要求重新授权；服务端明确要求登录或验证时，再通过 VD 官方网页授权恢复并重跑该案例。
+
+UC 分享通过转存和个人 `file/download` 接口取链，不调用不存在的 `share/sharepage/download`。刷新分享 `stoken` 后，需从所选文件的父目录重新取得对应 `share_fid_token`，使用配套的令牌保存文件。取回的文件令牌必须精确匹配选中 `fid`；找不到文件时停止，不转存其他对象。已保存的文件继续通过精确转存记录复用。
 
 ## 放行口径
 
