@@ -208,7 +208,7 @@ async function main() {
   const request = (command, extra = {}) => ({ command, lang: 'en', ...extra });
   const verifyInterrupt = async id => {
     const arguments = [
-      '-NoProfile', '-File', path.join(__dirname, 'verify-cli-interrupt.ps1'),
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(__dirname, 'verify-cli-interrupt.ps1'),
       '-CliBinary', cliBinary, '-Discovery', discovery, '-TaskId', id, '-ResultDirectory', root,
     ];
     if (process.env.VD_TEST_INHERIT_CTRL_C_IGNORE === '1') arguments.push('-InheritIgnore');
