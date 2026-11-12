@@ -89,6 +89,7 @@ jobs:
       - name: Check parser and startup failure handling
         run: |
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib parser::
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --test live_share_matrix --no-run
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib staged_torrent
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib enforces_each_provider_share_code_constraint_before_submitting
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::baidu::tests::share_transfer_
