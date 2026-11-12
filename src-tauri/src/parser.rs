@@ -60,9 +60,9 @@ pub fn extract_cloud_share_candidate(
     input: &str,
     entered_access_code: Option<&str>,
 ) -> Result<Option<CloudShareCandidate>, ShareInputError> {
-    let candidates = extract_candidates(input);
+    let candidates = extract_candidate_spans(input);
     let has_invalid_share = candidates.iter().any(|candidate| {
-        let Ok(url) = Url::parse(&candidate.uri) else {
+        let Ok(url) = Url::parse(&candidate.source) else {
             return false;
         };
         registered_share_provider(&url).is_some_and(|provider| {
@@ -70,22 +70,26 @@ pub fn extract_cloud_share_candidate(
                 || valid_share_id(&url, provider).is_none()
         })
     });
-    let values = candidates
-        .into_iter()
-        .filter_map(CloudShareCandidate::from_candidate)
-        .collect::<Vec<_>>();
+    let mut values = Vec::new();
+    for (index, candidate) in candidates.iter().enumerate() {
+        let Some(mut value) =
+            CloudShareCandidate::from_candidate(classify_input(&candidate.source))
+        else {
+            continue;
+        };
+        value.access_code = value.access_code.or_else(|| {
+            candidate_text_access_code(input, &candidates, index).map(|(_, code)| code.to_owned())
+        });
+        if !values.contains(&value) {
+            values.push(value);
+        }
+    }
     match values.as_slice() {
         [] if has_invalid_share => Err(ShareInputError::InvalidShare),
         [] => Ok(None),
-        [value] => {
-            let inferred_access_code = value
-                .access_code
-                .clone()
-                .or_else(|| access_code_from_text(input));
-            Ok(Some(value.clone().with_access_code(
-                entered_access_code.or(inferred_access_code.as_deref()),
-            )?))
-        }
+        [value] => Ok(Some(value.clone().with_access_code(
+            entered_access_code.or(value.access_code.as_deref()),
+        )?)),
         _ => Err(ShareInputError::MultipleLinks),
     }
 }
@@ -132,22 +136,19 @@ fn valid_share_id(url: &Url, provider: CloudProvider) -> Option<&str> {
 }
 
 fn access_code_from_query(url: &Url) -> Option<String> {
-    url.query()?.split('&').find_map(|pair| {
-        let (name, value) = pair.split_once('=')?;
-        is_access_code_parameter(name).then(|| value.to_string())
-    })
+    url.query_pairs()
+        .find_map(|(name, value)| is_access_code_parameter(&name).then(|| value.into_owned()))
 }
 
 fn is_access_code_parameter(name: &str) -> bool {
     matches!(name.to_ascii_lowercase().as_str(), "pwd" | "passcode")
 }
 
-fn access_code_from_text(input: &str) -> Option<String> {
-    Regex::new(r"(?i)(?:提取码|访问码|access\s*code)\s*[:：]\s*([a-z0-9]+)")
-        .expect("static access code pattern")
-        .captures(input)
-        .and_then(|captures| captures.get(1))
-        .map(|value| value.as_str().to_string())
+fn access_code_from_text(input: &str) -> Option<(&str, &str)> {
+    let pattern = Regex::new(r"(?i)(?:提取码|访问码|access\s*code)\s*[:：]\s*([a-z0-9]+)")
+        .expect("static access code pattern");
+    let captures = pattern.captures(input)?;
+    Some((captures.get(0)?.as_str(), captures.get(1)?.as_str()))
 }
 
 fn normalize_access_code(value: &str) -> Result<String, ShareInputError> {
@@ -279,7 +280,7 @@ pub fn extract_candidates(text: &str) -> Vec<Candidate> {
 }
 
 pub fn scan_download_inputs(text: &str) -> Vec<ScannedInput> {
-    let values = extract_raw_candidates(text);
+    let values = extract_candidate_spans(text);
     if values.is_empty() {
         let input = text.trim().to_string();
         return match validate_download_input(&input) {
@@ -288,11 +289,31 @@ pub fn scan_download_inputs(text: &str) -> Vec<ScannedInput> {
         };
     }
     values
-        .into_iter()
-        .map(|input| match validate_download_input(&input) {
-            Ok(candidate) => ScannedInput::valid(candidate),
-            Err(error) => ScannedInput::invalid(input, error),
-        })
+        .iter()
+        .enumerate()
+        .map(
+            |(index, value)| match validate_download_input(&value.source) {
+                Ok(candidate) => {
+                    let mut scanned = ScannedInput::valid(candidate);
+                    // Batch preparation consumes only `input`, so preserve a code
+                    // from this share's copy text instead of dropping it here.
+                    if let Some(share) =
+                        CloudShareCandidate::from_candidate(classify_input(&value.source))
+                    {
+                        if share.access_code.is_none() {
+                            if let Some((copy_text, _)) =
+                                candidate_text_access_code(text, &values, index)
+                            {
+                                scanned.input.push(' ');
+                                scanned.input.push_str(copy_text);
+                            }
+                        }
+                    }
+                    scanned
+                }
+                Err(error) => ScannedInput::invalid(value.source.clone(), error),
+            },
+        )
         .collect()
 }
 
@@ -420,28 +441,126 @@ fn validated(kind: CandidateKind, source: String) -> ValidatedCandidate {
 }
 
 fn extract_raw_candidates(text: &str) -> Vec<String> {
+    extract_candidate_spans(text)
+        .into_iter()
+        .map(|value| value.source)
+        .collect()
+}
+
+struct CandidateSpan {
+    source: String,
+    start: usize,
+    end: usize,
+}
+
+fn candidate_text_access_code<'a>(
+    text: &'a str,
+    candidates: &[CandidateSpan],
+    index: usize,
+) -> Option<(&'a str, &'a str)> {
+    let start = candidates[index].end;
+    let end = candidates
+        .get(index + 1)
+        .map_or(text.len(), |value| value.start);
+    access_code_from_text(&text[start..end]).or_else(|| {
+        // A single share also supports copy text putting its code before the
+        // URL. With several links only their trailing text may supply a code.
+        (candidates.len() == 1)
+            .then(|| access_code_from_text(text))
+            .flatten()
+    })
+}
+
+fn extract_candidate_spans(text: &str) -> Vec<CandidateSpan> {
     let pattern = Regex::new(
         r#"(?i)(ed2k:[^\s<>；]*?\|/|magnet:[^\s<>；]*|thunder://[^\s<>；]*|ftp:[^\s<>；]+|https?://[^\s<>；]+|file://[^\s<>；]+|"/[^"\r\n]+\.torrent"|'/[^'\r\n]+\.torrent'|[a-z]:\\[^\r\n<>]*?\.torrent|/[^\s<>；"']+\.torrent)"#,
     )
     .expect("static candidate pattern");
-    text.lines()
-        .flat_map(|line| match local_torrent_paths_in_line(line) {
-            Some(paths) => paths,
-            None => pattern
+    let masked = mask_markdown_link_labels(text);
+    let mut values = Vec::new();
+    let mut offset = 0;
+    for line in masked.split_inclusive('\n') {
+        if let Some(paths) = local_torrent_paths_in_line(line) {
+            for source in paths {
+                let start = offset + line.find(&source).unwrap_or(0);
+                values.push(CandidateSpan {
+                    end: start + source.len(),
+                    source,
+                    start,
+                });
+            }
+        } else {
+            for found in pattern
                 .find_iter(line)
-                .filter(|match_| !is_url_like_path_start(line, match_))
-                .map(|match_| {
-                    let raw = match_.as_str();
-                    let candidate = if raw.starts_with("\"/") || raw.starts_with("'/") {
-                        &raw[1..raw.len() - 1]
-                    } else {
-                        raw
-                    };
-                    trim_extracted_candidate(candidate)
-                })
-                .collect(),
-        })
-        .collect()
+                .filter(|value| !is_url_like_path_start(line, value))
+            {
+                let raw = found.as_str();
+                let quoted = raw.starts_with("\"/") || raw.starts_with("'/");
+                let start = offset + found.start() + usize::from(quoted);
+                let candidate = if quoted { &raw[1..raw.len() - 1] } else { raw };
+                let source = trim_extracted_candidate(candidate);
+                values.push(CandidateSpan {
+                    end: start + source.len(),
+                    source,
+                    start,
+                });
+            }
+        }
+        offset += line.len();
+    }
+    values
+}
+
+/// Hide Markdown labels and delimiters while keeping byte offsets and the
+/// destination URL intact. A URL used as both label and target is one link.
+fn mask_markdown_link_labels(text: &str) -> String {
+    let mut masked = text.as_bytes().to_vec();
+    for (separator, _) in text.match_indices("](") {
+        let Some(label_start) = text[..separator].rfind('[') else {
+            continue;
+        };
+        if text[label_start..separator].contains(['\r', '\n']) {
+            continue;
+        }
+        let token_start = text[..label_start]
+            .char_indices()
+            .rev()
+            .find(|(_, character)| character.is_whitespace())
+            .map_or(0, |(index, character)| index + character.len_utf8());
+        if text[token_start..label_start].contains("://") {
+            // Brackets inside a raw URL's query are data, not Markdown.
+            continue;
+        }
+        let target_start = separator + 2;
+        let mut depth = 1;
+        let mut target_end = None;
+        for (index, character) in text[target_start..].char_indices() {
+            match character {
+                '\r' | '\n' => break,
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        target_end = Some(target_start + index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(target_end) = target_end else {
+            continue;
+        };
+        let target = &text[target_start..target_end];
+        if target.chars().any(char::is_whitespace)
+            || !Url::parse(target).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+        {
+            continue;
+        }
+        masked[label_start..target_start].fill(b' ');
+        masked[target_end] = b' ';
+    }
+    String::from_utf8(masked).expect("only complete Markdown labels were masked")
 }
 
 fn ends_with_torrent(value: &str) -> bool {
@@ -514,6 +633,24 @@ fn local_torrent_paths_in_line(line: &str) -> Option<Vec<String>> {
 }
 
 fn trim_extracted_candidate(value: &str) -> String {
+    // Cloud share IDs are ASCII. Some official copy text places the access
+    // code label directly after the ID without whitespace (notably UC).
+    // Only split a structurally valid, queryless share prefix; never rewrite
+    // an arbitrary URL's signed query or a Unicode file path.
+    let marker = Regex::new(r"(?i)(?:提取码|访问码|access\s*code)\s*[:：]")
+        .expect("static access code label pattern");
+    let value = marker
+        .find(value)
+        .and_then(|marker| {
+            let prefix = &value[..marker.start()];
+            let url = Url::parse(prefix).ok()?;
+            let provider = cloud_provider_for_url(&url)?;
+            (url.query().is_none()
+                && url.fragment().is_none()
+                && valid_share_id(&url, provider).is_some())
+            .then_some(prefix)
+        })
+        .unwrap_or(value);
     let has_signed_component = Url::parse(value).ok().is_some_and(|url| {
         matches!(url.scheme(), "http" | "https" | "ftp")
             && (url.query().is_some() || url.fragment().is_some())
@@ -665,6 +802,150 @@ mod tests {
             assert_eq!(value.provider, provider);
             assert_eq!(value.access_code.as_deref(), Some("1234"));
             assert_eq!(value.url, input.split_whitespace().next().unwrap());
+        }
+    }
+
+    fn share_copy_samples() -> Vec<(
+        &'static str,
+        CloudProvider,
+        &'static str,
+        Option<&'static str>,
+    )> {
+        vec![
+            ("通过百度网盘分享的文件：video.mp4\n链接：https://pan.baidu.com/s/1sample_Baidu?pwd=2468\n【提供下载、保存到网盘】", CloudProvider::Baidu, "https://pan.baidu.com/s/1sample_Baidu?pwd=2468", Some("2468")),
+            ("迅雷网盘\nhttps://pan.xunlei.com/s/sample_XunleiOne\n提取码：7abc 复制这段内容后打开 App", CloudProvider::Xunlei, "https://pan.xunlei.com/s/sample_XunleiOne", Some("7abc")),
+            ("链接：https://pan.xunlei.com/s/sample_XunleiTwo?pwd=def9# 复制这段内容后打开 App", CloudProvider::Xunlei, "https://pan.xunlei.com/s/sample_XunleiTwo?pwd=def9#", Some("def9")),
+            ("阿里\n图书.pdf\nhttps://www.alipan.com/s/sampleAli\n【仅支持保存到网盘】", CloudProvider::Aliyun, "https://www.alipan.com/s/sampleAli", None),
+            ("来自UC网盘分享文件：视频。链接：https://drive.uc.cn/s/sampleUcOne提取码：AbcD\n【提供下载、保存到网盘】", CloudProvider::Uc, "https://drive.uc.cn/s/sampleUcOne", Some("AbcD")),
+            ("来自UC网盘分享文件：不要密码\n链接：https://drive.uc.cn/s/sampleUcTwo?public=1", CloudProvider::Uc, "https://drive.uc.cn/s/sampleUcTwo?public=1", None),
+            ("我用夸克网盘给你分享了文件。\n链接：https://pan.quark.cn/s/sampleQuarkOne\n提取码：eFgh", CloudProvider::Quark, "https://pan.quark.cn/s/sampleQuarkOne", Some("eFgh")),
+            ("我用夸克网盘给你分享了文件。\n链接：https://pan.quark.cn/s/sampleQuarkTwo", CloudProvider::Quark, "https://pan.quark.cn/s/sampleQuarkTwo", None),
+        ]
+    }
+
+    #[test]
+    fn share_copy_samples_round_trip_through_batch_scan_without_losing_codes() {
+        let samples = share_copy_samples();
+        let input = samples
+            .iter()
+            .map(|sample| sample.0)
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        let scanned = scan_download_inputs(&input);
+        assert_eq!(scanned.len(), samples.len());
+        for (item, (original, provider, url, code)) in scanned.iter().zip(samples) {
+            assert!(item.valid, "{original}");
+            for input in [original, item.input.as_str()] {
+                let candidate = extract_cloud_share_candidate(input, None).unwrap().unwrap();
+                assert_eq!(candidate.provider, provider);
+                assert_eq!(candidate.url, url);
+                assert_eq!(candidate.access_code.as_deref(), code);
+            }
+        }
+    }
+
+    #[test]
+    fn markdown_share_link_uses_destination_once_and_preserves_query_bytes() {
+        let url = "https://pan.baidu.com/s/sample?pwd=%32%34%36%38&signature=a%2Fb+z.";
+        let input = format!("链接：[{url}]({url})");
+        let scanned = scan_download_inputs(&input);
+        assert_eq!(scanned.len(), 1);
+        assert!(scanned[0].valid);
+        let value = extract_cloud_share_candidate(&input, None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(value.url, url);
+        assert_eq!(value.access_code.as_deref(), Some("2468"));
+        assert_eq!(extract_candidates(&input)[0].uri, url);
+    }
+
+    #[test]
+    fn markdown_batch_keeps_distinct_shares_and_their_own_access_codes() {
+        let input = "[https://pan.quark.cn/s/one](https://pan.quark.cn/s/one) 提取码：a1B2\n[第二项](https://drive.uc.cn/s/two) 提取码：c3D4";
+        let scanned = scan_download_inputs(input);
+        assert_eq!(scanned.len(), 2);
+        for (item, code) in scanned.iter().zip(["a1B2", "c3D4"]) {
+            assert!(item.valid);
+            let value = extract_cloud_share_candidate(&item.input, None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(value.access_code.as_deref(), Some(code));
+        }
+        assert_eq!(
+            extract_cloud_share_candidate(input, None),
+            Err(ShareInputError::MultipleLinks)
+        );
+    }
+
+    #[test]
+    fn sharing_text_code_never_leaks_into_a_preceding_share() {
+        let input = "https://www.alipan.com/s/noCode\nhttps://pan.quark.cn/s/withCode\n提取码：Ab12\nhttps://drive.uc.cn/s/noCode?public=1";
+        let scanned = scan_download_inputs(input);
+        let codes: Vec<_> = scanned
+            .iter()
+            .map(|item| {
+                extract_cloud_share_candidate(&item.input, None)
+                    .unwrap()
+                    .unwrap()
+                    .access_code
+            })
+            .collect();
+        assert_eq!(codes, [None, Some("Ab12".into()), None]);
+    }
+
+    #[test]
+    fn scan_preserves_the_copied_access_code_label() {
+        for label in ["访问码: aB12", "access code: aB12"] {
+            let input = format!("{label}\nhttps://pan.baidu.com/s/example");
+            let scanned = scan_download_inputs(&input);
+            assert_eq!(
+                scanned[0].input,
+                format!("https://pan.baidu.com/s/example {label}")
+            );
+            assert_eq!(
+                extract_cloud_share_candidate(&scanned[0].input, None)
+                    .unwrap()
+                    .unwrap()
+                    .access_code
+                    .as_deref(),
+                Some("aB12")
+            );
+        }
+    }
+
+    #[test]
+    fn scan_does_not_interpret_a_signed_query_as_markdown() {
+        let url =
+            "https://example.test/a.zip?signature=[label](https://example.test/value)&other=abc'";
+        let scanned = scan_download_inputs(url);
+        assert_eq!(scanned.len(), 1);
+        assert!(scanned[0].valid);
+        assert_eq!(scanned[0].input, url);
+    }
+
+    #[test]
+    fn query_access_code_is_decoded_once_and_explicit_entry_takes_precedence() {
+        let input =
+            "https://pan.baidu.com/s/sample?pwd=%32%34%36%38&signature=%2F+abc 提取码：other";
+        let candidate = extract_cloud_share_candidate(input, None).unwrap().unwrap();
+        assert_eq!(candidate.access_code.as_deref(), Some("2468"));
+        assert_eq!(candidate.url, input.split_whitespace().next().unwrap());
+        assert_eq!(
+            extract_cloud_share_candidate(input, Some("Edit12"))
+                .unwrap()
+                .unwrap()
+                .access_code
+                .as_deref(),
+            Some("Edit12")
+        );
+        for encoded in ["%2536", "%0d%0a", "%2B", "%FF"] {
+            assert_eq!(
+                extract_cloud_share_candidate(
+                    &format!("https://pan.baidu.com/s/sample?pwd={encoded}"),
+                    None
+                ),
+                Err(ShareInputError::InvalidAccessCode)
+            );
         }
     }
 
