@@ -812,13 +812,13 @@ mod tests {
         Option<&'static str>,
     )> {
         vec![
-            ("通过百度网盘分享的文件：video.mp4\n链接：https://pan.baidu.com/s/1sample_Baidu?pwd=6164\n【提供下载、保存到网盘】", CloudProvider::Baidu, "https://pan.baidu.com/s/1sample_Baidu?pwd=6164", Some("6164")),
-            ("迅雷网盘\nhttps://pan.xunlei.com/s/sample_XunleiOne\n提取码：5zpw 复制这段内容后打开 App", CloudProvider::Xunlei, "https://pan.xunlei.com/s/sample_XunleiOne", Some("5zpw")),
-            ("链接：https://pan.xunlei.com/s/sample_XunleiTwo?pwd=xwh8# 复制这段内容后打开 App", CloudProvider::Xunlei, "https://pan.xunlei.com/s/sample_XunleiTwo?pwd=xwh8#", Some("xwh8")),
+            ("通过百度网盘分享的文件：video.mp4\n链接：https://pan.baidu.com/s/1sample_Baidu?pwd=2468\n【提供下载、保存到网盘】", CloudProvider::Baidu, "https://pan.baidu.com/s/1sample_Baidu?pwd=2468", Some("2468")),
+            ("迅雷网盘\nhttps://pan.xunlei.com/s/sample_XunleiOne\n提取码：7abc 复制这段内容后打开 App", CloudProvider::Xunlei, "https://pan.xunlei.com/s/sample_XunleiOne", Some("7abc")),
+            ("链接：https://pan.xunlei.com/s/sample_XunleiTwo?pwd=def9# 复制这段内容后打开 App", CloudProvider::Xunlei, "https://pan.xunlei.com/s/sample_XunleiTwo?pwd=def9#", Some("def9")),
             ("阿里\n图书.pdf\nhttps://www.alipan.com/s/sampleAli\n【仅支持保存到网盘】", CloudProvider::Aliyun, "https://www.alipan.com/s/sampleAli", None),
-            ("来自UC网盘分享文件：视频。链接：https://drive.uc.cn/s/sampleUcOne提取码：LycE\n【提供下载、保存到网盘】", CloudProvider::Uc, "https://drive.uc.cn/s/sampleUcOne", Some("LycE")),
+            ("来自UC网盘分享文件：视频。链接：https://drive.uc.cn/s/sampleUcOne提取码：AbcD\n【提供下载、保存到网盘】", CloudProvider::Uc, "https://drive.uc.cn/s/sampleUcOne", Some("AbcD")),
             ("来自UC网盘分享文件：不要密码\n链接：https://drive.uc.cn/s/sampleUcTwo?public=1", CloudProvider::Uc, "https://drive.uc.cn/s/sampleUcTwo?public=1", None),
-            ("我用夸克网盘给你分享了文件。\n链接：https://pan.quark.cn/s/sampleQuarkOne\n提取码：pDcd", CloudProvider::Quark, "https://pan.quark.cn/s/sampleQuarkOne", Some("pDcd")),
+            ("我用夸克网盘给你分享了文件。\n链接：https://pan.quark.cn/s/sampleQuarkOne\n提取码：eFgh", CloudProvider::Quark, "https://pan.quark.cn/s/sampleQuarkOne", Some("eFgh")),
             ("我用夸克网盘给你分享了文件。\n链接：https://pan.quark.cn/s/sampleQuarkTwo", CloudProvider::Quark, "https://pan.quark.cn/s/sampleQuarkTwo", None),
         ]
     }
@@ -846,7 +846,7 @@ mod tests {
 
     #[test]
     fn markdown_share_link_uses_destination_once_and_preserves_query_bytes() {
-        let url = "https://pan.baidu.com/s/sample?pwd=%36%31%36%34&signature=a%2Fb+z.";
+        let url = "https://pan.baidu.com/s/sample?pwd=%32%34%36%38&signature=a%2Fb+z.";
         let input = format!("链接：[{url}]({url})");
         let scanned = scan_download_inputs(&input);
         assert_eq!(scanned.len(), 1);
@@ -855,7 +855,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(value.url, url);
-        assert_eq!(value.access_code.as_deref(), Some("6164"));
+        assert_eq!(value.access_code.as_deref(), Some("2468"));
         assert_eq!(extract_candidates(&input)[0].uri, url);
     }
 
@@ -926,9 +926,9 @@ mod tests {
     #[test]
     fn query_access_code_is_decoded_once_and_explicit_entry_takes_precedence() {
         let input =
-            "https://pan.baidu.com/s/sample?pwd=%36%31%36%34&signature=%2F+abc 提取码：other";
+            "https://pan.baidu.com/s/sample?pwd=%32%34%36%38&signature=%2F+abc 提取码：other";
         let candidate = extract_cloud_share_candidate(input, None).unwrap().unwrap();
-        assert_eq!(candidate.access_code.as_deref(), Some("6164"));
+        assert_eq!(candidate.access_code.as_deref(), Some("2468"));
         assert_eq!(candidate.url, input.split_whitespace().next().unwrap());
         assert_eq!(
             extract_cloud_share_candidate(input, Some("Edit12"))
