@@ -8,6 +8,11 @@ mod build_info;
 pub mod cloud;
 mod cloud_directory_events;
 mod commands;
+mod cli_protocol;
+mod cli_service;
+mod cli_host;
+mod cli_dispatch;
+mod agent_access;
 mod connectors;
 mod downloader;
 mod duplicates;
@@ -469,6 +474,21 @@ pub fn run() {
                 baidu_range_gateway,
                 xunlei_native_backend,
             });
+            let authorization_app = app.handle().clone();
+            let dispatch_state = app.state::<commands::AppState>();
+            let cli_dispatcher = cli_dispatch::CliDispatcher::start(
+                std::sync::Arc::clone(&dispatch_state.store),
+                std::sync::Arc::clone(&dispatch_state.runtime),
+                std::sync::Arc::new(move |path| {
+                    let state = authorization_app.state::<commands::AppState>();
+                    agent_access::authorize_file(&state, path).is_ok()
+                }),
+            );
+            app.manage(cli_dispatcher);
+            if cli_host::start(app.handle(), &data_dir).is_err() {
+                // Do not disclose filesystem paths or credentials in diagnostics.
+                eprintln!("{}", cli_protocol::message("HOST_UNAVAILABLE", "en"));
+            }
             #[cfg(target_os = "macos")]
             app.set_menu(launcher::macos_application_menu(app.handle())?)?;
             app.manage(launcher::LauncherInteractionState::new(
@@ -579,6 +599,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            agent_access::configure_agent_access,
             build_info::get_build_info,
             startup::startup_health,
             web_video::submit_video_download,

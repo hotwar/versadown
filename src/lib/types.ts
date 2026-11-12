@@ -200,6 +200,11 @@ export interface Aria2Settings {
   p2pUploadLimit: number;
 }
 
+export interface AgentAccessSettings {
+  enabled: boolean;
+  allowedDirectories: string[];
+}
+
 export interface AppSettings {
   downloadDirectory: string;
   launcherVisibility: LauncherVisibility;
@@ -212,6 +217,7 @@ export interface AppSettings {
   associateDownloadLinks?: boolean;
   privacyDownloadEnabled?: boolean;
   privacyPasswordConfigured?: boolean;
+  agentAccess?: AgentAccessSettings;
   cloudUploadLimit?: number;
 }
 

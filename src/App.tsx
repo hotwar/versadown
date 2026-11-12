@@ -19,6 +19,8 @@ import { EngineStatusToast } from './components/EngineStatusBanner';
 import { StartupNotice } from './components/StartupNotice';
 import { cancelDownloadFile, checkForAppUpdate, configurePrivacyDownload, confirmCloudShareDownload, confirmDownload, submitVideoFormats, defaultSettings, deleteTasks, discardPreparedDownload, getDownloadEngineState, getPrivacyTaskVisibility, getSettings, isTauriRuntime, listAiModels, listPersistedTasks, lockPrivacyTasks, openExternalUrl, openTaskDirectory, openTaskFile, parseDownload, playTaskVideos, resolveDuplicateDownload, retryDownloadEngine, runTaskAction, scanDownloadInputs, selectDownloadFiles, setTaskPrivacy, syncMainWindowIcon, takeExternalLinks, unlockPrivacyTasks, updateAiSettings, updateSettings } from './lib/api';
 import * as cloudApi from './lib/cloudApi';
+import { configureAgentAccess } from './lib/api';
+import type { AgentAccessSettings } from './lib/types';
 import { createTaskUpdateMerger, subscribeToDownloadEvents, type TaskSnapshotScope } from './lib/downloadEvents';
 import { downloadErrorMessage, isPrivateTask, normalizeQueueTask, normalizeQueueTasks } from './lib/queueTask';
 import { sendDownloadNotification, shouldNotifyTask } from './lib/downloadNotifications';
@@ -924,6 +926,19 @@ export function App() {
     return saved;
   }
 
+  async function saveAgentConfiguration(configuration: AgentAccessSettings) {
+    try {
+      const saved = await configureAgentAccess(configuration);
+      setSettings(saved);
+      return saved;
+    } catch (error) {
+      // A failed host refresh revokes access. Reflect that actual policy in
+      // the form instead of leaving the previous enabled grant on screen.
+      await getSettings().then(setSettings).catch(() => undefined);
+      throw error;
+    }
+  }
+
   async function togglePrivacyVisibility() {
     if (privacyVisibility.unlocked) {
       setPrivacyVisibility(await lockPrivacyTasks());
@@ -1803,7 +1818,7 @@ export function App() {
           </section>
         </section>}
         <section className="view-panel" hidden={view !== 'cloud'}><CloudWorkspace client={cloudClient} activePage={cloudPage} onPageChange={setCloudPage} onProvidersChange={setAuthorizedCloudProviders} onDownloadTask={acceptCloudDownload} privacyDownloadEnabled={settings.privacyDownloadEnabled ?? false} /></section>
-        {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} onNotice={setNotice} configurePrivacyDownload={savePrivacyConfiguration} /></section>}
+        {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} onNotice={setNotice} configurePrivacyDownload={savePrivacyConfiguration} configureAgentAccess={saveAgentConfiguration} /></section>}
         {view === 'about' && <section className="view-panel" aria-label={t('about.title')}><AboutPanel icon={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} update={appUpdate} onOpenUpdate={(update) => { void openExternalUrl(update.downloadUrl).catch(() => undefined); }} /></section>}
       </div>
       {import.meta.env.DEV && <BuildIdentityFooter />}

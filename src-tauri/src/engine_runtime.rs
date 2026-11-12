@@ -469,6 +469,7 @@ impl EngineRuntime {
             .into_iter()
             .filter(|task| {
                 task.aria_gid.is_some()
+                    && !self.store.cli_dispatch_pending(task.id).unwrap_or(true)
                     && !crate::cloud::download_dispatch::is_cloud_download_source(&task.source)
                     && !crate::xunlei_native::is_native_gid(task.aria_gid.as_deref())
                     && matches!(task.status, TaskStatus::Queued | TaskStatus::Downloading)
@@ -900,6 +901,7 @@ impl EngineRuntime {
             return;
         };
         for mut task in tasks {
+            if self.store.cli_dispatch_pending(task.id).unwrap_or(true) { continue; }
             if matches!(task.kind.as_str(), "ftp" | "web_video") {
                 continue;
             }

@@ -35,12 +35,14 @@ Describe 'Resolve-VersaDownBuildTool' {
 }
 
 Describe 'Get-VersaDownBuildTools' {
-    It 'uses the verified Cargo and pnpm locations for this workspace' {
+    It 'prefers configured PATH pnpm when it is available' {
         $projectRoot = Split-Path -Parent $PSScriptRoot
 
         $tools = Get-VersaDownBuildTools -ProjectRoot $projectRoot
 
         $tools.Cargo | Should Be (Get-Item -LiteralPath (Join-Path $env:USERPROFILE '.cargo\bin\cargo.exe')).FullName
-        $tools.Pnpm | Should Be (Get-Item -LiteralPath (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\fallback\pnpm.cmd')).FullName
+        $pathPnpm = (Get-Command pnpm.cmd -ErrorAction SilentlyContinue).Source
+        $expectedPnpm = if ($pathPnpm) { $pathPnpm } else { Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\fallback\pnpm.cmd' }
+        $tools.Pnpm | Should Be (Get-Item -LiteralPath $expectedPnpm).FullName
     }
 }

@@ -33,6 +33,8 @@ pub enum StoreError {
     InvalidStoredStatus,
     #[error("invalid video transfer engine stored in database")]
     InvalidStoredVideoEngine,
+    #[error("invalid persisted CLI execution intent")]
+    InvalidCliIntent,
     #[error("cannot transition task from {from:?} to {to:?}")]
     InvalidTransition { from: TaskStatus, to: TaskStatus },
     #[error("value for {field} is outside SQLite's signed 64-bit range")]
@@ -48,6 +50,22 @@ pub enum StoreError {
 pub struct TaskStore {
     connection: Mutex<Connection>,
     leaf_gates: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// Request identity is independent of the ordinary source duplicate policy.
+pub(crate) enum CliCreateOutcome {
+    Created(DownloadTask),
+    Replayed(DownloadTask),
+    Conflict,
+    Duplicate,
+    Busy,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CliDispatchIntent {
+    pub task_id: Uuid,
+    pub gid: String,
+    pub options: crate::UriSubmissionOptions,
 }
 
 impl TaskStore {
@@ -400,6 +418,17 @@ impl TaskStore {
             );",
         )?;
         migrate(&mut connection)?;
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS cli_requests (
+            request_id TEXT PRIMARY KEY NOT NULL,
+            fingerprint TEXT NOT NULL,
+            task_id TEXT NOT NULL
+        );")?;
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS cli_dispatch_intents (
+            task_id TEXT PRIMARY KEY NOT NULL,
+            gid TEXT NOT NULL UNIQUE,
+            options_json TEXT NOT NULL,
+            dispatched INTEGER NOT NULL DEFAULT 0
+        );")?;
         connection.execute_batch("CREATE TABLE IF NOT EXISTS cloud_download_accounts (id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL, account_id TEXT NOT NULL);")?;
         let schema = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         schema.execute_batch("CREATE TABLE IF NOT EXISTS video_task_formats (
@@ -425,6 +454,164 @@ impl TaskStore {
     pub fn create(&self, new_task: NewTask) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         Self::create_with_connection(&connection, new_task)
+    }
+
+    /// Commit the task and request receipt together, before contacting an engine.
+    /// Receipts survive task deletion so a retry can never create a second task.
+    pub(crate) fn create_cli_task(
+        &self,
+        request_id: &str,
+        fingerprint: &str,
+        new_task: NewTask,
+    ) -> Result<CliCreateOutcome, StoreError> {
+        self.create_cli_task_inner(request_id, fingerprint, new_task, None)
+    }
+
+    /// The execution intent and reserved engine identity are committed in the
+    /// same transaction as the receipt. No engine RPC is needed for acceptance.
+    pub(crate) fn create_cli_task_with_intent(
+        &self,
+        request_id: &str,
+        fingerprint: &str,
+        new_task: NewTask,
+        options: &crate::UriSubmissionOptions,
+    ) -> Result<CliCreateOutcome, StoreError> {
+        if options.directory.as_ref().is_none_or(|path| !path.is_absolute())
+            || options.allow_overwrite || options.continue_download
+            || new_task.kind != "file" || new_task.is_private
+        {
+            return Err(StoreError::InvalidCliIntent);
+        }
+        self.create_cli_task_inner(request_id, fingerprint, new_task, Some(options))
+    }
+
+    fn create_cli_task_inner(
+        &self,
+        request_id: &str,
+        fingerprint: &str,
+        new_task: NewTask,
+        options: Option<&crate::UriSubmissionOptions>,
+    ) -> Result<CliCreateOutcome, StoreError> {
+        let mut connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.transaction()?;
+        let receipt: Option<(String, String)> = transaction.query_row(
+            "SELECT fingerprint, task_id FROM cli_requests WHERE request_id = ?1",
+            [request_id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        if let Some((previous, id)) = receipt {
+            if previous != fingerprint {
+                return Ok(CliCreateOutcome::Conflict);
+            }
+            let id = Uuid::parse_str(&id).map_err(|_| StoreError::InvalidStoredStatus)?;
+            return Ok(CliCreateOutcome::Replayed(find_with_connection(&transaction, id)?));
+        }
+        let duplicate: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE source = ?1 AND kind = ?2 AND status != 'recycled')",
+            params![new_task.source, new_task.kind], |row| row.get(0),
+        )?;
+        if duplicate {
+            return Ok(CliCreateOutcome::Duplicate);
+        }
+        if options.is_some() {
+            let pending: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM cli_dispatch_intents i JOIN tasks t ON t.id=i.task_id
+                 WHERE i.dispatched=0 AND t.status IN ('queued','paused')",
+                [], |row| row.get(0),
+            )?;
+            if pending >= 1000 { return Ok(CliCreateOutcome::Busy); }
+        }
+        let mut task = Self::create_with_connection(&transaction, new_task)?;
+        transaction.execute(
+            "INSERT INTO cli_requests(request_id, fingerprint, task_id) VALUES (?1, ?2, ?3)",
+            params![request_id, fingerprint, task.id.to_string()],
+        )?;
+        if let Some(options) = options {
+            // aria2 accepts a caller-selected, nonzero 16-hex-digit GID.
+            // Bind before addUri so restart recovery never imports this job
+            // as an unrelated external task if the response is lost.
+            let gid = format!("{:016x}", (task.id.as_u128() >> 64) as u64);
+            let options = serde_json::to_string(options).map_err(|_| StoreError::InvalidCliIntent)?;
+            transaction.execute(
+                "INSERT INTO cli_dispatch_intents(task_id,gid,options_json) VALUES (?1,?2,?3)",
+                params![task.id.to_string(), gid, options],
+            )?;
+            transaction.execute(
+                "UPDATE tasks SET aria_gid=?1,status='queued' WHERE id=?2",
+                params![gid, task.id.to_string()],
+            )?;
+            task = find_with_connection(&transaction, task.id)?;
+        }
+        transaction.commit()?;
+        Ok(CliCreateOutcome::Created(task))
+    }
+
+    pub(crate) fn cli_dispatch_pending(&self, id: Uuid) -> Result<bool, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cli_dispatch_intents WHERE task_id=?1 AND dispatched=0)",
+            [id.to_string()], |row| row.get(0),
+        )?)
+    }
+
+    pub(crate) fn cli_intent_directory(&self, id: Uuid) -> Result<Option<std::path::PathBuf>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let value: Option<String> = connection.query_row(
+            "SELECT options_json FROM cli_dispatch_intents WHERE task_id=?1 AND dispatched=0",
+            [id.to_string()], |row| row.get(0),
+        ).optional()?;
+        value.map(|value| serde_json::from_str::<crate::UriSubmissionOptions>(&value)
+            .map(|options| options.directory).map_err(|_| StoreError::InvalidCliIntent))
+            .transpose().map(Option::flatten)
+    }
+
+    pub(crate) fn pending_cli_intents(&self) -> Result<Vec<CliDispatchIntent>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let mut statement = connection.prepare(
+            "SELECT i.task_id,i.gid,i.options_json FROM cli_dispatch_intents i
+             JOIN tasks t ON t.id=i.task_id WHERE i.dispatched=0 ORDER BY t.created_at,t.id",
+        )?;
+        let rows = statement.query_map([], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+        )))?;
+        rows.map(|row| {
+            let (id, gid, options) = row?;
+            Ok(CliDispatchIntent {
+                task_id: Uuid::parse_str(&id).map_err(|_| StoreError::InvalidCliIntent)?,
+                gid,
+                options: serde_json::from_str(&options).map_err(|_| StoreError::InvalidCliIntent)?,
+            })
+        }).collect()
+    }
+
+    pub(crate) fn finish_cli_dispatch(&self, id: Uuid) -> Result<(), StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        connection.execute("UPDATE cli_dispatch_intents SET dispatched=1 WHERE task_id=?1", [id.to_string()])?;
+        Ok(())
+    }
+
+    /// Called under the dispatcher's gate, before any engine submission.
+    pub(crate) fn control_pending_cli(
+        &self, id: Uuid, action: crate::DownloadAction,
+    ) -> Result<Option<DownloadTask>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let pending: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cli_dispatch_intents WHERE task_id=?1 AND dispatched=0)",
+            [id.to_string()], |row| row.get(0),
+        )?;
+        if !pending { return Ok(None); }
+        let task = find_with_connection(&connection, id)?;
+        if !matches!(task.status, TaskStatus::Queued | TaskStatus::Paused | TaskStatus::Cancelled) {
+            return Ok(Some(task));
+        }
+        let next = match (task.status, action) {
+            (TaskStatus::Cancelled, _) => TaskStatus::Cancelled,
+            (_, crate::DownloadAction::Pause) => TaskStatus::Paused,
+            (_, crate::DownloadAction::Resume) => TaskStatus::Queued,
+            (_, crate::DownloadAction::Cancel) => TaskStatus::Cancelled,
+        };
+        connection.execute("UPDATE tasks SET status=?1,updated_at=?2 WHERE id=?3",
+            params![next.as_db(), current_timestamp(), id.to_string()])?;
+        Ok(Some(find_with_connection(&connection, id)?))
     }
 
     pub(crate) fn create_video(&self, task: NewTask, selector: &str, media_id: &str) -> Result<DownloadTask, StoreError> {

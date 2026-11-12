@@ -4,6 +4,15 @@ version = "0.2.13"
 description = "Local-first universal download manager"
 authors = ["VersaDown Build"]
 edition = "2021"
+default-run = "versadown"
+
+[[bin]]
+name = "vd-cli"
+path = "src/bin/vd-cli.rs"
+
+[[bin]]
+name = "vd-mcp-server"
+path = "src/bin/vd-mcp-server.rs"
 
 [lib]
 name = "versadown_lib"
@@ -19,6 +28,8 @@ tauri-plugin-opener = "2"
 tauri-plugin-clipboard-manager = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+schemars = "=1.2.3"
+rmcp = { version = "=3.9.0", default-features = false, features = ["server", "transport-io"] }
 regex = "1"
 quick-xml = "0.42"
 rusqlite = { version = "0.32", features = ["bundled"] }
@@ -40,7 +51,7 @@ md5 = "0.8"
 url = "2"
 percent-encoding = "2"
 suppaftp = { version = "11", default-features = false, features = ["tokio"] }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "fs", "process", "test-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util", "fs", "process", "test-util", "signal"] }
 rand = "0.8"
 rsa = "0.9"
 tokio-tungstenite = "0.28"
@@ -49,6 +60,9 @@ tauri-plugin-notification = "2"
 libloading = "0.7"
 tauri-plugin-single-instance = "2"
 tempfile = "3"
+
+[dev-dependencies]
+rmcp = { version = "=3.9.0", default-features = false, features = ["client", "server", "transport-io"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
@@ -59,7 +73,7 @@ webkit2gtk = "2.0.2"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38.2"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Controls", "Win32_UI_Shell"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Storage_FileSystem", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Controls", "Win32_UI_Shell", "Win32_Security_Authorization", "Win32_System_Console"] }
 winreg = "0.55"
 
 [target.'cfg(target_os = "macos")'.dependencies]

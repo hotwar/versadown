@@ -1,4 +1,4 @@
-import { AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, PrivacyTaskVisibility, QueueTask, ScanDownloadResult, TaskActionResult, TaskCommand } from './types';
+import { AgentAccessSettings, AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, PrivacyTaskVisibility, QueueTask, ScanDownloadResult, TaskActionResult, TaskCommand } from './types';
 import { videoConfirmation, videoMessage } from './webVideo';
 import type { VideoPreview } from './types';
 import { Channel, invoke } from '@tauri-apps/api/core';
@@ -306,6 +306,7 @@ export const defaultSettings: AppSettings = {
   deleteTransferredShareFilesAfterDownload: true,
   privacyDownloadEnabled: false,
   privacyPasswordConfigured: false,
+  agentAccess: { enabled: false, allowedDirectories: [] },
   cloudUploadLimit: 0,
   downloadStatusNotifications: true,
   associateDownloadLinks: true
@@ -339,6 +340,17 @@ export async function configurePrivacyDownload(enabled: boolean, currentPassword
     currentPassword: currentPassword || null,
     newPassword: newPassword || null
   });
+}
+
+export async function configureAgentAccess(settings: AgentAccessSettings): Promise<AppSettings> {
+  if (!isTauriRuntime()) throw new Error(t('settings.agent.error.desktopRequired'));
+  try {
+    return await invoke<AppSettings>('configure_agent_access', { settings });
+  } catch (error) {
+    const key = typeof error === 'string' && error.startsWith('settings.agent.error.')
+      ? error as TranslationKey : 'settings.agent.error.save';
+    throw new Error(t(key));
+  }
 }
 
 export async function getPrivacyTaskVisibility(): Promise<PrivacyTaskVisibility> {

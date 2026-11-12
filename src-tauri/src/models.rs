@@ -153,6 +153,8 @@ pub struct AppSettings {
     pub privacy_download_enabled: bool,
     #[serde(default)]
     pub privacy_password_configured: bool,
+    #[serde(default)]
+    pub agent_access: crate::agent_access::AgentAccessSettings,
 }
 
 const fn default_delete_transferred_share_files_after_download() -> bool {
@@ -182,6 +184,7 @@ impl Default for AppSettings {
             associate_download_links: true,
             privacy_download_enabled: false,
             privacy_password_configured: false,
+            agent_access: Default::default(),
         }
     }
 }

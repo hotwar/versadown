@@ -15,6 +15,23 @@ afterEach(() => {
   Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
 });
 
+it('uses the dedicated Agent authorization command and translates safe backend errors', async () => {
+  const { configureAgentAccess, defaultSettings } = await import('./api');
+  const settings = { enabled: true, allowedDirectories: ['C:\\Downloads'] };
+  native.invoke.mockResolvedValueOnce({ ...defaultSettings, agentAccess: settings });
+  await expect(configureAgentAccess(settings)).resolves.toMatchObject({ agentAccess: settings });
+  expect(native.invoke).toHaveBeenCalledWith('configure_agent_access', { settings });
+  native.invoke.mockRejectedValueOnce('settings.agent.error.invalidDirectory');
+  await expect(configureAgentAccess(settings)).rejects.toThrow('每个授权目录都必须是已存在的绝对目录');
+});
+
+it('does not simulate a successful Agent grant in browser previews', async () => {
+  const { configureAgentAccess } = await import('./api');
+  Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+  await expect(configureAgentAccess({ enabled: true, allowedDirectories: ['C:\\Downloads'] })).rejects.toThrow('桌面程序');
+  expect(native.invoke).not.toHaveBeenCalled();
+});
+
 it('classifies ED2K, FTP, HLS and DASH in the browser fallback', async () => {
   const { parseLocally } = await import('./api');
 

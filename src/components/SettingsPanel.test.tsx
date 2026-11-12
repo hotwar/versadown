@@ -118,9 +118,11 @@ it('shows the rate-limit helper and the privacy and aria2 diagnostic description
   expect(screen.getByText('（0为不限速）')).toBeVisible();
   await user.click(screen.getByRole('tab', { name: '高级' }));
   const descriptions = Array.from(container.querySelectorAll('.settings-content small'));
-  expect(descriptions).toHaveLength(2);
-  expect(descriptions[0]).toHaveTextContent('保存 aria2 引擎和本地 RPC 调试日志');
-  expect(descriptions[1]).toHaveTextContent('私密任务只会在本次应用会话解锁后显示；下载文件本身不会加密。');
+  expect(descriptions).toHaveLength(4);
+  expect(descriptions.map(item => item.textContent)).toEqual(expect.arrayContaining([
+    expect.stringContaining('保存 aria2 引擎和本地 RPC 调试日志'),
+    '私密任务只会在本次应用会话解锁后显示；下载文件本身不会加密。'
+  ]));
 });
 
 it('saves a custom directory on blur without a separate save button', async () => {
