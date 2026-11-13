@@ -32,7 +32,13 @@ async fn bundled_tools_download_a_public_page_with_audio() {
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let engine = VideoDownloads::new(store.clone(), 1, |_| {});
     let started = std::time::Instant::now();
-    let preview = engine.prepare(page, proxy.as_deref()).await.unwrap();
+    let options = VideoOptions {
+        proxy,
+        cookie_file: std::env::var_os("VERSADOWN_VIDEO_TEST_COOKIES")
+            .filter(|value| !value.is_empty()).map(PathBuf::from),
+        ..Default::default()
+    };
+    let preview = engine.prepare(page, &options).await.unwrap();
     println!("VD-TEST-PREVIEW {}", serde_json::to_string(&preview).unwrap());
     let requested = std::env::var("VERSADOWN_VIDEO_TEST_FORMAT").ok();
     let choice = match requested.as_ref() {
@@ -58,8 +64,7 @@ async fn bundled_tools_download_a_public_page_with_audio() {
             directory.path(),
             false,
             None,
-            proxy,
-            0,
+            options,
         )
         .await
         .unwrap();
@@ -188,7 +193,7 @@ async fn public_pages_download_with_selected_resolution_and_audio() {
         let source = &entry.input;
         assert_eq!(entry.kind, Some(crate::CandidateKind::WebVideo), "{source}");
         let page = routing::resolve(source, true).await.unwrap().expect(source);
-        let preview = engine.prepare(page, None).await.expect(source);
+        let preview = engine.prepare(page, &VideoOptions::default()).await.expect(source);
         println!(
             "{} · {} · {:?}",
             preview.site,
@@ -214,11 +219,9 @@ async fn public_pages_download_with_selected_resolution_and_audio() {
                     directory.path(),
                     false,
                     None,
-                    None,
-                    if preview.site == "Bilibili" {
-                        96_000
-                    } else {
-                        0
+                    VideoOptions {
+                        rate: if preview.site == "Bilibili" { 96_000 } else { 0 },
+                        ..Default::default()
                     },
                 )
                 .await
@@ -246,7 +249,7 @@ async fn public_pages_download_with_selected_resolution_and_audio() {
                     "Paused after {} bytes; resuming the same task",
                     paused.completed_length
                 );
-                engine.start(paused, None, 0).await.unwrap();
+                engine.start(paused, VideoOptions::default()).await.unwrap();
             }
             submitted.push((task.id, choice));
         }
@@ -267,7 +270,7 @@ async fn public_pages_download_with_selected_resolution_and_audio() {
                 {
                     retried_network = true;
                     println!("Retrying transient network failure for {}", task.name);
-                    engine.start(task, None, 0).await.unwrap();
+                    engine.start(task, VideoOptions::default()).await.unwrap();
                     continue;
                 }
                 assert_ne!(
@@ -507,6 +510,7 @@ async fn a_manually_probed_article_downloads_its_embedded_video() {
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let engine = VideoDownloads::new(store.clone(), 1, |_| {});
     let url = "http://embedded.example.test/article";
+    let options = VideoOptions { proxy: Some(proxy), ..Default::default() };
     let scanned = routing::scan(url).await;
     assert!(scanned[0].can_probe_video);
     assert_eq!(scanned[0].kind, Some(crate::CandidateKind::Direct));
@@ -515,11 +519,11 @@ async fn a_manually_probed_article_downloads_its_embedded_video() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        engine.prepare(empty, Some(&proxy)).await.unwrap_err(),
+        engine.prepare(empty, &options).await.unwrap_err(),
         "video.error.unsupported"
     );
     let page = routing::resolve(url, true).await.unwrap().unwrap();
-    let preview = engine.prepare(page, Some(&proxy)).await.unwrap();
+    let preview = engine.prepare(page, &options).await.unwrap();
     let choice = &preview.formats[0];
     let task = engine
         .submit(
@@ -528,8 +532,7 @@ async fn a_manually_probed_article_downloads_its_embedded_video() {
             dir.path(),
             false,
             None,
-            Some(proxy),
-            0,
+            options,
         )
         .await
         .unwrap();

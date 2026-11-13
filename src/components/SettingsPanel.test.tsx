@@ -114,7 +114,8 @@ it('shows the rate-limit helper and the privacy and aria2 diagnostic description
 
   expect(container.querySelectorAll('.settings-content small')).toHaveLength(0);
   await user.click(screen.getByRole('tab', { name: '网络' }));
-  expect(container.querySelectorAll('.settings-content small')).toHaveLength(1);
+  expect(container.querySelectorAll('.settings-content small')).toHaveLength(2);
+  expect(screen.getByText(/仅使用你选择的 Netscape cookies.txt 文件/)).toBeVisible();
   expect(screen.getByText('（0为不限速）')).toBeVisible();
   await user.click(screen.getByRole('tab', { name: '高级' }));
   const descriptions = Array.from(container.querySelectorAll('.settings-content small'));
@@ -418,6 +419,65 @@ it('lets users restore a hidden floating ball from the main settings', async () 
   await user.selectOptions(screen.getByRole('combobox', { name: '悬浮球显示' }), 'always');
 
   expect(onChange).toHaveBeenLastCalledWith({ ...initial, launcherVisibility: 'always' });
+});
+
+it('opens the cookie picker only on request and saves the selected file', async () => {
+  const user = userEvent.setup();
+  const onChange = vi.fn().mockResolvedValue(undefined);
+  const browseVideoCookieFile = vi.fn().mockResolvedValue('C:\\Cookies\\video-session.txt');
+  render(<SettingsPanel initial={initial} onChange={onChange} browseVideoCookieFile={browseVideoCookieFile} />);
+  await user.click(screen.getByRole('tab', { name: '网络' }));
+
+  expect(browseVideoCookieFile).not.toHaveBeenCalled();
+  expect(onChange).not.toHaveBeenCalled();
+  expect(screen.getByRole('textbox', { name: 'Cookie 文件路径' })).toHaveValue('');
+  await user.click(screen.getByRole('button', { name: '选择 Cookie 文件' }));
+
+  await waitFor(() => expect(onChange).toHaveBeenLastCalledWith({ ...initial, videoCookieFile: 'C:\\Cookies\\video-session.txt' }));
+  expect(browseVideoCookieFile).toHaveBeenCalledWith('');
+  expect(screen.getByRole('textbox', { name: 'Cookie 文件路径' })).toHaveValue('C:\\Cookies\\video-session.txt');
+  await user.click(screen.getByRole('button', { name: '保存限速设置' }));
+  expect(onChange).toHaveBeenLastCalledWith({ ...initial, videoCookieFile: 'C:\\Cookies\\video-session.txt' });
+
+  await user.click(screen.getByRole('button', { name: '清除 Cookie 配置' }));
+  await waitFor(() => expect(onChange).toHaveBeenLastCalledWith({ ...initial, videoCookieFile: '' }));
+  expect(screen.getByRole('textbox', { name: 'Cookie 文件路径' })).toHaveValue('');
+});
+
+it('preserves saved cookies when the picker is cancelled or another setting is saved', async () => {
+  const user = userEvent.setup();
+  const configured = { ...initial, videoCookieFile: 'C:\\Cookies\\saved.txt' };
+  const onChange = vi.fn().mockResolvedValue(undefined);
+  const browseVideoCookieFile = vi.fn().mockResolvedValue(null);
+  render(<SettingsPanel initial={configured} onChange={onChange} browseVideoCookieFile={browseVideoCookieFile} />);
+  await user.click(screen.getByRole('tab', { name: '网络' }));
+  await user.click(screen.getByRole('button', { name: '选择 Cookie 文件' }));
+  expect(browseVideoCookieFile).toHaveBeenCalledWith(configured.videoCookieFile);
+  expect(onChange).not.toHaveBeenCalled();
+
+  const input = screen.getByRole('textbox', { name: 'Cookie 文件路径' });
+  await user.clear(input);
+  await user.type(input, '  D:\\Cookies\\draft.cookie  ');
+  await user.click(screen.getByRole('button', { name: '保存 aria2 设置' }));
+  expect(onChange).toHaveBeenLastCalledWith(configured);
+  await user.click(screen.getByRole('button', { name: '保存 Cookie 设置' }));
+  await waitFor(() => expect(onChange).toHaveBeenLastCalledWith({ ...initial, videoCookieFile: 'D:\\Cookies\\draft.cookie' }));
+  expect(input).toHaveValue('D:\\Cookies\\draft.cookie');
+});
+
+it('reports a rejected cookie file without replacing the saved configuration', async () => {
+  const user = userEvent.setup();
+  const configured = { ...initial, videoCookieFile: 'C:\\Cookies\\saved.txt' };
+  const onChange = vi.fn().mockRejectedValueOnce('video.error.cookieFile').mockResolvedValue(undefined);
+  render(<SettingsPanel initial={configured} onChange={onChange} />);
+  await user.click(screen.getByRole('tab', { name: '网络' }));
+  const input = screen.getByRole('textbox', { name: 'Cookie 文件路径' });
+  await user.clear(input);
+  await user.type(input, 'C:\\Cookies\\invalid.txt');
+  await user.click(screen.getByRole('button', { name: '保存 Cookie 设置' }));
+  expect(await screen.findByRole('status')).toHaveTextContent('Cookie 文件无法读取或不是 Netscape cookies.txt 格式');
+  await user.click(screen.getByRole('button', { name: '保存限速设置' }));
+  expect(onChange).toHaveBeenLastCalledWith(configured);
 });
 
 it('saves an authenticated HTTPS proxy for aria2 downloads', async () => {

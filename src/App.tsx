@@ -284,6 +284,22 @@ async function browseDownloadDirectory(currentDirectory: string): Promise<string
   return typeof selected === 'string' ? selected : null;
 }
 
+async function browseVideoCookieFile(currentFile: string): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  const { open } = await import('@tauri-apps/plugin-dialog');
+  const selected = await open({
+    directory: false,
+    multiple: false,
+    defaultPath: currentFile || undefined,
+    title: t('settings.videoCookies.choose'),
+    filters: [
+      { name: t('settings.videoCookies.textFiles'), extensions: ['txt'] },
+      { name: t('settings.videoCookies.allFiles'), extensions: ['*'] }
+    ]
+  });
+  return typeof selected === 'string' ? selected : null;
+}
+
 function WindowIcon({ kind }: { kind: 'minimize' | 'maximize' | 'close' }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
     {kind === 'minimize' && <path d="M5 12h14" />}
@@ -1803,7 +1819,7 @@ export function App() {
           </section>
         </section>}
         <section className="view-panel" hidden={view !== 'cloud'}><CloudWorkspace client={cloudClient} activePage={cloudPage} onPageChange={setCloudPage} onProvidersChange={setAuthorizedCloudProviders} onDownloadTask={acceptCloudDownload} privacyDownloadEnabled={settings.privacyDownloadEnabled ?? false} /></section>
-        {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} onNotice={setNotice} configurePrivacyDownload={savePrivacyConfiguration} /></section>}
+        {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} browseVideoCookieFile={browseVideoCookieFile} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} onNotice={setNotice} configurePrivacyDownload={savePrivacyConfiguration} /></section>}
         {view === 'about' && <section className="view-panel" aria-label={t('about.title')}><AboutPanel icon={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} update={appUpdate} onOpenUpdate={(update) => { void openExternalUrl(update.downloadUrl).catch(() => undefined); }} /></section>}
       </div>
       {import.meta.env.DEV && <BuildIdentityFooter />}

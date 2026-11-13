@@ -710,8 +710,8 @@ pub async fn parse_download(
         };
     }
     if let Some(page) = crate::web_video::routing::resolve(input.trim(), probe_video).await? {
-        let (proxy, _) = crate::web_video::network_options(&state)?;
-        let preview = state.web_video.prepare(page, proxy.as_deref()).await?;
+        let options = crate::web_video::network_options(&state)?;
+        let preview = state.web_video.prepare(page, &options).await?;
         return Ok(ParseDownloadOutcome::WebVideo(preview));
     }
     let mut outcome = prepare_download(&input, &state.store).map_err(|error| error.to_string())?;
@@ -4000,6 +4000,10 @@ pub async fn update_settings(
         .lock()
         .map_err(|_| "设置锁不可用".to_string())?
         .clone();
+    settings.video_cookie_file = settings.video_cookie_file.trim().to_owned();
+    if settings.video_cookie_file != previous.video_cookie_file {
+        crate::web_video::validate_cookie_file(&settings.video_cookie_file)?;
+    }
     settings.ai = previous.ai;
     settings.privacy_download_enabled = previous.privacy_download_enabled;
     settings.privacy_password_configured = previous.privacy_password_configured;

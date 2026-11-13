@@ -74,8 +74,10 @@ impl Format {
     }
 
     fn is_audio_track(&self) -> bool {
+        // HLS audio renditions can omit acodec. Missing means unknown;
+        // only the literal "none" rules out an audio stream.
         self.vcodec.as_deref() == Some("none")
-            && self.acodec.as_deref().is_some_and(|v| v != "none")
+            && self.acodec.as_deref() != Some("none")
     }
 
     fn video_ext(&self) -> Option<&str> {
@@ -498,6 +500,14 @@ fn classify_message(message: &str) -> &'static str {
     } else if text.contains("requested format is not available") {
         "video.error.formatGone"
     } else if contains(&[
+        "failed to load cookies",
+        "does not look like a netscape format cookies file",
+        "does not look like a netscape format cookie file",
+    ]) {
+        "video.error.cookieFile"
+    } else if contains(&["fresh cookies", "--cookies"]) {
+        "video.error.cookies"
+    } else if contains(&[
         "sign in",
         "log in",
         "login",
@@ -594,8 +604,13 @@ async fn metadata(mut cmd: Command) -> Result<Vec<u8>, String> {
 pub(crate) async fn inspect(
     page: PlaybackPage,
     proxy: Option<&str>,
+    cookie_file: Option<&Path>,
 ) -> Result<VideoPreview, String> {
+    let cookies = super::cookies::CookieFile::load(cookie_file)?;
     let mut cmd = command(proxy)?;
+    if let Some(cookies) = &cookies {
+        cookies.apply(&mut cmd);
+    }
     cmd.args([
         "--dump-single-json",
         "--skip-download",
@@ -631,13 +646,30 @@ mod tests {
             diagnostic("ERROR: unable to download video data: HTTP Error 429: Too Many Requests"),
             "video.error.rateLimited"
         );
+    }
+
+    #[test]
+    fn cookie_requests_and_invalid_files_are_distinct_from_login_requirements() {
+        for message in [
+            "ERROR: [douyin] clip: Fresh cookies (not necessarily logged in) are needed",
+            "ERROR: [youtube] clip: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies for authentication.",
+            "ERROR: [vimeo] clip: The web client only works when logged-in. Use --cookies to provide account credentials.",
+        ] {
+            assert_eq!(diagnostic(message), "video.error.cookies");
+        }
+        for message in [
+            "ERROR: failed to load cookies",
+            "ERROR: 'cookies.txt' does not look like a Netscape format cookies file",
+        ] {
+            assert_eq!(diagnostic(message), "video.error.cookieFile");
+        }
         assert_eq!(
-            diagnostic("ERROR: [youtube] clip: Sign in to confirm you're not a bot. Use --cookies-from-browser or --cookies for authentication."),
+            diagnostic("ERROR: [site] clip: Sign in to view this video"),
             "video.error.restricted"
         );
         assert_eq!(
-            diagnostic("ERROR: failed to load cookies"),
-            "video.error.extract"
+            diagnostic("ERROR: [site] clip: Login required"),
+            "video.error.restricted"
         );
     }
 
@@ -755,6 +787,60 @@ mod tests {
             "video.error.ffmpeg"
         );
     }
+
+    #[test]
+    fn hls_audio_with_unknown_codec_is_merged_and_requires_ffmpeg() {
+        let formats = json!([
+            {"format_id":"hls-audio0-low","vcodec":"none","ext":"mp4","protocol":"m3u8_native"},
+            {"format_id":"hls-audio0-medium","vcodec":"none","ext":"mp4","protocol":"m3u8_native"},
+            {"format_id":"hls-145","vcodec":"avc1.42c00d","acodec":"none","ext":"mp4","width":320,"height":180},
+            {"format_id":"hls-216","vcodec":"avc1.42c01e","acodec":"none","ext":"mp4","width":320,"height":180}
+        ]);
+        let full = preview(page(), data(formats.clone()), true).unwrap();
+        assert_eq!(full.formats.len(), 1);
+        let f = &full.formats[0];
+        assert_eq!(f.id, "hls-216+hls-audio0-medium");
+        assert_eq!((f.width, f.height, f.ext.as_str()), (320, 180, "mp4"));
+        assert_eq!(
+            preview(page(), data(formats), false).unwrap_err(),
+            "video.error.ffmpeg"
+        );
+    }
+
+    #[test]
+    fn unknown_audio_codec_keeps_container_compatibility_and_muxed_streams() {
+        let formats = json!([
+            {"format_id":"audio","vcodec":"none","acodec":null,"ext":"webm"},
+            {"format_id":"frames","vcodec":"none","acodec":"none","ext":"mp4"},
+            {"format_id":"video-mp4","vcodec":"avc1","acodec":"none","ext":"mp4","width":640,"height":360},
+            {"format_id":"video-webm","vcodec":"vp9","acodec":"none","ext":"webm","width":1280,"height":720},
+            {"format_id":"muxed-unknown","ext":"mp4","width":320,"height":180}
+        ]);
+        let full = preview(page(), data(formats), true).unwrap();
+        assert_eq!(
+            full.formats
+                .iter()
+                .map(|f| (f.id.as_str(), f.ext.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                ("video-webm+audio", "webm"),
+                ("video-mp4+audio", "mkv"),
+                ("muxed-unknown", "mp4")
+            ]
+        );
+    }
+
+    #[test]
+    fn genuinely_silent_video_does_not_require_a_merger() {
+        let formats = json!([
+            {"format_id":"silent","vcodec":"avc1","acodec":"none","ext":"mp4","width":640,"height":360},
+            {"format_id":"frames","vcodec":"none","acodec":"none","ext":"mhtml"}
+        ]);
+        let full = preview(page(), data(formats), false).unwrap();
+        assert_eq!(full.formats.len(), 1);
+        assert_eq!(full.formats[0].id, "silent");
+    }
+
     #[test]
     fn single_embedded_stream_with_unspecified_dimensions_keeps_its_literal_id() {
         let raw = decode(
