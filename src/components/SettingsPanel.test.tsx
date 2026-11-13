@@ -173,7 +173,7 @@ it('lets network settings save buttons wrap long translated labels', async () =>
     await user.click(screen.getAllByRole('tab')[1]);
 
     const saveButtons = container.querySelectorAll<HTMLButtonElement>('.settings-inline-save');
-    expect(saveButtons).toHaveLength(3);
+    expect(saveButtons).toHaveLength(4);
     for (const button of saveButtons) {
       expect(getComputedStyle(button).whiteSpace).toBe('normal');
       expect(getComputedStyle(button).height).toBe('auto');
