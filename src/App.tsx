@@ -1108,9 +1108,9 @@ export function App() {
     return () => { disposed = true; unlisten.forEach((stop) => stop()); };
   }, []);
 
-  async function parse(input: string, accessCode?: string, confirmationPlacement: 'modal' | 'header' = 'modal', probeVideo = false) {
-    const result = probeVideo
-      ? await parseDownload(input, accessCode, true, true)
+  async function parse(input: string, accessCode?: string, confirmationPlacement: 'modal' | 'header' = 'modal', probeVideo?: boolean) {
+    const result = probeVideo !== undefined
+      ? await parseDownload(input, accessCode, probeVideo || (settings.privacyDownloadEnabled ?? false), probeVideo)
       : await parseDownload(input, accessCode, settings.privacyDownloadEnabled ?? false);
     if (result.task) { addNewDownloadTask(result.task); setSelectedTaskId(result.task.id); }
     if (result.confirmation) {
@@ -1836,7 +1836,7 @@ export function App() {
         onRestartMissing={() => void resolveDuplicate('restart_missing')}
         onClose={() => dismissDuplicate(duplicate.task.id)}
       />}
-      <NewDownloadDialog open={newDownloadOpen} placement="modal" initialInput={newDownloadInput} onScan={scanDownloadInputs} onParse={(input, accessCode, probeVideo) => probeVideo ? parseDownload(input, accessCode, true, true) : parseDownload(input, accessCode, true)} onDiscardPrepared={discardPreparedDownload} onSubmitBatch={submitPreparedBatch} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onClose={() => { setNewDownloadOpen(false); setNewDownloadInput(''); }} />
+      <NewDownloadDialog open={newDownloadOpen} placement="modal" initialInput={newDownloadInput} onScan={scanDownloadInputs} onParse={(input, accessCode, probeVideo) => probeVideo !== undefined ? parseDownload(input, accessCode, true, probeVideo) : parseDownload(input, accessCode, true)} onDiscardPrepared={discardPreparedDownload} onSubmitBatch={submitPreparedBatch} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onClose={() => { setNewDownloadOpen(false); setNewDownloadInput(''); }} />
       {detailsTask && <TaskDetailsDialog task={detailsTask} onClose={() => setDetailsTaskId(null)} />}
       {pendingPurgeTasks.length > 0 && <RemoveTaskDialog taskNames={pendingPurgeTasks.map(displayTaskName)} onConfirm={(deleteFiles) => void confirmTaskRemoval(deleteFiles)} onClose={() => setPendingPurgeTaskIds(null)} />}
       {notice && <div className={`task-toast ${notice.kind}`} role="status">{notice.message}</div>}

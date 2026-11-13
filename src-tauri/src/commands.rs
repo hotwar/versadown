@@ -670,10 +670,16 @@ pub(crate) async fn prepare_non_share_download(
     store: &TaskStore,
     video: &crate::web_video::VideoDownloads,
     options: impl FnOnce() -> Result<crate::web_video::VideoOptions, String>,
-    probe_video: bool,
+    probe_video: Option<bool>,
     require_confirmation: bool,
 ) -> Result<ParseDownloadOutcome, String> {
-    if let Some(page) = crate::web_video::routing::resolve(input.trim(), probe_video).await? {
+    // An explicit ordinary-file choice must not depend on a fresh matcher
+    // result. Omitted intent keeps automatic routing; true requests extraction.
+    let page = match probe_video {
+        Some(false) => None,
+        mode => crate::web_video::routing::resolve(input.trim(), mode == Some(true)).await?,
+    };
+    if let Some(page) = page {
         let options = options()?;
         let preview = video.prepare(page, &options).await?;
         return Ok(ParseDownloadOutcome::WebVideo(preview));
@@ -697,12 +703,11 @@ pub async fn parse_download(
     probe_video: Option<bool>,
     state: State<'_, AppState>,
 ) -> Result<ParseDownloadOutcome, String> {
-    let probe_video = probe_video.unwrap_or(false);
     if let Some(candidate) =
         crate::parser::extract_cloud_share_candidate(&input, access_code.as_deref())
             .map_err(|error| error.to_string())?
     {
-        if probe_video {
+        if probe_video == Some(true) {
             return Err("video.error.unsupported".into());
         }
         let provider = candidate.provider;
@@ -4185,7 +4190,7 @@ mod tests {
         let video = crate::web_video::VideoDownloads::new(store.clone(), 1, |_| {});
         let outcome = prepare_non_share_download(
             "http://127.0.0.1/watch.shtml", &store, &video,
-            || panic!("ordinary preparation must not read video settings"), false, true,
+            || panic!("ordinary preparation must not read video settings"), None, true,
         ).await.unwrap();
         let ParseDownloadOutcome::Task(outcome) = outcome else { panic!("expected ordinary task") };
         assert_eq!(outcome.task.kind, "file");
@@ -4202,7 +4207,7 @@ mod tests {
         let task = store.create(crate::NewTask::direct("http://127.0.0.1/existing.zip")).unwrap();
         let video = crate::web_video::VideoDownloads::new(store.clone(), 1, |_| {});
         let outcome = prepare_non_share_download(
-            &task.source, &store, &video, || panic!("ordinary task"), false, true,
+            &task.source, &store, &video, || panic!("ordinary task"), None, true,
         ).await.unwrap();
         let ParseDownloadOutcome::Task(outcome) = outcome else { panic!("expected duplicate task") };
         assert!(outcome.duplicate.is_some());
@@ -4211,12 +4216,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_ordinary_preparation_skips_video_routing() {
+        let store = Arc::new(TaskStore::open_in_memory().unwrap());
+        let video = crate::web_video::VideoDownloads::new(store.clone(), 1, |_| {});
+        let outcome = prepare_non_share_download(
+            "https://example.test/watch.shtml",
+            &store,
+            &video,
+            || panic!("explicit ordinary preparation must not read video settings"),
+            Some(false),
+            true,
+        )
+        .await
+        .unwrap();
+        let ParseDownloadOutcome::Task(outcome) = outcome else {
+            panic!("expected ordinary task")
+        };
+        assert_eq!(outcome.task.kind, "file");
+        assert_eq!(outcome.task.name, "watch.shtml");
+        assert_eq!(outcome.task.status, TaskStatus::AwaitingUser);
+        assert!(outcome.requires_confirmation);
+
+        // This URL always routes to video when automatic routing runs. Its
+        // ordinary-parser error proves we bypass that route, while retaining
+        // the existing guard against downloading recognized playback pages.
+        let error = prepare_non_share_download(
+            "https://youtu.be/62xlzGs8LXA",
+            &store,
+            &video,
+            || panic!("explicit ordinary preparation must skip video routing"),
+            Some(false),
+            true,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(error, crate::DownloadError::VideoPageInput.to_string());
+        assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
     async fn shared_preparation_propagates_video_errors_without_creating_plain_tasks() {
         let store = Arc::new(TaskStore::open_in_memory().unwrap());
         let video = crate::web_video::VideoDownloads::new(store.clone(), 1, |_| {});
         let error = prepare_non_share_download(
             "https://youtu.be/62xlzGs8LXA", &store, &video,
-            || Err("video.error.cookieFile".to_owned()), true, true,
+            || Err("video.error.cookieFile".to_owned()), Some(true), true,
         ).await.err().unwrap();
         assert_eq!(error, "video.error.cookieFile");
         assert!(store.list().unwrap().is_empty());

@@ -92,12 +92,12 @@ function duplicateResult(result: NativeTaskOutcome): TaskActionResult {
     : { task, ...(queueTask ? { queueTask } : {}) };
 }
 
-export async function parseDownload(input: string, accessCode?: string, requireConfirmation = false, probeVideo = false): Promise<ParseDownloadResult> {
+export async function parseDownload(input: string, accessCode?: string, requireConfirmation = false, probeVideo?: boolean): Promise<ParseDownloadResult> {
   if (!isTauriRuntime()) {
     if (probeVideo) throw new Error(t('video.error.desktop'));
     return parseLocally(input);
   }
-  const result = await invoke<NativeParseOutcome>('parse_download', { input, accessCode, ...(requireConfirmation ? { requireConfirmation } : {}), ...(probeVideo ? { probeVideo } : {}) })
+  const result = await invoke<NativeParseOutcome>('parse_download', { input, accessCode, ...(requireConfirmation ? { requireConfirmation } : {}), ...(probeVideo !== undefined ? { probeVideo } : {}) })
     .catch((error: unknown) => {
       if (isXunleiVerificationReason(error) || isXunleiVerificationFailure(error)) {
         throw new Error(xunleiVerificationMessage(typeof error === 'string' ? error : (error as { message?: unknown }).message));

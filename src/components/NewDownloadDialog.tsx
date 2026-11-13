@@ -289,7 +289,7 @@ function BatchNewDownloadDialog({
   const { t } = useTranslation();
   const batch = useDownloadDraftBatch({
     scan: onScan ?? (async input => [{ input, valid: true, kind: 'direct' }]),
-    prepare: async (input, accessCode, probeVideo) => (await (probeVideo ? onParse(input, accessCode, true) : onParse(input, accessCode))) ?? { confirmation: { taskId: input, title: input, requiresConfirmation: true, resources: [], processing: [] } },
+    prepare: async (input, accessCode, probeVideo) => (await (probeVideo !== undefined ? onParse(input, accessCode, probeVideo) : onParse(input, accessCode))) ?? { confirmation: { taskId: input, title: input, requiresConfirmation: true, resources: [], processing: [] } },
     discard: onDiscardPrepared ?? (async () => {}),
     concurrency: 4,
   });
@@ -553,10 +553,10 @@ function LegacyNewDownloadDialog({ open, placement = 'launcher', onParse, onScan
     setBatch({ ...currentBatch, index: nextIndex });
   }
 
-  async function parseCandidate(candidate: string, currentBatch?: DownloadBatch, probeVideo = false) {
+  async function parseCandidate(candidate: string, currentBatch?: DownloadBatch, probeVideo?: boolean) {
     try {
       const code = accessCode.trim() || undefined;
-      const result = await (probeVideo ? onParse(candidate, code, true) : onParse(candidate, code));
+      const result = await (probeVideo !== undefined ? onParse(candidate, code, probeVideo) : onParse(candidate, code));
       if (result?.shareAccessCodeRequired) {
         setAccessCodePrompt(result.shareAccessCodeRequired.message);
         setIsSubmitting(false);
@@ -581,7 +581,7 @@ function LegacyNewDownloadDialog({ open, placement = 'launcher', onParse, onScan
     }
     setIsSubmitting(true);
     setError(null);
-    await parseCandidate(entry.input, currentBatch, entry.kind === 'web_video' || Boolean(entry.canProbeVideo));
+    await parseCandidate(entry.input, currentBatch, entry.kind === 'web_video' || entry.canProbeVideo ? true : undefined);
   }
 
   async function submit(event: FormEvent) {

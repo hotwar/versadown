@@ -144,6 +144,18 @@ it('passes a transient access code only to the parse command', async () => {
   expect(native.invoke).toHaveBeenCalledWith('parse_download', { input: 'https://pan.baidu.com/s/id', accessCode: '1234' });
 });
 
+it('preserves an explicit ordinary-download choice in native IPC', async () => {
+  native.invoke.mockResolvedValueOnce({
+    kind: 'task', task: { id: 'ordinary-page', name: 'watch.html', kind: 'file', status: 'awaiting_user', progress: 0 },
+    requires_confirmation: true, resources: [],
+  });
+  const { parseDownload } = await import('./api');
+  await parseDownload('https://example.test/watch.html', undefined, true, false);
+  expect(native.invoke).toHaveBeenCalledWith('parse_download', {
+    input: 'https://example.test/watch.html', accessCode: undefined, requireConfirmation: true, probeVideo: false,
+  });
+});
+
 it('prepares every candidate without starting it and discards an abandoned native draft', async () => {
   native.invoke.mockResolvedValueOnce({
     kind: 'task',

@@ -139,7 +139,9 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
           replaceItems(current => current.map(candidate => candidate.id === work.id ? { ...candidate, result: undefined } : candidate));
         }
         const accessCode = item.accessCode.trim() || undefined;
-        return item.probeVideo ? prepare(item.input, accessCode, true) : prepare(item.input, accessCode);
+        if (item.probeVideo) return prepare(item.input, accessCode, true);
+        if (item.canProbeVideo && item.probeVideo === false) return prepare(item.input, accessCode, false);
+        return prepare(item.input, accessCode);
       };
       void prepareItem()
         .then(result => {

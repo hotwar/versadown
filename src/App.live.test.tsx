@@ -1844,6 +1844,26 @@ it('opens the normal new-download dialog from the floating-ball menu command', a
   expect(state.clipboardRead).toHaveBeenCalledOnce();
 });
 
+it('passes an explicit ordinary webpage choice from the batch dialog to the API', async () => {
+  const input = 'https://example.test/watch.html';
+  const user = userEvent.setup();
+  state.clipboardRead.mockResolvedValue(input);
+  vi.mocked(scanDownloadInputs).mockResolvedValueOnce([{ input, valid: true, kind: 'direct', canProbeVideo: true }]);
+  state.parse.mockRejectedValueOnce(new Error('没有找到视频')).mockResolvedValueOnce({ confirmation: {
+    taskId: 'ordinary-page', title: 'watch.html', requiresConfirmation: true, resources: [], processing: [],
+  } });
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-command')).toBeDefined());
+  act(() => { state.listeners.get('launcher-command')?.({ payload: 'new-download' }); });
+  const dialog = within(await screen.findByRole('dialog', { name: t('download.new') }));
+  expect(await dialog.findByText('没有找到视频')).toBeVisible();
+  expect(state.parse).toHaveBeenNthCalledWith(1, input, undefined, true, true);
+  await user.click(dialog.getByRole('button', { name: '改为普通下载' }));
+  expect(await dialog.findByText('watch.html')).toBeVisible();
+  expect(state.parse).toHaveBeenNthCalledWith(2, input, undefined, true, false);
+  expect(state.confirm).not.toHaveBeenCalled();
+});
+
 it('parses a clipboard link from the floating-ball menu and waits for task confirmation', async () => {
   const clipboard = '分享地址：https://example.test/archive.zip';
   const link = 'https://example.test/archive.zip';

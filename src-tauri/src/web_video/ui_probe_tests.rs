@@ -126,7 +126,7 @@ async fn handle(
             serde_json::to_value(entries).map_err(|e| e.to_string())
         }
         "parse_download" => {
-            let probe = request.args.get("probeVideo").and_then(Value::as_bool).unwrap_or(false);
+            let probe = request.args.get("probeVideo").and_then(Value::as_bool);
             let require_confirmation = request.args.get("requireConfirmation").and_then(Value::as_bool).unwrap_or(false);
             let outcome = commands::prepare_non_share_download(
                 input()?, &state.store, &state.video,
@@ -252,6 +252,25 @@ async fn ui_bridge_uses_real_plain_preparation_task_listing_and_discard() {
         command: "discard_prepared_download".into(), args: json!({"taskId": id}),
     }, &sender).await.unwrap();
     assert!(state.store.list().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn ui_bridge_preserves_explicit_ordinary_file_intent() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = test_state(directory.path().to_path_buf());
+    let (sender, _) = tokio::sync::mpsc::unbounded_channel();
+    let parsed = handle(&state, &InvokeRequest {
+        command: "parse_download".into(),
+        args: json!({
+            "input": "https://example.test/watch.shtml",
+            "requireConfirmation": true,
+            "probeVideo": false,
+        }),
+    }, &sender).await.unwrap();
+    assert_eq!(parsed["kind"], "task");
+    assert_eq!(parsed["task"]["kind"], "file");
+    assert_eq!(parsed["task"]["name"], "watch.shtml");
+    assert_eq!(parsed["requires_confirmation"], true);
 }
 
 #[tokio::test]
