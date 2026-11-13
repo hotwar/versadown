@@ -1,7 +1,7 @@
 //! Recognize first-party short links locally and delegate other site rules to yt-dlp.
 mod matcher;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, future::Future};
 use url::Url;
 
 #[derive(Clone, Debug)]
@@ -145,9 +145,21 @@ fn candidate_route(mut page: PlaybackPage, dedicated_site: Option<&str>) -> Opti
     }
 }
 
-/// URL matching is offline. If the tool is missing, ordinary downloads are
-/// still available and an explicit video probe can report the tool error.
+/// Offline matching is an optimization, not a prerequisite for extracting a
+/// webpage. Only a successful negative match can choose ordinary page download.
 pub(super) async fn classify(inputs: &[&str]) -> HashMap<String, PageRoute> {
+    classify_with_matcher(inputs, |urls| async move {
+        let urls = urls.iter().map(String::as_str).collect::<Vec<_>>();
+        matcher::dedicated_sites(&urls).await
+    })
+    .await
+}
+
+async fn classify_with_matcher<F, Fut>(inputs: &[&str], match_sites: F) -> HashMap<String, PageRoute>
+where
+    F: FnOnce(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<HashMap<String, String>, String>>,
+{
     let mut routes = HashMap::new();
     let mut candidates = Vec::new();
     for &input in inputs {
@@ -161,15 +173,32 @@ pub(super) async fn classify(inputs: &[&str]) -> HashMap<String, PageRoute> {
     if candidates.is_empty() {
         return routes;
     }
-    let urls: Vec<_> = candidates.iter().map(|(_, p)| p.url.as_str()).collect();
-    let matches = matcher::dedicated_sites(&urls).await.unwrap_or_default();
+    let urls = candidates.iter().map(|(_, p)| p.url.to_string()).collect();
+    let matches = match_sites(urls).await;
     for (input, page) in candidates {
-        let dedicated_site = matches.get(page.url.as_str()).map(String::as_str);
-        if let Some(route) = candidate_route(page, dedicated_site) {
+        let route = match &matches {
+            Ok(matches) => {
+                let dedicated_site = matches.get(page.url.as_str()).map(String::as_str);
+                candidate_route(page, dedicated_site)
+            }
+            // A timeout, broken helper, or missing executable says nothing
+            // about website support. Let extraction handle the page and report
+            // its actual error instead of preparing its HTML as a file.
+            Err(_) => manual_page(&page.url).map(PageRoute::Automatic),
+        };
+        if let Some(route) = route {
             routes.insert(input.to_owned(), route);
         }
     }
     routes
+}
+
+#[cfg(test)]
+pub(super) async fn classify_with_matcher_result_for_test(
+    inputs: &[&str],
+    result: Result<HashMap<String, String>, String>,
+) -> HashMap<String, PageRoute> {
+    classify_with_matcher(inputs, |_| async move { result }).await
 }
 
 fn youtube(url: &Url) -> Option<Url> {
@@ -230,6 +259,61 @@ fn bilibili(url: &Url) -> Option<Url> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn matcher_errors_probe_webpages_instead_of_preparing_html_files() {
+        let urls = [
+            "https://tv.cctv.com/2026/10/01/VIDEgXcuU2L3NYhZgJDaWj8A261001.shtml",
+            "https://v.youku.com/v_show/id_XNDIzNjE2MTc4NA==.html",
+            "https://news.example.org/article",
+            "https://youtu.be/62xlzGs8LXA",
+            "https://www.bilibili.com/video/BV1bK411W797?p=2",
+            "https://cdn.example.org/clip.mp4",
+            "https://cdn.example.org/clip.webm",
+            "https://cdn.example.org/archive.zip",
+            "http://127.0.0.1/download",
+        ];
+        // A missing helper and a failed/expired helper must have the same
+        // routing semantics; extraction subsequently reports the real error.
+        for error in ["video.error.extractor", "video.error.extract"] {
+            let routes = classify_with_matcher_result_for_test(&urls, Err(error.into())).await;
+            for url in &urls[..3] {
+                let Some(PageRoute::Automatic(page)) = routes.get(*url) else {
+                    panic!("matcher failure downgraded {url} to a normal download");
+                };
+                assert!(page.inspect_embeds);
+                assert_eq!(page.url.as_str(), *url);
+            }
+            for url in &urls[3..5] {
+                let Some(PageRoute::Automatic(page)) = routes.get(*url) else {
+                    panic!("lost the local route for {url}");
+                };
+                assert!(!page.inspect_embeds);
+            }
+            for url in &urls[5..] {
+                assert!(!routes.contains_key(*url), "payload/intranet route changed: {url}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_negative_matches_remain_manual_video_probes() {
+        let page = "https://news.example.org/post.shtml";
+        let video = "https://tv.cctv.com/2026/10/01/VIDEgXcuU2L3NYhZgJDaWj8A261001.shtml";
+        let payload = "https://cdn.example.org/clip.mp4";
+        let routes = classify_with_matcher_result_for_test(
+            &[page, video, payload],
+            Ok(HashMap::from([(video.to_owned(), "CCTV".to_owned())])),
+        )
+        .await;
+        assert!(matches!(routes.get(page), Some(PageRoute::OnRequest(_))));
+        let Some(PageRoute::Automatic(matched)) = routes.get(video) else {
+            panic!("lost the dedicated extractor match");
+        };
+        assert_eq!(matched.site, "CCTV");
+        assert!(!matched.inspect_embeds);
+        assert!(!routes.contains_key(payload));
+    }
 
     #[test]
     fn webpage_scan_and_manual_probe_preserve_other_download_handlers() {

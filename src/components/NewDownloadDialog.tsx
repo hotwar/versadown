@@ -581,7 +581,7 @@ function LegacyNewDownloadDialog({ open, placement = 'launcher', onParse, onScan
     }
     setIsSubmitting(true);
     setError(null);
-    await parseCandidate(entry.input, currentBatch, entry.kind === 'web_video');
+    await parseCandidate(entry.input, currentBatch, entry.kind === 'web_video' || Boolean(entry.canProbeVideo));
   }
 
   async function submit(event: FormEvent) {
@@ -659,8 +659,9 @@ function LegacyNewDownloadDialog({ open, placement = 'launcher', onParse, onScan
           {batchEntry?.valid && <span>{t('download.validLinkConfirmation')}</span>}
           {batchEntry?.valid && batchEntry.canProbeVideo && <button type="button" disabled={isSubmitting} onClick={() => {
             setIsSubmitting(true);
-            void parseCandidate(batchEntry.input, batch!, true);
-          }}>{t('video.probe')}</button>}
+            setError(null);
+            void parseCandidate(batchEntry.input, batch!, false);
+          }}>{t('video.useDirect')}</button>}
           {batchEntry && !batchEntry.valid && <span role="alert" className="parse-failure">{batchEntry.message}</span>}
           {error && <span role="alert" className="parse-failure">{error}</span>}
           {accessCodePrompt ? <div className="new-download-tab-access-code">
