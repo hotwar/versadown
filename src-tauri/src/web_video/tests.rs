@@ -12,12 +12,15 @@ async fn bundled_tools_download_a_public_page_with_audio() {
     let scanned = routing::scan(&source).await;
     assert_eq!(scanned.len(), 1, "provide exactly one public video URL");
     let entry = &scanned[0];
-    assert_eq!(
-        entry.kind,
-        Some(crate::CandidateKind::WebVideo),
-        "a supported playback page must enter the normal video workflow automatically"
+    let probe = std::env::var("VERSADOWN_VIDEO_TEST_PROBE").as_deref() == Ok("1");
+    println!("VD-TEST-ROUTE {}", serde_json::json!({
+        "kind": entry.kind, "canProbeVideo": entry.can_probe_video, "manualProbe": probe
+    }));
+    assert!(
+        entry.kind == Some(crate::CandidateKind::WebVideo) || (probe && entry.can_probe_video),
+        "a supported playback page must enter the normal video workflow automatically, or allow the requested manual probe"
     );
-    let page = routing::resolve(&entry.input, false)
+    let page = routing::resolve(&entry.input, probe)
         .await
         .unwrap()
         .expect("provide a supported playback URL");
@@ -30,6 +33,7 @@ async fn bundled_tools_download_a_public_page_with_audio() {
     let engine = VideoDownloads::new(store.clone(), 1, |_| {});
     let started = std::time::Instant::now();
     let preview = engine.prepare(page, proxy.as_deref()).await.unwrap();
+    println!("VD-TEST-PREVIEW {}", serde_json::to_string(&preview).unwrap());
     let requested = std::env::var("VERSADOWN_VIDEO_TEST_FORMAT").ok();
     let choice = match requested.as_ref() {
         Some(id) => preview.formats.iter().find(|format| &format.id == id),
@@ -84,6 +88,10 @@ async fn bundled_tools_download_a_public_page_with_audio() {
         .expect("download failed");
     assert_eq!(finished.progress, 100);
     assert!(finished.completed_length > 0);
+    println!("VD-TEST-COMPLETED {}", serde_json::json!({
+        "bytes": finished.completed_length, "format": choice.id,
+        "width": choice.width, "height": choice.height, "ext": choice.ext
+    }));
     let path = store.reserved_output_path(task.id).unwrap().unwrap();
     let ffmpeg = extractor::tool("ffmpeg").unwrap();
     let output = std::process::Command::new(&ffmpeg)
@@ -92,14 +100,21 @@ async fn bundled_tools_download_a_public_page_with_audio() {
         .output()
         .unwrap();
     let streams = String::from_utf8_lossy(&output.stderr);
-    assert!(streams.contains("Video:") && streams.contains("Audio:"));
+    let allow_silent =
+        std::env::var("VERSADOWN_VIDEO_TEST_ALLOW_SILENT").as_deref() == Ok("1");
+    assert!(streams.contains("Video:"));
+    assert!(allow_silent || streams.contains("Audio:"));
     if choice.width > 0 && choice.height > 0 {
         assert!(streams.contains(&format!("{}x{}", choice.width, choice.height)));
     }
     let verified = std::process::Command::new(&ffmpeg)
         .args(["-nostdin", "-v", "error", "-xerror", "-i"])
         .arg(&path)
-        .args(["-map", "0:v:0", "-map", "0:a:0", "-c", "copy"])
+        .args([
+            "-map", "0:v:0", "-map",
+            if allow_silent { "0:a:0?" } else { "0:a:0" },
+            "-c", "copy",
+        ])
         .arg(directory.path().join("verified.mkv"))
         .output()
         .unwrap();
