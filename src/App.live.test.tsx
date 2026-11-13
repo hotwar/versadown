@@ -1860,7 +1860,7 @@ it('parses a clipboard link from the floating-ball menu and waits for task confi
 
   const dialog = await screen.findByRole('dialog', { name: t('download.new') });
   expect(await within(dialog).findByText('archive.zip')).toBeVisible();
-  expect(scanDownloadInputs).toHaveBeenCalledWith(clipboard);
+  expect(scanDownloadInputs).toHaveBeenCalledWith(clipboard, expect.any(Function));
   expect(state.parse).toHaveBeenCalledWith(link, undefined, true);
   expect(within(dialog).getByRole('button', { name: t('download.newTask') })).toBeVisible();
   expect(state.confirm).not.toHaveBeenCalled();
@@ -1889,7 +1889,7 @@ it('opens the normal new-download dialog with an accepted floating-ball drop', a
   });
 
   expect(screen.getByRole('dialog', { name: t('download.new') })).toBeVisible();
-  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith('magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'));
+  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith('magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567', expect.any(Function)));
 });
 
 it('opens a new task with the links that launched the app from a browser', async () => {
@@ -1898,7 +1898,7 @@ it('opens a new task with the links that launched the app from a browser', async
   render(<App />);
 
   expect(await screen.findByRole('dialog', { name: t('download.new') })).toBeVisible();
-  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith(links.join('\n')));
+  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith(links.join('\n'), expect.any(Function)));
   expect(state.confirm).not.toHaveBeenCalled();
 });
 
@@ -1912,7 +1912,7 @@ it('opens a new task when a browser hands a link to the running app', async () =
   act(() => { state.listeners.get('external-links-available')?.({ payload: null }); });
 
   expect(await screen.findByRole('dialog', { name: t('download.new') })).toBeVisible();
-  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith(link));
+  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith(link, expect.any(Function)));
 });
 
 it('switches the manager to all tasks when the launcher is double-clicked', async () => {

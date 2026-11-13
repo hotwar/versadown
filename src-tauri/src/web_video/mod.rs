@@ -392,3 +392,6 @@ mod tests;
 
 #[cfg(test)]
 mod cookie_tests;
+
+#[cfg(test)]
+mod ui_probe_tests;

@@ -107,6 +107,30 @@ it('keeps an ordinary direct link valid in the browser scan fallback', async () 
   ]);
 });
 
+it('streams initial scan entries through an optional channel before the final result', async () => {
+  const { scanDownloadInputs } = await import('./api');
+  const input = 'https://youtu.be/known https://example.test/pending';
+  const initial = {
+    entries: [
+      { input: 'https://youtu.be/known', valid: true as const, kind: 'web_video' as const },
+      { input: 'https://example.test/pending', valid: true as const, kind: 'direct' as const },
+    ],
+    pending: ['https://example.test/pending'],
+  };
+  let finish!: (entries: typeof initial.entries) => void;
+  const final = new Promise<typeof initial.entries>(resolve => { finish = resolve; });
+  native.invoke.mockImplementationOnce((_command, args) => {
+    args.onProgress.onmessage(initial);
+    return final;
+  });
+  const progress = vi.fn();
+  const scan = scanDownloadInputs(input, progress);
+  expect(progress).toHaveBeenCalledWith(initial);
+  expect(native.invoke).toHaveBeenCalledWith('scan_download_inputs', { input, onProgress: expect.objectContaining({ onmessage: progress }) });
+  finish(initial.entries);
+  await expect(scan).resolves.toEqual(initial.entries);
+});
+
 it('passes a transient access code only to the parse command', async () => {
   native.invoke.mockResolvedValueOnce({
     kind: 'access_code_required',

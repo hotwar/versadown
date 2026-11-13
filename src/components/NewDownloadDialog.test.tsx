@@ -5,6 +5,9 @@ import { readFileSync } from 'node:fs';
 import { afterEach, vi } from 'vitest';
 import { isTauriRuntime, listPersistedTasks } from '../lib/api';
 import { NewDownloadDialog } from './NewDownloadDialog';
+import type { ParseDownloadResult, ScanDownloadProgress, ScanDownloadResult } from '../lib/types';
+import { videoConfirmation } from '../lib/webVideo';
+import { selectedResourceIds, type DownloadDraftItem } from './useDownloadDraftBatch';
 
 vi.mock('../lib/api', async () => {
   const actual = await vi.importActual<typeof import('../lib/api')>('../lib/api');
@@ -902,6 +905,110 @@ it('marks a parsing task with the same live progress indicator used for metadata
   });
 });
 
+it('shows a fast video before slow pages finish and submits only the choices the user keeps', async () => {
+  const urls = ['slow', 'fast', 'third', 'fourth', 'fifth'].map(name => `https://example.test/${name}`);
+  const work = urls.map(() => {
+    let resolve!: (result: ParseDownloadResult) => void;
+    const promise = new Promise<ParseDownloadResult>(done => { resolve = done; });
+    return { promise, resolve };
+  });
+  const preview = (index: number): ParseDownloadResult => ({ confirmation: videoConfirmation({
+    previewId: `preview-${index}`, pageUrl: urls[index], title: index === 1 ? '快速视频' : `视频 ${index}`, site: 'Example', duration: 10, thumbnail: null,
+    formats: [
+      { id: 'large', width: 1280, height: 720, ext: 'mp4', bytes: null, estimated: false },
+      { id: 'small', width: 640, height: 360, ext: 'mp4', bytes: null, estimated: false },
+    ],
+  }) });
+  const prepare = vi.fn((input: string) => work[urls.indexOf(input)].promise);
+  const discard = vi.fn().mockResolvedValue(undefined);
+  const submit = vi.fn().mockResolvedValue(undefined);
+  const user = userEvent.setup();
+  render(<NewDownloadDialog open placement="modal" initialInput={urls.join('\n')}
+    onScan={async () => urls.map(input => ({ input, valid: true, kind: 'web_video' }))}
+    onParse={prepare} onDiscardPrepared={discard} onSubmitBatch={submit} onClose={vi.fn()} />);
+  await waitFor(() => expect(prepare).toHaveBeenCalledTimes(4));
+  await act(async () => { work[1].resolve(preview(1)); await work[1].promise; });
+
+  const fast = within(await screen.findByRole('article', { name: '快速视频' }));
+  await waitFor(() => expect(prepare).toHaveBeenCalledTimes(5));
+  expect(screen.getAllByText('任务解析中')).toHaveLength(4);
+  await user.click(fast.getByRole('checkbox', { name: '640 × 360' }));
+  await user.click(fast.getByRole('checkbox', { name: '1280 × 720' }));
+  const create = screen.getByRole('button', { name: '新建任务' });
+  expect(create).toBeDisabled();
+  for (const index of [0, 2, 3, 4]) await user.click(screen.getByRole('checkbox', { name: `选择 ${urls[index]}` }));
+  expect(create).toBeEnabled();
+  await user.click(create);
+  const selected = submit.mock.calls[0][0] as DownloadDraftItem[];
+  expect(selected.map(item => [item.input, selectedResourceIds(item)])).toEqual([[urls[1], ['small']]]);
+
+  await act(async () => {
+    for (const index of [0, 2, 3, 4]) work[index].resolve(preview(index));
+    await Promise.all(work.map(item => item.promise));
+  });
+  for (const index of [0, 2, 3, 4]) expect(discard).toHaveBeenCalledWith(`video-page:preview-${index}`);
+  expect(discard).not.toHaveBeenCalledWith('video-page:preview-1');
+});
+
+it('discards late previews when a batch dialog is closed by its parent', async () => {
+  let resolve!: (result: ParseDownloadResult) => void;
+  const pending = new Promise<ParseDownloadResult>(done => { resolve = done; });
+  const discard = vi.fn().mockResolvedValue(undefined);
+  const props = {
+    placement: 'modal' as const,
+    initialInput: 'https://example.test/slow',
+    onScan: async () => [{ input: 'https://example.test/slow', valid: true as const, kind: 'web_video' as const }],
+    onParse: vi.fn(() => pending), onDiscardPrepared: discard, onSubmitBatch: vi.fn(), onClose: vi.fn(),
+  };
+  const { rerender } = render(<NewDownloadDialog {...props} open />);
+  await waitFor(() => expect(props.onParse).toHaveBeenCalledTimes(1));
+  rerender(<NewDownloadDialog {...props} open={false} />);
+  await act(async () => {
+    resolve({ confirmation: { taskId: 'video-page:late', title: 'Late', resources: [], processing: [], requiresConfirmation: true } });
+    await pending;
+  });
+  expect(discard).toHaveBeenCalledWith('video-page:late');
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+});
+
+it.each([6, 40])('shows all %i links and a known video while remaining site matching is still pending', async count => {
+  const urls = Array.from({ length: count }, (_, index) => `https://example.test/video-${index}`);
+  const initial: ScanDownloadResult[] = urls.map((input, index) => ({ input, valid: true, kind: index ? 'direct' : 'web_video' }));
+  const matched: ScanDownloadResult[] = urls.map(input => ({ input, valid: true, kind: 'web_video' }));
+  let finishScan!: (entries: ScanDownloadResult[]) => void;
+  const scanning = new Promise<ScanDownloadResult[]>(resolve => { finishScan = resolve; });
+  let finishKnown!: (result: ParseDownloadResult) => void;
+  const known = new Promise<ParseDownloadResult>(resolve => { finishKnown = resolve; });
+  const preview = (input: string): ParseDownloadResult => ({ confirmation: videoConfirmation({
+    previewId: input, pageUrl: input, title: input === urls[0] ? '先显示的视频' : input, site: 'Example', duration: 10, thumbnail: null,
+    formats: [{ id: '360p', width: 640, height: 360, ext: 'mp4', bytes: null, estimated: false }],
+  }) });
+  const prepare = vi.fn((input: string) => input === urls[0] ? known : Promise.resolve(preview(input)));
+  const scan = vi.fn((_input: string, onProgress?: (event: ScanDownloadProgress) => void) => {
+    onProgress?.({ entries: initial, pending: urls.slice(1) });
+    return scanning;
+  });
+  const user = userEvent.setup();
+  render(<NewDownloadDialog open placement="modal" initialInput={urls.join('\n')} onScan={scan}
+    onParse={prepare} onDiscardPrepared={vi.fn().mockResolvedValue(undefined)} onSubmitBatch={vi.fn()} onClose={vi.fn()} />);
+
+  await screen.findByRole('checkbox', { name: `选择 ${urls[count - 1]}` });
+  expect(screen.getAllByText('任务解析中')).toHaveLength(count);
+  expect(prepare).toHaveBeenCalledTimes(1);
+  await act(async () => { finishKnown(preview(urls[0])); await known; });
+  expect(await screen.findByRole('article', { name: '先显示的视频' })).toBeVisible();
+  expect(screen.getAllByText('任务解析中')).toHaveLength(count - 1);
+
+  await user.click(screen.getByRole('checkbox', { name: `选择 ${urls[1]}` }));
+  await user.click(screen.getByRole('button', { name: `移除 ${urls[count - 1]}` }));
+  await act(async () => { finishScan(matched); await scanning; });
+  await waitFor(() => expect(prepare).toHaveBeenCalledTimes(count - 1));
+  await waitFor(() => expect(screen.queryByText('任务解析中')).not.toBeInTheDocument());
+  expect(prepare.mock.calls.filter(([input]) => input === urls[0])).toHaveLength(1);
+  expect(prepare.mock.calls.some(([input]) => input === urls[count - 1])).toBe(false);
+  expect(screen.getByRole('checkbox', { name: `选择 ${urls[1]}` })).not.toBeChecked();
+});
+
 it('presents an indexed external magnet list as downloadable while aria2 metadata is paused', async () => {
   render(<NewDownloadDialog
     open
@@ -1003,5 +1110,5 @@ it('keeps the explicit empty new-task command usable inside the unified dialog',
   await user.click(screen.getByRole('button', { name: '解析任务' }));
 
   expect(await screen.findByText('manual.zip')).toBeVisible();
-  expect(onScan).toHaveBeenCalledWith('https://example.test/manual.zip');
+  expect(onScan).toHaveBeenCalledWith('https://example.test/manual.zip', expect.any(Function));
 });
