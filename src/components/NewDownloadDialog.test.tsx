@@ -905,6 +905,82 @@ it('marks a parsing task with the same live progress indicator used for metadata
   });
 });
 
+it('keeps an unmatched webpage failure until the user explicitly chooses ordinary download', async () => {
+  const user = userEvent.setup();
+  const input = 'https://example.test/watch.shtml';
+  const onParse = vi.fn(async (_input: string, _code?: string, probeVideo?: boolean): Promise<ParseDownloadResult> => {
+    if (probeVideo) throw new Error('此网页中没有找到可下载的视频。');
+    return { confirmation: { taskId: 'ordinary-html', title: 'watch.shtml', requiresConfirmation: true, resources: [], processing: [] } };
+  });
+  const submit = vi.fn().mockResolvedValue(undefined);
+  render(<NewDownloadDialog open placement="modal" initialInput={input}
+    onScan={async () => [{ input, valid: true, kind: 'direct', canProbeVideo: true }]}
+    onParse={onParse} onDiscardPrepared={vi.fn().mockResolvedValue(undefined)} onSubmitBatch={submit} onClose={vi.fn()} />);
+
+  expect(await screen.findByText('此网页中没有找到可下载的视频。')).toBeVisible();
+  expect(onParse).toHaveBeenCalledOnce();
+  expect(onParse).toHaveBeenCalledWith(input, undefined, true);
+  expect(screen.queryByText('1 项可下载')).not.toBeInTheDocument();
+  expect(screen.queryByText('watch.shtml', { exact: true })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: '新建任务' })).toBeDisabled();
+  expect(submit).not.toHaveBeenCalled();
+
+  await user.click(screen.getByRole('button', { name: '改为普通下载' }));
+  expect(await screen.findByText('watch.shtml', { exact: true })).toBeVisible();
+  expect(screen.getByText('1 项可下载')).toBeVisible();
+  expect(onParse).toHaveBeenLastCalledWith(input, undefined);
+  await user.click(screen.getByRole('button', { name: '新建任务' }));
+  expect((submit.mock.calls[0][0] as DownloadDraftItem[])[0].result?.confirmation?.taskId).toBe('ordinary-html');
+});
+
+it('selects the first video format when a generic webpage probe succeeds', async () => {
+  const user = userEvent.setup();
+  const input = 'https://example.test/watch.html';
+  const onParse = vi.fn(async (): Promise<ParseDownloadResult> => ({ confirmation: videoConfirmation({
+    previewId: 'generic-preview', pageUrl: input, title: '网页中的视频', site: 'Generic', duration: 10, thumbnail: null,
+    formats: [
+      { id: 'large', width: 1280, height: 720, ext: 'mp4', bytes: null, estimated: false },
+      { id: 'small', width: 640, height: 360, ext: 'mp4', bytes: null, estimated: false },
+    ],
+  }) }));
+  const submit = vi.fn().mockResolvedValue(undefined);
+  render(<NewDownloadDialog open placement="modal" initialInput={input}
+    onScan={async () => [{ input, valid: true, kind: 'direct', canProbeVideo: true }]}
+    onParse={onParse} onDiscardPrepared={vi.fn().mockResolvedValue(undefined)} onSubmitBatch={submit} onClose={vi.fn()} />);
+
+  const card = within(await screen.findByRole('article', { name: '网页中的视频' }));
+  expect(onParse).toHaveBeenCalledOnce();
+  expect(onParse).toHaveBeenCalledWith(input, undefined, true);
+  expect(card.getByRole('checkbox', { name: '选择 网页中的视频' })).toBeChecked();
+  expect(card.getByRole('checkbox', { name: '1280 × 720' })).toBeChecked();
+  expect(card.getByRole('checkbox', { name: '640 × 360' })).not.toBeChecked();
+  await user.click(screen.getByRole('button', { name: '新建任务' }));
+  expect(selectedResourceIds((submit.mock.calls[0][0] as DownloadDraftItem[])[0])).toEqual(['large']);
+});
+
+it('probes scanned legacy webpages on confirmation and requires an explicit ordinary-download choice', async () => {
+  const user = userEvent.setup();
+  const input = 'https://example.test/legacy.html';
+  const onClose = vi.fn();
+  const onParse = vi.fn(async (_input: string, _code?: string, probeVideo?: boolean) => {
+    if (probeVideo) throw new Error('此网页中没有找到可下载的视频。');
+  });
+  render(<NewDownloadDialog open placement="modal" initialInput={input}
+    onScan={async () => [{ input, valid: true, kind: 'direct', canProbeVideo: true }]}
+    onParse={onParse} onClose={onClose} />);
+
+  await user.click(screen.getByRole('button', { name: '开始解析下载' }));
+  expect(onParse).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('button', { name: '确认并完成' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('此网页中没有找到可下载的视频。');
+  expect(onParse).toHaveBeenCalledOnce();
+  expect(onParse).toHaveBeenCalledWith(input, undefined, true);
+  expect(onClose).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('button', { name: '改为普通下载' }));
+  await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+  expect(onParse).toHaveBeenLastCalledWith(input, undefined);
+});
+
 it('shows a fast video before slow pages finish and submits only the choices the user keeps', async () => {
   const urls = ['slow', 'fast', 'third', 'fourth', 'fifth'].map(name => `https://example.test/${name}`);
   const work = urls.map(() => {

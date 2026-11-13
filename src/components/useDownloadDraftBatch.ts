@@ -237,7 +237,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
           ...item,
           kind: entry.valid ? entry.kind : undefined,
           canProbeVideo: entry.valid && entry.canProbeVideo,
-          probeVideo: entry.valid && entry.kind === 'web_video',
+          probeVideo: entry.valid && (entry.kind === 'web_video' || Boolean(entry.canProbeVideo)),
           status: entry.valid ? 'parsing' : 'failed',
           selected: item.selected && entry.valid,
           error: entry.valid ? undefined : entry.message,

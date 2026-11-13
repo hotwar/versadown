@@ -15,6 +15,48 @@ function ready(taskId: string): ParseDownloadResult {
   return { confirmation: { taskId, title: taskId, requiresConfirmation: true, resources: [], processing: [] } };
 }
 
+it('probes an unmatched webpage after final scan classification instead of preparing HTML', async () => {
+  const input = 'https://example.test/watch.shtml';
+  const finalScan = deferred<ScanDownloadResult[]>();
+  const prepare = vi.fn().mockRejectedValue(new Error('No video found'));
+  const { result } = renderHook(() => useDownloadDraftBatch({
+    scan: (_input, onProgress) => {
+      onProgress?.({ entries: [{ input, valid: true, kind: 'direct' }], pending: [input] });
+      return finalScan.promise;
+    },
+    prepare, discard: vi.fn().mockResolvedValue(undefined),
+  }));
+  let scan!: Promise<void>;
+  await act(async () => { scan = result.current.start(input); });
+  expect(prepare).not.toHaveBeenCalled();
+  await act(async () => {
+    finalScan.resolve([{ input, valid: true, kind: 'direct', canProbeVideo: true }]);
+    await scan;
+  });
+  await waitFor(() => expect(result.current.items[0].status).toBe('failed'));
+  expect(prepare).toHaveBeenCalledOnce();
+  expect(prepare).toHaveBeenCalledWith(input, undefined, true);
+  expect(result.current.items[0]).toMatchObject({ probeVideo: true, selected: false, error: 'No video found' });
+  expect(result.current.items[0].result).toBeUndefined();
+  expect(result.current.canSubmit).toBe(false);
+});
+
+it('keeps non-probe file, media, local-network and share inputs on their ordinary paths', async () => {
+  const entries: ScanDownloadResult[] = [
+    { input: 'https://example.test/archive.zip', valid: true, kind: 'direct', canProbeVideo: false },
+    { input: 'https://example.test/movie.mp4', valid: true, kind: 'direct', canProbeVideo: false },
+    { input: 'http://192.168.1.10/files', valid: true, kind: 'direct', canProbeVideo: false },
+    { input: 'https://pan.baidu.com/s/example', valid: true, kind: 'cloud_share', canProbeVideo: false },
+  ];
+  const prepare = vi.fn(async (input: string) => ready(input));
+  const { result } = renderHook(() => useDownloadDraftBatch({
+    scan: async () => entries, prepare, discard: vi.fn().mockResolvedValue(undefined),
+  }));
+  await act(async () => { await result.current.start('mixed inputs'); });
+  await waitFor(() => expect(result.current.items.every(item => item.status === 'ready')).toBe(true));
+  expect(prepare.mock.calls).toEqual(entries.map(entry => [entry.input, undefined]));
+});
+
 it('prepares at most four items concurrently and publishes fast results before slow ones', async () => {
   const entries: ScanDownloadResult[] = Array.from({ length: 5 }, (_, index) => ({
     input: `https://example.test/${index + 1}.bin`, valid: true as const, kind: 'direct' as const

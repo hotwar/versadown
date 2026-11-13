@@ -663,6 +663,31 @@ pub(crate) fn parse_share_error_string(error: crate::cloud::QuarkError) -> Strin
     }
 }
 
+/// The production preparation route after cloud-share handling. Keep ordinary
+/// task preparation here so UI acceptance exercises the same fallback as IPC.
+pub(crate) async fn prepare_non_share_download(
+    input: &str,
+    store: &TaskStore,
+    video: &crate::web_video::VideoDownloads,
+    options: impl FnOnce() -> Result<crate::web_video::VideoOptions, String>,
+    probe_video: bool,
+    require_confirmation: bool,
+) -> Result<ParseDownloadOutcome, String> {
+    if let Some(page) = crate::web_video::routing::resolve(input.trim(), probe_video).await? {
+        let options = options()?;
+        let preview = video.prepare(page, &options).await?;
+        return Ok(ParseDownloadOutcome::WebVideo(preview));
+    }
+    let mut outcome = prepare_download(input, store).map_err(|error| error.to_string())?;
+    if outcome.duplicate.is_none() && require_confirmation && !outcome.requires_confirmation {
+        outcome.task = store
+            .transition(outcome.task.id, TaskStatus::AwaitingUser)
+            .map_err(|error| error.to_string())?;
+        outcome.requires_confirmation = true;
+    }
+    Ok(ParseDownloadOutcome::Task(outcome))
+}
+
 #[tauri::command]
 pub async fn parse_download(
     app: AppHandle,
@@ -728,23 +753,23 @@ pub async fn parse_download(
             }
         };
     }
-    if let Some(page) = crate::web_video::routing::resolve(input.trim(), probe_video).await? {
-        let options = crate::web_video::network_options(&state)?;
-        let preview = state.web_video.prepare(page, &options).await?;
-        return Ok(ParseDownloadOutcome::WebVideo(preview));
-    }
-    let mut outcome = prepare_download(&input, &state.store).map_err(|error| error.to_string())?;
+    let prepared = prepare_non_share_download(
+        &input,
+        &state.store,
+        &state.web_video,
+        || crate::web_video::network_options(&state),
+        probe_video,
+        require_confirmation.unwrap_or(false),
+    )
+    .await?;
+    let mut outcome = match prepared {
+        ParseDownloadOutcome::Task(outcome) => outcome,
+        other => return Ok(other),
+    };
     if outcome.duplicate.is_some() {
         redact_ftp_credentials(&mut outcome.task);
         ensure_private_task_access(&state, &outcome.task)?;
         return Ok(ParseDownloadOutcome::Task(outcome));
-    }
-    if require_confirmation.unwrap_or(false) && !outcome.requires_confirmation {
-        outcome.task = state
-            .store
-            .transition(outcome.task.id, TaskStatus::AwaitingUser)
-            .map_err(|error| error.to_string())?;
-        outcome.requires_confirmation = true;
     }
     if outcome.task.kind == "torrent" {
         let service = state
@@ -906,6 +931,17 @@ fn prepared_task_can_be_discarded(status: TaskStatus) -> bool {
     )
 }
 
+pub(crate) fn discard_prepared_download_without_engine(
+    store: &TaskStore,
+    id: Uuid,
+) -> Result<(), String> {
+    let task = store.find(id).map_err(|error| error.to_string())?;
+    if !prepared_task_can_be_discarded(task.status) || task.aria_gid.is_some() {
+        return Err("只能清理尚未提交的下载任务".to_string());
+    }
+    store.remove_task_record(id).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub async fn discard_prepared_download(
     task_id: String,
@@ -921,6 +957,9 @@ pub async fn discard_prepared_download(
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let task = state.store.find(id).map_err(|error| error.to_string())?;
     ensure_private_task_access(&state, &task)?;
+    if task.aria_gid.is_none() {
+        return discard_prepared_download_without_engine(&state.store, id);
+    }
     if !prepared_task_can_be_discarded(task.status) {
         return Err("只能清理尚未提交的下载任务".to_string());
     }
@@ -4140,6 +4179,59 @@ mod tests {
         assert!(!prepared_task_can_be_discarded(TaskStatus::Completed));
     }
 
+    #[tokio::test]
+    async fn shared_preparation_keeps_plain_pages_and_confirmation_without_video_options() {
+        let store = Arc::new(TaskStore::open_in_memory().unwrap());
+        let video = crate::web_video::VideoDownloads::new(store.clone(), 1, |_| {});
+        let outcome = prepare_non_share_download(
+            "http://127.0.0.1/watch.shtml", &store, &video,
+            || panic!("ordinary preparation must not read video settings"), false, true,
+        ).await.unwrap();
+        let ParseDownloadOutcome::Task(outcome) = outcome else { panic!("expected ordinary task") };
+        assert_eq!(outcome.task.kind, "file");
+        assert_eq!(outcome.task.name, "watch.shtml");
+        assert!(outcome.requires_confirmation);
+        assert_eq!(outcome.task.status, TaskStatus::AwaitingUser);
+        discard_prepared_download_without_engine(&store, outcome.task.id).unwrap();
+        assert!(store.find(outcome.task.id).is_err());
+    }
+
+    #[tokio::test]
+    async fn shared_preparation_does_not_transition_duplicate_tasks() {
+        let store = Arc::new(TaskStore::open_in_memory().unwrap());
+        let task = store.create(crate::NewTask::direct("http://127.0.0.1/existing.zip")).unwrap();
+        let video = crate::web_video::VideoDownloads::new(store.clone(), 1, |_| {});
+        let outcome = prepare_non_share_download(
+            &task.source, &store, &video, || panic!("ordinary task"), false, true,
+        ).await.unwrap();
+        let ParseDownloadOutcome::Task(outcome) = outcome else { panic!("expected duplicate task") };
+        assert!(outcome.duplicate.is_some());
+        assert!(!outcome.requires_confirmation);
+        assert_eq!(store.find(task.id).unwrap().status, task.status);
+    }
+
+    #[tokio::test]
+    async fn shared_preparation_propagates_video_errors_without_creating_plain_tasks() {
+        let store = Arc::new(TaskStore::open_in_memory().unwrap());
+        let video = crate::web_video::VideoDownloads::new(store.clone(), 1, |_| {});
+        let error = prepare_non_share_download(
+            "https://youtu.be/62xlzGs8LXA", &store, &video,
+            || Err("video.error.cookieFile".to_owned()), true, true,
+        ).await.err().unwrap();
+        assert_eq!(error, "video.error.cookieFile");
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn plain_prepared_cleanup_does_not_remove_submitted_tasks() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut task = store.create(crate::NewTask::direct("http://127.0.0.1/running.zip")).unwrap();
+        task.aria_gid = Some("0123456789abcdef".into());
+        let task = store.apply_transfer_snapshot(task).unwrap();
+        assert!(discard_prepared_download_without_engine(&store, task.id).is_err());
+        assert!(store.find(task.id).is_ok());
+    }
+
     #[test]
     fn task_update_events_use_the_same_status_message_contract_for_files_and_directory_roots() {
         let store = TaskStore::open_in_memory().unwrap();
@@ -4268,7 +4360,7 @@ mod tests {
             .split_once("pub async fn parse_download(")
             .unwrap()
             .1
-            .split_once("let mut outcome = prepare_download")
+            .split_once("let prepared = prepare_non_share_download")
             .unwrap()
             .0;
         assert!(
