@@ -928,7 +928,7 @@ it('keeps an unmatched webpage failure until the user explicitly chooses ordinar
   await user.click(screen.getByRole('button', { name: '改为普通下载' }));
   expect(await screen.findByText('watch.shtml', { exact: true })).toBeVisible();
   expect(screen.getByText('1 项可下载')).toBeVisible();
-  expect(onParse).toHaveBeenLastCalledWith(input, undefined);
+  expect(onParse).toHaveBeenLastCalledWith(input, undefined, false);
   await user.click(screen.getByRole('button', { name: '新建任务' }));
   expect((submit.mock.calls[0][0] as DownloadDraftItem[])[0].result?.confirmation?.taskId).toBe('ordinary-html');
 });
@@ -978,7 +978,7 @@ it('probes scanned legacy webpages on confirmation and requires an explicit ordi
   expect(onClose).not.toHaveBeenCalled();
   await user.click(screen.getByRole('button', { name: '改为普通下载' }));
   await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
-  expect(onParse).toHaveBeenLastCalledWith(input, undefined);
+  expect(onParse).toHaveBeenLastCalledWith(input, undefined, false);
 });
 
 it('shows a fast video before slow pages finish and submits only the choices the user keeps', async () => {
