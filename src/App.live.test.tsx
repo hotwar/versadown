@@ -16,7 +16,7 @@ const state = vi.hoisted(() => ({
   moveToRecycle: vi.fn(), purgeTasks: vi.fn(), deleteTasks: vi.fn(), setTaskPrivacy: vi.fn(), clipboardWrite: vi.fn(), clipboardRead: vi.fn(),
   updateAiSettings: vi.fn(), listAiModels: vi.fn(), startDragging: vi.fn().mockResolvedValue(undefined),
   reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn(), getCompletedCloudAuthorization: vi.fn(),
-  getSettings: vi.fn(), configurePrivacy: vi.fn(), privacyVisibility: vi.fn(), windowSnapshot: vi.fn(),
+  getSettings: vi.fn(), updateSettings: vi.fn(), openNativeFile: vi.fn(), configurePrivacy: vi.fn(), privacyVisibility: vi.fn(), windowSnapshot: vi.fn(),
   updateCheck: vi.fn(), openExternalUrl: vi.fn(), cloudInvoke: vi.fn(),
   dragDropHandler: undefined as undefined | ((event: { payload: unknown }) => void),
   onDragDropEvent: vi.fn(), scaleFactor: vi.fn(), takeExternalLinks: vi.fn()
@@ -32,7 +32,7 @@ vi.mock('./lib/api', () => ({
   checkForAppUpdate: state.updateCheck, openExternalUrl: state.openExternalUrl,
   defaultSettings: { downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false } },
   getSettings: state.getSettings, configurePrivacyDownload: state.configurePrivacy,
-  updateSettings: vi.fn(), updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: state.openDirectory,
+  updateSettings: state.updateSettings, updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: state.openDirectory,
   moveTaskToRecycle: state.moveToRecycle, purgeRecycledTasks: state.purgeTasks, deleteTasks: state.deleteTasks, setTaskPrivacy: state.setTaskPrivacy, resolveDuplicateDownload: state.resolveDuplicate
 }));
 vi.mock('./lib/downloadEvents', async (importOriginal) => {
@@ -58,6 +58,7 @@ vi.mock('@tauri-apps/api/core', async (importOriginal) => ({
     ? state.windowSnapshot() : state.cloudInvoke(command, args),
 }));
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: state.clipboardWrite, readText: state.clipboardRead }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: state.openNativeFile }));
 vi.mock('@tauri-apps/api/window', async (importOriginal) => ({
   ...await importOriginal<typeof import('@tauri-apps/api/window')>(),
   getCurrentWindow: () => ({
@@ -116,6 +117,8 @@ beforeEach(() => {
   state.getCompletedCloudAuthorization.mockReset().mockResolvedValue(null);
   state.completeCloudAuthorization.mockReset();
   state.getSettings.mockReset();
+  state.updateSettings.mockReset().mockImplementation(async settings => settings);
+  state.openNativeFile.mockReset().mockResolvedValue(null);
   state.getSettings.mockResolvedValue({ downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false } });
   state.configurePrivacy.mockReset();
   state.privacyVisibility.mockReset();
@@ -139,6 +142,26 @@ beforeEach(() => {
     state.listeners.set(name, handler);
     return Promise.resolve(() => undefined);
   });
+});
+
+it('selects a video cookie file through the native picker only after a user click', async () => {
+  state.openNativeFile.mockResolvedValue('C:\\Cookies\\session.cookies');
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(within(screen.getByRole('navigation', { name: '主导航' })).getByRole('button', { name: '设置' }));
+  await user.click(screen.getByRole('tab', { name: '网络' }));
+  expect(state.openNativeFile).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('button', { name: '选择 Cookie 文件' }));
+
+  await waitFor(() => expect(state.openNativeFile).toHaveBeenCalledWith({
+    directory: false,
+    multiple: false,
+    defaultPath: undefined,
+    title: '选择 Cookie 文件',
+    filters: [{ name: 'Cookie 文本文件', extensions: ['txt'] }, { name: '所有文件', extensions: ['*'] }]
+  }));
+  await waitFor(() => expect(state.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ videoCookieFile: 'C:\\Cookies\\session.cookies' })));
+  expect(screen.getByRole('textbox', { name: 'Cookie 文件路径' })).toHaveValue('C:\\Cookies\\session.cookies');
 });
 
 it('shows privacy task controls immediately after enabling an existing privacy password', async () => {

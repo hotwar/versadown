@@ -204,6 +204,7 @@ export interface AppSettings {
   downloadDirectory: string;
   launcherVisibility: LauncherVisibility;
   proxy: ProxySettings;
+  videoCookieFile?: string;
   ai: AiSettings;
   magnetMetadata: MagnetMetadataSettings;
   aria2: Aria2Settings;

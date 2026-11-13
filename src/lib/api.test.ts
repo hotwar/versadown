@@ -15,6 +15,26 @@ afterEach(() => {
   Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
 });
 
+it('round-trips an optional video cookie path and sends an explicit clear to settings', async () => {
+  const { defaultSettings, getSettings, updateSettings } = await import('./api');
+  const configured = { ...defaultSettings, videoCookieFile: 'C:\\Cookies\\session.txt' };
+  native.invoke.mockResolvedValueOnce(configured);
+  await expect(getSettings()).resolves.toEqual(configured);
+
+  const cleared = { ...configured, videoCookieFile: '' };
+  native.invoke.mockResolvedValueOnce(cleared);
+  await expect(updateSettings(cleared)).resolves.toEqual(cleared);
+  expect(native.invoke).toHaveBeenLastCalledWith('update_settings', { settings: cleared });
+});
+
+it('localizes cookie validation and access errors from native video commands', async () => {
+  const { defaultSettings, updateSettings, parseDownload } = await import('./api');
+  native.invoke.mockRejectedValueOnce('video.error.cookieFile');
+  await expect(updateSettings({ ...defaultSettings, videoCookieFile: 'missing.txt' })).rejects.toThrow('Cookie 文件无法读取或不是 Netscape cookies.txt 格式');
+  native.invoke.mockRejectedValueOnce('video.error.cookies');
+  await expect(parseDownload('https://example.test/video', undefined, true, true)).rejects.toThrow('网站需要有效的访问 Cookie');
+});
+
 it('classifies ED2K, FTP, HLS and DASH in the browser fallback', async () => {
   const { parseLocally } = await import('./api');
 

@@ -325,6 +325,7 @@ export async function updateSettings(settings: AppSettings): Promise<AppSettings
   try {
     return await invoke<AppSettings>('update_settings', { settings });
   } catch (error) {
+    if (typeof error === 'string' && error.startsWith('video.error.')) throw new Error(videoMessage(error));
     if (typeof error === 'string' && error.startsWith('macos.links.')) {
       throw new Error(t(error as TranslationKey));
     }

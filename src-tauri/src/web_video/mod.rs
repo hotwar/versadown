@@ -1,5 +1,6 @@
 mod aria2_checkpoint;
 mod aria2_transfer;
+mod cookies;
 mod extractor;
 mod previews;
 mod proxy;
@@ -9,7 +10,11 @@ mod transfer;
 
 use crate::commands::{self, AppState};
 use crate::{DownloadTask, NewTask, TaskStatus, TaskStore};
-use std::{collections::HashMap, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tauri::State;
 use tokio::sync::{oneshot, Mutex, Semaphore};
 use uuid::Uuid;
@@ -25,6 +30,13 @@ type Job = (oneshot::Sender<()>, tauri::async_runtime::JoinHandle<()>);
 pub(crate) enum VideoTransferEngine {
     Native,
     Aria2,
+}
+
+#[derive(Default)]
+pub(crate) struct VideoOptions {
+    pub proxy: Option<String>,
+    pub rate: u64,
+    pub cookie_file: Option<PathBuf>,
 }
 
 pub(crate) struct VideoDownloads {
@@ -53,9 +65,14 @@ impl VideoDownloads {
     pub(crate) async fn prepare(
         &self,
         page: PlaybackPage,
-        proxy: Option<&str>,
+        options: &VideoOptions,
     ) -> Result<VideoPreview, String> {
-        let preview = extractor::inspect(page, proxy).await?;
+        let preview = extractor::inspect(
+            page,
+            options.proxy.as_deref(),
+            options.cookie_file.as_deref(),
+        )
+        .await?;
         self.previews.remember(&preview)?;
         Ok(preview)
     }
@@ -67,8 +84,7 @@ impl VideoDownloads {
         directory: &Path,
         private_download: bool,
         post_processing_note: Option<&str>,
-        proxy: Option<String>,
-        rate: u64,
+        options: VideoOptions,
     ) -> Result<DownloadTask, String> {
         let previews::SelectedVideo {
             media_id,
@@ -128,7 +144,7 @@ impl VideoDownloads {
             )
         })();
         let result = match preparation {
-            Ok(record) => self.start(record, proxy, rate).await,
+            Ok(record) => self.start(record, options).await,
             Err(e) => Err(e.to_string()),
         };
         match result {
@@ -143,8 +159,7 @@ impl VideoDownloads {
     async fn start(
         &self,
         mut task: DownloadTask,
-        proxy: Option<String>,
-        rate: u64,
+        options: VideoOptions,
     ) -> Result<DownloadTask, String> {
         let mut jobs = self.jobs.lock().await;
         jobs.retain(|_, (_, job)| !job.inner().is_finished());
@@ -175,7 +190,11 @@ impl VideoDownloads {
             .reserved_output_path(task.id)
             .map_err(|e| e.to_string())?
             .ok_or("video.error.output")?;
-        let cmd = transfer::transfer_command(proxy.as_deref(), rate)?;
+        let cookies = cookies::CookieFile::load(options.cookie_file.as_deref())?;
+        let mut cmd = transfer::transfer_command(options.proxy.as_deref(), options.rate)?;
+        if let Some(cookies) = &cookies {
+            cookies.apply(&mut cmd);
+        }
         task.status = TaskStatus::Queued;
         task.error = None;
         task.download_speed = 0;
@@ -188,6 +207,9 @@ impl VideoDownloads {
         let (stop, mut stopped) = oneshot::channel();
         let (slots, store, emit) = (self.slots.clone(), self.store.clone(), self.emit.clone());
         let job = tauri::async_runtime::spawn(async move {
+            // yt-dlp reads and writes this private snapshot. Keep it until the
+            // worker (including cancellation and merging) has fully exited.
+            let _cookies = cookies;
             let _permit = tokio::select! {
                 biased;
                 _ = &mut stopped => return,
@@ -284,20 +306,26 @@ impl VideoDownloads {
             "pause" => self.stop(task.id, TaskStatus::Paused).await,
             "cancel" => self.stop(task.id, TaskStatus::Cancelled).await,
             "retry" | "resume" => {
-                let (proxy, rate) = network_options(state)?;
-                self.start(task, proxy, rate).await
+                self.start(task, network_options(state)?).await
             }
             _ => Err("video.error.state".into()),
         }
     }
 }
 
-pub(crate) fn network_options(state: &AppState) -> Result<(Option<String>, u64), String> {
+pub(crate) fn network_options(state: &AppState) -> Result<VideoOptions, String> {
     let settings = state.settings.lock().map_err(|_| "video.error.state")?;
-    Ok((
-        commands::proxy_url(&settings.proxy)?,
-        settings.aria2.overall_download_limit,
-    ))
+    Ok(VideoOptions {
+        proxy: commands::proxy_url(&settings.proxy)?,
+        rate: settings.aria2.overall_download_limit,
+        cookie_file: (!settings.video_cookie_file.is_empty())
+            .then(|| PathBuf::from(&settings.video_cookie_file)),
+    })
+}
+
+pub(crate) fn validate_cookie_file(path: &str) -> Result<(), String> {
+    cookies::CookieFile::load((!path.is_empty()).then(|| Path::new(path)))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -315,7 +343,8 @@ pub(crate) async fn submit_video_download(
         destination_directory.as_deref(),
     )?;
     let directory = options.directory.ok_or("video.error.output")?;
-    let (_, rate) = network_options(&state)?;
+    let mut network = network_options(&state)?;
+    network.proxy = options.proxy;
     let task = state
         .web_video
         .submit(
@@ -324,8 +353,7 @@ pub(crate) async fn submit_video_download(
             &directory,
             private_download,
             post_processing_note.as_deref(),
-            options.proxy,
-            rate,
+            network,
         )
         .await?;
     commands::task_payload(&state.store, task)
@@ -361,3 +389,6 @@ pub(crate) fn clear_partial(store: &TaskStore, task: &DownloadTask) -> Result<()
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod cookie_tests;

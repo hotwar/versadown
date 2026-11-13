@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useRef, useState, useSyncExternalStore } from 're
 import { AiSettings, AiSettingsInput, AppSettings, Aria2Settings, LauncherVisibility, MagnetMetadataSettings, ProxyProtocol } from '../lib/types';
 import { getThemeMode, setThemeMode, subscribeTheme, themeOptions, ThemeMode } from '../lib/theme';
 import { localeMetadata, useTranslation } from '../i18n';
+import { videoMessage } from '../lib/webVideo';
 
 type SettingsTab = 'display' | 'network' | 'advanced';
 
@@ -15,6 +16,7 @@ interface SettingsPanelProps {
   initial: AppSettings;
   onChange(settings: AppSettings): void | Promise<void>;
   browseDirectory?(currentDirectory: string): Promise<string | null>;
+  browseVideoCookieFile?(currentFile: string): Promise<string | null>;
   saveAiSettings?(settings: AiSettingsInput): Promise<AiSettings>;
   loadAiModels?(settings: AiSettingsInput): Promise<string[]>;
   onNotice?(notice: { kind: 'success' | 'error'; message: string }): void;
@@ -51,11 +53,15 @@ function PasswordVisibilityIcon({ visible }: { visible: boolean }) {
     : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12s3.2-8 9-8 9 8 9 8-3.2 8-9 8-9-8-9-8Z" /><circle cx="12" cy="12" r="3" /></svg>;
 }
 
-export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettings, loadAiModels, onNotice, configurePrivacyDownload }: SettingsPanelProps) {
+export function SettingsPanel({ initial, onChange, browseDirectory, browseVideoCookieFile, saveAiSettings, loadAiModels, onNotice, configurePrivacyDownload }: SettingsPanelProps) {
   const { t, localePreference, setLocalePreference } = useTranslation();
   const [downloadDirectory, setDownloadDirectory] = useState(initial.downloadDirectory);
   const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>(initial.launcherVisibility);
   const [proxy, setProxy] = useState(initial.proxy);
+  const [videoCookieFile, setVideoCookieFile] = useState(initial.videoCookieFile ?? '');
+  const [savedVideoCookieFile, setSavedVideoCookieFile] = useState(initial.videoCookieFile);
+  const [videoCookieBusy, setVideoCookieBusy] = useState(false);
+  const [videoCookieStatus, setVideoCookieStatus] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [ai, setAi] = useState<AiSettings>(initial.ai ?? disabledAiSettings);
   const magnetMetadata: MagnetMetadataSettings = initial.magnetMetadata ?? defaultMagnetMetadataSettings;
   const [aria2, setAria2] = useState<Aria2Settings>({ ...defaultAria2Settings, ...initial.aria2 });
@@ -84,10 +90,15 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
   const [activeTab, setActiveTab] = useState<SettingsTab>('display');
   const themeMode = useSyncExternalStore(subscribeTheme, getThemeMode, getThemeMode);
 
+  useEffect(() => {
+    setVideoCookieFile(initial.videoCookieFile ?? '');
+    setSavedVideoCookieFile(initial.videoCookieFile);
+  }, [initial.videoCookieFile]);
+
   useEffect(() => { const nextAria2 = { ...defaultAria2Settings, ...initial.aria2 }; const nextCloudUploadLimit = initial.cloudUploadLimit ?? 0; setDownloadDirectory(initial.downloadDirectory); setLauncherVisibility(initial.launcherVisibility); setProxy(initial.proxy); setAi(initial.ai ?? disabledAiSettings); setAria2(nextAria2); setCloudUploadLimit(nextCloudUploadLimit); setRateLimitInputs(createRateLimitInputs(nextAria2, nextCloudUploadLimit)); setDeleteTransferredShareFilesAfterDownload(initial.deleteTransferredShareFilesAfterDownload ?? true); setDownloadStatusNotifications(initial.downloadStatusNotifications ?? true); setAssociateDownloadLinks(initial.associateDownloadLinks ?? true); setPrivacyDownloadEnabled(initial.privacyDownloadEnabled ?? false); setPrivacyPasswordConfigured(initial.privacyPasswordConfigured ?? false); }, [initial]);
 
   function currentSettings(overrides: Partial<AppSettings> = {}): AppSettings {
-    return { downloadDirectory, launcherVisibility, proxy, ai, magnetMetadata, aria2, ...(cloudUploadLimit || initial.cloudUploadLimit !== undefined ? { cloudUploadLimit } : {}), deleteTransferredShareFilesAfterDownload, ...(initial.downloadStatusNotifications !== undefined ? { downloadStatusNotifications } : {}), ...(initial.associateDownloadLinks !== undefined ? { associateDownloadLinks } : {}), ...overrides };
+    return { downloadDirectory, launcherVisibility, proxy, ...(savedVideoCookieFile !== undefined ? { videoCookieFile: savedVideoCookieFile } : {}), ai, magnetMetadata, aria2, ...(cloudUploadLimit || initial.cloudUploadLimit !== undefined ? { cloudUploadLimit } : {}), deleteTransferredShareFilesAfterDownload, ...(initial.downloadStatusNotifications !== undefined ? { downloadStatusNotifications } : {}), ...(initial.associateDownloadLinks !== undefined ? { associateDownloadLinks } : {}), ...overrides };
   }
 
   function saveWithoutStatus(settings: AppSettings) {
@@ -115,6 +126,35 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
     event.preventDefault();
     saveWithoutStatus(currentSettings({ proxy: { ...proxy, host: proxy.host.trim(), username: proxy.username.trim() } }));
     setSaved(true);
+  }
+
+  async function saveVideoCookieFile(path: string) {
+    const normalized = path.trim();
+    setVideoCookieStatus(null);
+    setVideoCookieBusy(true);
+    try {
+      await onChange(currentSettings({ videoCookieFile: normalized }));
+      setVideoCookieFile(normalized);
+      setSavedVideoCookieFile(normalized);
+      setVideoCookieStatus({ kind: 'success', message: t('settings.videoCookies.saved') });
+    } catch (error) {
+      setVideoCookieStatus({ kind: 'error', message: videoMessage(error) });
+    } finally {
+      setVideoCookieBusy(false);
+    }
+  }
+
+  async function chooseVideoCookieFile() {
+    setVideoCookieStatus(null);
+    setVideoCookieBusy(true);
+    try {
+      const selected = await browseVideoCookieFile?.(videoCookieFile);
+      if (selected) await saveVideoCookieFile(selected);
+    } catch (error) {
+      setVideoCookieStatus({ kind: 'error', message: videoMessage(error) });
+    } finally {
+      setVideoCookieBusy(false);
+    }
   }
 
   function saveDownloadDirectory(event: FormEvent) {
@@ -384,6 +424,18 @@ export function SettingsPanel({ initial, onChange, browseDirectory, saveAiSettin
           <button className="primary settings-inline-save" type="submit">{t('settings.proxy.save')}</button>
         </fieldset>
         {saved && <div className="settings-actions"><span role="status">{t('settings.savedNewTasks')}</span></div>}
+      </form>
+      <form className="proxy-settings video-cookie-settings" onSubmit={event => { event.preventDefault(); void saveVideoCookieFile(videoCookieFile); }}>
+        <div className="setting-row"><span><b>{t('settings.videoCookies.title')}</b><small id="video-cookie-description">{t('settings.videoCookies.description')}</small></span></div>
+        <fieldset disabled={videoCookieBusy}>
+          <label><span>{t('settings.videoCookies.path')}</span><input aria-label={t('settings.videoCookies.path')} aria-describedby="video-cookie-description" autoComplete="off" spellCheck={false} value={videoCookieFile} placeholder={t('settings.videoCookies.placeholder')} onChange={event => { setVideoCookieFile(event.target.value); setVideoCookieStatus(null); }} /></label>
+          <div className="video-cookie-actions">
+            <button className="secondary" type="button" disabled={!browseVideoCookieFile} onClick={() => void chooseVideoCookieFile()}>{t('settings.videoCookies.choose')}</button>
+            <button className="secondary" type="button" disabled={!videoCookieFile && !savedVideoCookieFile} onClick={() => void saveVideoCookieFile('')}>{t('settings.videoCookies.clear')}</button>
+            <button className="primary settings-inline-save" type="submit">{t('settings.videoCookies.save')}</button>
+          </div>
+        </fieldset>
+        {videoCookieStatus && <div className="settings-actions"><span role="status" className={videoCookieStatus.kind}>{videoCookieStatus.message}</span></div>}
       </form>
       <form className="proxy-settings rate-limit-settings" onSubmit={saveRateLimits}>
         <div className="setting-row rate-limit-heading"><span><b>{t('settings.rateLimit')}</b><small>{t('settings.unlimitedHint')}</small></span></div>
