@@ -1,9 +1,9 @@
-use super::sites::{classify, manual_page, page_candidate, playback_url, PageRoute, PlaybackPage};
+use super::sites::{classify, manual_page, page_candidate, playback_url, PlaybackPage};
 use crate::{CandidateKind, ScannedInput};
 use std::{collections::HashMap, future::Future};
 
-/// Only HTTP links left over from the native file/share/protocol handlers need
-/// an offline extractor match. Preserve the scanner's order and other errors.
+/// Route webpages immediately after native file/share/protocol handling. Only
+/// media-shaped URLs wait for offline matching; preserve order and other errors.
 pub(crate) async fn scan(input: &str) -> Vec<ScannedInput> {
     scan_with_progress(input, |_, _| {}).await
 }
@@ -26,19 +26,20 @@ async fn scan_with_classifier<F, Fut>(
 ) -> Vec<ScannedInput>
 where
     F: FnOnce(Vec<String>) -> Fut,
-    Fut: Future<Output = HashMap<String, PageRoute>>,
+    Fut: Future<Output = HashMap<String, PlaybackPage>>,
 {
     let mut entries = crate::scan_download_inputs(input);
-    let pending: Vec<_> = entries
-        .iter()
-        .filter(|e| e.kind == Some(CandidateKind::Direct))
-        .filter(|e| {
-            url::Url::parse(&e.input).is_ok_and(|url| {
-                playback_url(&url).is_none() && page_candidate(&url).is_some()
-            })
-        })
-        .map(|e| e.input.clone())
-        .collect();
+    let mut pending = Vec::new();
+    for entry in entries.iter_mut().filter(|entry| entry.kind == Some(CandidateKind::Direct)) {
+        let Ok(url) = url::Url::parse(&entry.input) else { continue };
+        if manual_page(&url).is_some() {
+            entry.kind = Some(CandidateKind::WebVideo);
+            // A failed webpage probe may still be explicitly downloaded as a file.
+            entry.can_probe_video = true;
+        } else if page_candidate(&url).is_some() {
+            pending.push(entry.input.clone());
+        }
+    }
     // Publish the complete local scan before starting the offline extractor.
     // Only pending rows need to wait before choosing their final download route.
     on_progress(&entries, &pending);
@@ -47,10 +48,8 @@ where
     }
     let routes = classify(pending).await;
     for entry in &mut entries {
-        match routes.get(&entry.input) {
-            Some(PageRoute::Automatic(_)) => entry.kind = Some(CandidateKind::WebVideo),
-            Some(PageRoute::OnRequest(_)) => entry.can_probe_video = true,
-            None => (),
+        if routes.contains_key(&entry.input) {
+            entry.kind = Some(CandidateKind::WebVideo);
         }
     }
     entries
@@ -70,22 +69,18 @@ async fn resolve_with_classifier<F, Fut>(
 ) -> Result<Option<PlaybackPage>, String>
 where
     F: FnOnce(String) -> Fut,
-    Fut: Future<Output = Option<PageRoute>>,
+    Fut: Future<Output = Option<PlaybackPage>>,
 {
-    // The scan or the user's explicit probe already chose video extraction.
-    // Repeating a failed cold matcher here would serialize that same delay for
-    // every queued page. Payload-shaped URLs still need a dedicated match.
-    if probe {
-        if let Some(page) = url::Url::parse(input)
-            .ok()
-            .and_then(|url| playback_url(&url).or_else(|| manual_page(&url)))
-        {
-            return Ok(Some(page));
-        }
+    // Automatic and explicit video preparation share the same local webpage
+    // decision. The command handles an explicit ordinary-file choice upstream.
+    if let Some(page) = url::Url::parse(input)
+        .ok()
+        .and_then(|url| playback_url(&url).or_else(|| manual_page(&url)))
+    {
+        return Ok(Some(page));
     }
     match classify(input.to_owned()).await {
-        Some(PageRoute::Automatic(page)) => Ok(Some(page)),
-        Some(PageRoute::OnRequest(page)) if probe => Ok(Some(page)),
+        Some(page) => Ok(Some(page)),
         None if probe => Err("video.error.unsupported".into()),
         _ => Ok(None),
     }
@@ -111,7 +106,7 @@ mod tests {
     use tokio::sync::Notify;
 
     #[tokio::test]
-    async fn a_failed_matcher_routes_pages_to_extraction_without_repeating_the_matcher() {
+    async fn webpages_route_to_extraction_without_needing_the_matcher() {
         let urls = [
             "https://www.acfun.cn/v/ac35457073",
             "https://tv.cctv.com/2026/10/01/VIDEgXcuU2L3NYhZgJDaWj8A261001.shtml",
@@ -126,11 +121,12 @@ mod tests {
         for (entry, expected) in scanned.iter().zip(urls) {
             assert_eq!(entry.input, expected);
             assert!(entry.valid);
-            assert!(!entry.can_probe_video);
         }
         assert_eq!(scanned[2].kind, Some(CandidateKind::Direct));
+        assert!(!scanned[2].can_probe_video);
         for entry in &scanned[..2] {
             assert_eq!(entry.kind, Some(CandidateKind::WebVideo));
+            assert!(entry.can_probe_video);
             let page = resolve_with_classifier(&entry.input, true, |_| async {
                 panic!("an already requested probe must not repeat the failed offline matcher")
             })
@@ -142,20 +138,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_manual_probe_bypasses_matching_but_normal_negative_keeps_direct_download() {
+    async fn automatic_and_explicit_webpage_probes_bypass_matching() {
         let input = "https://news.example.org/post.shtml";
-        let ordinary = resolve_with_classifier(input, false, |input| async move {
-            Some(PageRoute::OnRequest(manual_page(&input.parse().unwrap()).unwrap()))
-        })
-        .await
-        .unwrap();
-        assert!(ordinary.is_none());
-        assert!(resolve_with_classifier(input, true, |_| async {
-            panic!("manual probing should call extraction directly")
-        })
-        .await
-        .unwrap()
-        .is_some());
+        for probe in [false, true] {
+            assert!(resolve_with_classifier(input, probe, |_| async {
+                panic!("webpage preparation should call extraction directly")
+            }).await.unwrap().is_some());
+        }
     }
 
     #[tokio::test]
@@ -171,7 +160,7 @@ mod tests {
         );
         let playback = "https://commons.wikimedia.org/wiki/File:Example.webm";
         let page = resolve_with_classifier(playback, true, |input| async move {
-            Some(PageRoute::Automatic(page_candidate(&input.parse().unwrap()).unwrap()))
+            page_candidate(&input.parse().unwrap())
         })
         .await
         .unwrap()
@@ -180,38 +169,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forty_rows_are_published_before_offline_matching_can_finish() {
-        let input = (0..8)
-            .flat_map(|i| {
-                [
-                    format!("https://tv.cctv.com/2026/10/01/VIDEgXcuU2L3NYhZgJDaWj8A261001.shtml?sample={i}"),
-                    format!("https://v.youku.com/v_show/id_XNDIzNjE2MTc4NA==.html?sample={i}"),
-                    format!("https://www.bilibili.com/video/BV1bK411W797?p={}", i + 1),
-                    format!("https://youtu.be/62xlzGs8LX{i}"),
-                    format!("https://cdn.example.org/archive-{i}.zip"),
-                ]
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+    async fn six_and_forty_webpage_rows_are_ready_for_extraction_in_the_first_snapshot() {
+        for count in [6, 40] {
+            let urls = (0..count).map(|i| match i % 3 {
+                0 => format!("https://tv.cctv.com/2026/10/01/VIDEgXcuU2L3NYhZgJDaWj8A261001.shtml?sample={i}"),
+                1 => format!("https://v.youku.com/v_show/id_XNDIzNjE2MTc4NA==.html?sample={i}"),
+                _ => format!("https://www.bilibili.com/video/BV1bK411W797?p={}", i + 1),
+            }).collect::<Vec<_>>();
+            let announced = Cell::new(false);
+            let final_entries = scan_with_classifier(&urls.join("\n"), |entries, pending| {
+                assert_eq!(entries.len(), count);
+                assert!(pending.is_empty());
+                assert!(entries.iter().all(|entry| entry.valid && entry.kind == Some(CandidateKind::WebVideo)));
+                for (index, entry) in entries.iter().enumerate() {
+                    assert_eq!(entry.can_probe_video, index % 3 != 2);
+                }
+                announced.set(true);
+            }, |_| async {
+                panic!("ordinary webpage batches must not launch the offline matcher")
+            }).await;
+            assert!(announced.get());
+            assert_eq!(final_entries.len(), count);
+            assert!(final_entries.iter().all(|entry| entry.kind == Some(CandidateKind::WebVideo)));
+        }
+    }
+
+    #[tokio::test]
+    async fn webpages_are_released_while_media_shaped_urls_wait_for_matching() {
+        let urls = [
+            "https://www.acfun.cn/v/ac48980313",
+            "https://commons.wikimedia.org/wiki/File:Example.mp4",
+            "https://cdn.example.org/clip.mp4",
+            "https://cdn.example.org/archive.zip",
+            "http://127.0.0.1/payload",
+            "https://pan.baidu.com/s/1example",
+        ];
+        let input = urls.join("\n");
         let announced = Cell::new(false);
         let matching = Cell::new(false);
         let release = Notify::new();
         let scan = scan_with_classifier(
             &input,
             |entries, pending| {
-                assert_eq!(entries.len(), 40);
+                assert_eq!(entries.len(), urls.len());
                 assert!(entries.iter().all(|entry| entry.valid));
-                assert_eq!(pending.len(), 16);
-                assert_eq!(
-                    entries
-                        .iter()
-                        .filter(|entry| entry.kind == Some(CandidateKind::WebVideo))
-                        .count(),
-                    16
-                );
-                for (index, entry) in entries.iter().enumerate() {
-                    assert_eq!(pending.contains(&entry.input), matches!(index % 5, 0 | 1));
-                }
+                assert_eq!(pending, &urls[1..3]);
+                assert_eq!(entries[0].kind, Some(CandidateKind::WebVideo));
+                assert!(entries[0].can_probe_video);
+                assert!(entries[1..].iter().all(|entry| !entry.can_probe_video));
                 assert!(!matching.get());
                 announced.set(true);
             },
@@ -220,17 +225,11 @@ mod tests {
                     announced.get(),
                     "matching started before the local list was published"
                 );
+                assert_eq!(pending, urls[1..3]);
                 matching.set(true);
                 async {
                     release.notified().await;
-                    pending
-                        .into_iter()
-                        .map(|input| {
-                            let page = super::super::sites::manual_page(&input.parse().unwrap())
-                                .unwrap();
-                            (input, PageRoute::Automatic(page))
-                        })
-                        .collect()
+                    HashMap::from([(urls[1].to_owned(), page_candidate(&urls[1].parse().unwrap()).unwrap())])
                 }
             },
         );
@@ -240,51 +239,13 @@ mod tests {
         assert!(matching.get());
         release.notify_one();
         let final_entries = scan.await;
-        assert_eq!(final_entries.len(), 40);
-        for (index, entry) in final_entries.iter().enumerate() {
-            assert_eq!(
-                entry.kind,
-                Some(if index % 5 == 4 {
-                    CandidateKind::Direct
-                } else {
-                    CandidateKind::WebVideo
-                })
-            );
-            assert!(!entry.can_probe_video);
+        assert_eq!(final_entries.len(), urls.len());
+        assert_eq!(final_entries[0].kind, Some(CandidateKind::WebVideo));
+        assert_eq!(final_entries[1].kind, Some(CandidateKind::WebVideo));
+        for entry in &final_entries[2..5] {
+            assert_eq!(entry.kind, Some(CandidateKind::Direct));
         }
-    }
-
-    #[tokio::test]
-    async fn progress_does_not_turn_payloads_or_unknown_pages_into_automatic_video_routes() {
-        let urls = [
-            "https://cdn.example.org/fixture.mp4",
-            "https://news.example.org/article",
-            "https://cdn.example.org/archive.zip",
-            "http://127.0.0.1/payload",
-        ];
-        let entries = scan_with_classifier(
-            &urls.join("\n"),
-            |entries, pending| {
-                assert_eq!(entries.len(), 4);
-                assert_eq!(pending, &urls[..2]);
-                assert!(entries.iter().all(|entry| !entry.can_probe_video));
-            },
-            |_| async {
-                let page = super::super::sites::manual_page(&urls[1].parse().unwrap()).unwrap();
-                HashMap::from([(urls[1].to_owned(), PageRoute::OnRequest(page))])
-            },
-        )
-        .await;
-        assert!(entries
-            .iter()
-            .all(|entry| entry.kind == Some(CandidateKind::Direct)));
-        assert_eq!(
-            entries
-                .iter()
-                .map(|entry| entry.can_probe_video)
-                .collect::<Vec<_>>(),
-            [false, true, false, false]
-        );
+        assert_eq!(final_entries[5].kind, Some(CandidateKind::CloudShare));
     }
 
     #[tokio::test]

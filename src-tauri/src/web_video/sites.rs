@@ -1,4 +1,4 @@
-//! Recognize first-party short links locally and delegate other site rules to yt-dlp.
+//! Route webpages locally; only media-shaped URLs need offline extractor matching.
 mod matcher;
 
 use std::{collections::HashMap, future::Future};
@@ -93,7 +93,7 @@ pub(crate) fn page_candidate(url: &Url) -> Option<PlaybackPage> {
     })
 }
 
-/// URLs that can enter explicit generic webpage extraction. Known payloads
+/// URLs that can enter generic webpage extraction immediately. Known payloads
 /// remain ordinary downloads unless a dedicated extractor recognizes them.
 pub(crate) fn manual_page(url: &Url) -> Option<PlaybackPage> {
     let page = page_candidate(url)?;
@@ -130,24 +130,15 @@ fn is_payload_extension(ext: &str) -> bool {
     EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
 }
 
-pub(super) enum PageRoute {
-    Automatic(PlaybackPage),
-    OnRequest(PlaybackPage),
+fn candidate_route(mut page: PlaybackPage, dedicated_site: Option<&str>) -> Option<PlaybackPage> {
+    page.site = dedicated_site?.to_owned();
+    page.inspect_embeds = false;
+    Some(page)
 }
 
-fn candidate_route(mut page: PlaybackPage, dedicated_site: Option<&str>) -> Option<PageRoute> {
-    if let Some(site) = dedicated_site {
-        page.site = site.to_owned();
-        page.inspect_embeds = false;
-        Some(PageRoute::Automatic(page))
-    } else {
-        manual_page(&page.url).map(PageRoute::OnRequest)
-    }
-}
-
-/// Offline matching is an optimization, not a prerequisite for extracting a
-/// webpage. Only a successful negative match can choose ordinary page download.
-pub(super) async fn classify(inputs: &[&str]) -> HashMap<String, PageRoute> {
+/// Webpages go straight to extraction. Only media-shaped URLs need a dedicated
+/// extractor match to distinguish playback pages from ordinary media files.
+pub(super) async fn classify(inputs: &[&str]) -> HashMap<String, PlaybackPage> {
     classify_with_matcher(inputs, |urls| async move {
         let urls = urls.iter().map(String::as_str).collect::<Vec<_>>();
         matcher::dedicated_sites(&urls).await
@@ -155,7 +146,7 @@ pub(super) async fn classify(inputs: &[&str]) -> HashMap<String, PageRoute> {
     .await
 }
 
-async fn classify_with_matcher<F, Fut>(inputs: &[&str], match_sites: F) -> HashMap<String, PageRoute>
+async fn classify_with_matcher<F, Fut>(inputs: &[&str], match_sites: F) -> HashMap<String, PlaybackPage>
 where
     F: FnOnce(Vec<String>) -> Fut,
     Fut: Future<Output = Result<HashMap<String, String>, String>>,
@@ -164,8 +155,8 @@ where
     let mut candidates = Vec::new();
     for &input in inputs {
         let Ok(url) = Url::parse(input) else { continue };
-        if let Some(page) = playback_url(&url) {
-            routes.insert(input.to_owned(), PageRoute::Automatic(page));
+        if let Some(page) = playback_url(&url).or_else(|| manual_page(&url)) {
+            routes.insert(input.to_owned(), page);
         } else if let Some(page) = page_candidate(&url) {
             candidates.push((input, page));
         }
@@ -174,19 +165,10 @@ where
         return routes;
     }
     let urls = candidates.iter().map(|(_, p)| p.url.to_string()).collect();
-    let matches = match_sites(urls).await;
+    let Ok(matches) = match_sites(urls).await else { return routes };
     for (input, page) in candidates {
-        let route = match &matches {
-            Ok(matches) => {
-                let dedicated_site = matches.get(page.url.as_str()).map(String::as_str);
-                candidate_route(page, dedicated_site)
-            }
-            // A timeout, broken helper, or missing executable says nothing
-            // about website support. Let extraction handle the page and report
-            // its actual error instead of preparing its HTML as a file.
-            Err(_) => manual_page(&page.url).map(PageRoute::Automatic),
-        };
-        if let Some(route) = route {
+        let dedicated_site = matches.get(page.url.as_str()).map(String::as_str);
+        if let Some(route) = candidate_route(page, dedicated_site) {
             routes.insert(input.to_owned(), route);
         }
     }
@@ -197,7 +179,7 @@ where
 pub(super) async fn classify_with_matcher_result_for_test(
     inputs: &[&str],
     result: Result<HashMap<String, String>, String>,
-) -> HashMap<String, PageRoute> {
+) -> HashMap<String, PlaybackPage> {
     classify_with_matcher(inputs, |_| async move { result }).await
 }
 
@@ -261,7 +243,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn matcher_errors_probe_webpages_instead_of_preparing_html_files() {
+    async fn matcher_errors_affect_only_media_shaped_candidates() {
         let urls = [
             "https://tv.cctv.com/2026/10/01/VIDEgXcuU2L3NYhZgJDaWj8A261001.shtml",
             "https://v.youku.com/v_show/id_XNDIzNjE2MTc4NA==.html",
@@ -273,19 +255,17 @@ mod tests {
             "https://cdn.example.org/archive.zip",
             "http://127.0.0.1/download",
         ];
-        // A missing helper and a failed/expired helper must have the same
-        // routing semantics; extraction subsequently reports the real error.
         for error in ["video.error.extractor", "video.error.extract"] {
             let routes = classify_with_matcher_result_for_test(&urls, Err(error.into())).await;
             for url in &urls[..3] {
-                let Some(PageRoute::Automatic(page)) = routes.get(*url) else {
+                let Some(page) = routes.get(*url) else {
                     panic!("matcher failure downgraded {url} to a normal download");
                 };
                 assert!(page.inspect_embeds);
                 assert_eq!(page.url.as_str(), *url);
             }
             for url in &urls[3..5] {
-                let Some(PageRoute::Automatic(page)) = routes.get(*url) else {
+                let Some(page) = routes.get(*url) else {
                     panic!("lost the local route for {url}");
                 };
                 assert!(!page.inspect_embeds);
@@ -297,21 +277,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_negative_matches_remain_manual_video_probes() {
+    async fn ordinary_webpages_never_launch_the_offline_matcher() {
+        let urls = [
+            "https://news.example.org/post.shtml",
+            "https://www.acfun.cn/v/ac48980313",
+            "https://v.youku.com/v_show/id_XNTkxMjQzNDQzNg==.html",
+            "https://youtu.be/62xlzGs8LXA",
+        ];
+        let routes = classify_with_matcher(&urls, |_| async {
+            panic!("webpage extraction must not wait for --list-extractors")
+        }).await;
+        assert_eq!(routes.len(), urls.len());
+        assert_eq!(routes[urls[3]].site, "YouTube");
+    }
+
+    #[tokio::test]
+    async fn only_media_shaped_candidates_are_sent_to_the_matcher() {
         let page = "https://news.example.org/post.shtml";
-        let video = "https://tv.cctv.com/2026/10/01/VIDEgXcuU2L3NYhZgJDaWj8A261001.shtml";
+        let playback = "https://commons.wikimedia.org/wiki/File:Example.mp4";
         let payload = "https://cdn.example.org/clip.mp4";
-        let routes = classify_with_matcher_result_for_test(
-            &[page, video, payload],
-            Ok(HashMap::from([(video.to_owned(), "CCTV".to_owned())])),
-        )
-        .await;
-        assert!(matches!(routes.get(page), Some(PageRoute::OnRequest(_))));
-        let Some(PageRoute::Automatic(matched)) = routes.get(video) else {
-            panic!("lost the dedicated extractor match");
-        };
-        assert_eq!(matched.site, "CCTV");
-        assert!(!matched.inspect_embeds);
+        let routes = classify_with_matcher(&[page, playback, payload], |urls| async move {
+            assert_eq!(urls, [playback, payload]);
+            Ok(HashMap::from([(playback.to_owned(), "wikimedia.org".to_owned())]))
+        }).await;
+        assert!(routes[page].inspect_embeds);
+        assert_eq!(routes[playback].site, "wikimedia.org");
+        assert!(!routes[playback].inspect_embeds);
         assert!(!routes.contains_key(payload));
     }
 
@@ -357,7 +348,7 @@ mod tests {
         let page_url = Url::parse("https://commons.wikimedia.org/wiki/File:Die_Temperaturkurve_der_Erde_(ZDF,_Terra_X)_720p_HD_50FPS.webm").unwrap();
         let candidate = page_candidate(&page_url).unwrap();
         assert!(manual_page(&page_url).is_none());
-        let Some(PageRoute::Automatic(page)) =
+        let Some(page) =
             candidate_route(candidate, Some("wikimedia.org"))
         else {
             panic!("a recognized playback page must not be treated as a media payload");
@@ -391,12 +382,7 @@ mod tests {
             );
         }
 
-        let candidate = page_candidate(&Url::parse("https://news.example.org/post.shtml").unwrap())
-            .unwrap();
-        assert!(matches!(
-            candidate_route(candidate, None),
-            Some(PageRoute::OnRequest(_))
-        ));
+        assert!(manual_page(&Url::parse("https://news.example.org/post.shtml").unwrap()).is_some());
     }
 
     #[tokio::test]
@@ -425,25 +411,23 @@ mod tests {
         for (index, expected) in [
             (0, "YouTube"),
             (1, "Bilibili"),
-            (2, "vimeo"),
-            (3, "dailymotion"),
-            (4, "AcFunVideo"),
-            (7, "CCTV"),
+            (2, "vimeo.com"),
+            (3, "dailymotion.com"),
+            (4, "acfun.cn"),
+            (7, "tv.cctv.com"),
             (8, "Bilibili"),
-            (9, "AcFunVideo"),
-            (10, "youku"),
+            (9, "acfun.cn"),
+            (10, "v.youku.com"),
             (11, "YouTube"),
             (12, "wikimedia.org"),
         ] {
-            let PageRoute::Automatic(page) = &routes[urls[index]] else {
-                panic!("missed {expected}")
-            };
+            let page = &routes[urls[index]];
             assert_eq!(page.site, expected);
             if index == 1 {
                 assert_eq!(page.url.query(), Some("p=2"));
             }
         }
-        assert!(matches!(routes.get(urls[5]), Some(PageRoute::OnRequest(_))));
+        assert_eq!(routes[urls[5]].site, "example.org");
         for index in [6, 13, 14, 15, 16] {
             assert!(!routes.contains_key(urls[index]), "{}", urls[index]);
         }

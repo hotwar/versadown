@@ -106,6 +106,50 @@ it('prepares at most four items concurrently and publishes fast results before s
   expect(result.current.items.filter(item => item.selected).map(item => item.input)).toEqual(entries.slice(1, 4).map(entry => entry.input));
 });
 
+it('starts eight video probes and releases a slot on failure without waiting for other sites', async () => {
+  const entries: ScanDownloadResult[] = Array.from({ length: 10 }, (_, index) => ({
+    input: `https://site-${index}.test/watch`, valid: true, kind: 'web_video', canProbeVideo: true,
+  }));
+  const work = entries.map(() => deferred<ParseDownloadResult>());
+  const prepare = vi.fn((input: string) => work[entries.findIndex(entry => entry.input === input)].promise);
+  const { result } = renderHook(() => useDownloadDraftBatch({
+    scan: async () => entries, prepare, discard: vi.fn().mockResolvedValue(undefined),
+  }));
+  await act(async () => { await result.current.start('ten videos'); });
+  expect(prepare).toHaveBeenCalledTimes(8);
+  expect(prepare.mock.calls).toEqual(entries.slice(0, 8).map(entry => [entry.input, undefined, true]));
+  await act(async () => { work[3].reject(new Error('unsupported')); });
+  expect(prepare).toHaveBeenCalledTimes(9);
+  expect(result.current.items[3]).toMatchObject({ status: 'failed', selected: false });
+  expect(result.current.items[0].status).toBe('parsing');
+  await act(async () => { work[8].resolve(ready('video-8')); });
+  expect(prepare).toHaveBeenCalledTimes(10);
+  expect(result.current.items[8].status).toBe('ready');
+  expect(result.current.items.map(item => item.input)).toEqual(entries.map(entry => entry.input));
+  await act(async () => { work.forEach(item => item.resolve(ready('video'))); });
+});
+
+it('keeps ordinary preparation at four while video probes pass queued ordinary items', async () => {
+  const entries: ScanDownloadResult[] = [
+    ...Array.from({ length: 5 }, (_, index) => ({ input: `https://files.test/${index}.zip`, valid: true, kind: 'direct' as const })),
+    ...Array.from({ length: 5 }, (_, index) => ({ input: `https://site-${index}.test/watch`, valid: true, kind: 'web_video' as const })),
+  ];
+  const work = entries.map(() => deferred<ParseDownloadResult>());
+  const prepare = vi.fn((input: string) => work[entries.findIndex(entry => entry.input === input)].promise);
+  const { result } = renderHook(() => useDownloadDraftBatch({
+    scan: async () => entries, prepare, discard: vi.fn().mockResolvedValue(undefined),
+  }));
+  await act(async () => { await result.current.start('mixed batch'); });
+  expect(prepare.mock.calls.map(call => call[0])).toEqual([...entries.slice(0, 4), ...entries.slice(5, 9)].map(entry => entry.input));
+  await act(async () => { work[5].resolve(ready('video')); });
+  expect(prepare).toHaveBeenCalledTimes(9);
+  expect(prepare).toHaveBeenLastCalledWith(entries[9].input, undefined, true);
+  await act(async () => { work[0].resolve(ready('file')); });
+  expect(prepare).toHaveBeenCalledTimes(10);
+  expect(prepare).toHaveBeenLastCalledWith(entries[4].input, undefined);
+  await act(async () => { work.forEach(item => item.resolve(ready('done'))); });
+});
+
 it('keeps access-code state on one item, retries it, and discards only unsubmitted references', async () => {
   const first = deferred<ParseDownloadResult>();
   const second = deferred<ParseDownloadResult>();

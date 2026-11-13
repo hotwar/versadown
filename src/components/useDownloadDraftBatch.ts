@@ -26,6 +26,7 @@ interface Options {
   prepare(input: string, accessCode?: string, probeVideo?: boolean): Promise<ParseDownloadResult>;
   discard(reference: string): Promise<void>;
   concurrency?: number;
+  videoConcurrency?: number;
 }
 
 export interface DraftSubmissionFailure {
@@ -111,11 +112,11 @@ function toggledItem(item: DownloadDraftItem): DownloadDraftItem {
   return withResources(item, resources.map(resource => ({ ...resource, selected })), selected);
 }
 
-export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 }: Options) {
+export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4, videoConcurrency = 8 }: Options) {
   const [items, setItems] = useState<DownloadDraftItem[]>([]);
   const itemsRef = useRef<DownloadDraftItem[]>([]);
   const queueRef = useRef<WorkItem[]>([]);
-  const activeRef = useRef(0);
+  const activeRef = useRef({ video: 0, ordinary: 0 });
   const sessionRef = useRef(0);
 
   const replaceItems = useCallback((update: (current: DownloadDraftItem[]) => DownloadDraftItem[]) => {
@@ -126,11 +127,20 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
 
   const pumpRef = useRef<() => void>(() => {});
   pumpRef.current = () => {
-    while (activeRef.current < Math.max(1, concurrency) && queueRef.current.length) {
-      const work = queueRef.current.shift()!;
+    const limits = { video: Math.max(1, videoConcurrency), ordinary: Math.max(1, concurrency) };
+    // Video metadata can use more slots without increasing share/file requests.
+    // Keep the entire batch bounded and let either lane pass a full other lane.
+    while (activeRef.current.video + activeRef.current.ordinary < Math.max(limits.video, limits.ordinary)) {
+      const index = queueRef.current.findIndex(work => {
+        const item = itemsRef.current.find(candidate => candidate.id === work.id && candidate.generation === work.generation);
+        return !item || activeRef.current[item.probeVideo ? 'video' : 'ordinary'] < limits[item.probeVideo ? 'video' : 'ordinary'];
+      });
+      if (index < 0) break;
+      const [work] = queueRef.current.splice(index, 1);
       const item = itemsRef.current.find(candidate => candidate.id === work.id && candidate.generation === work.generation);
       if (!item) continue;
-      activeRef.current += 1;
+      const lane = item.probeVideo ? 'video' : 'ordinary';
+      activeRef.current[lane] += 1;
       const prepareItem = async () => {
         if (work.superseded) {
           await discard(work.superseded);
@@ -186,7 +196,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
           }));
         })
         .finally(() => {
-          activeRef.current -= 1;
+          activeRef.current[lane] -= 1;
           pumpRef.current();
         });
     }
