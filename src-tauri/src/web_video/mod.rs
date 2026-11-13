@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 pub(crate) use extractor::{set_resource_dir, VideoPreview};
 use sites::PlaybackPage;
-pub(crate) use sites::{manual_page, playback_url};
+pub(crate) use sites::{page_candidate, playback_url};
 
 type Listener = Arc<dyn Fn(DownloadTask) + Send + Sync>;
 type Job = (oneshot::Sender<()>, tauri::async_runtime::JoinHandle<()>);
