@@ -1002,7 +1002,7 @@ it('shows a fast video before slow pages finish and submits only the choices the
   render(<NewDownloadDialog open placement="modal" initialInput={urls.join('\n')}
     onScan={async () => urls.map(input => ({ input, valid: true, kind: 'web_video' }))}
     onParse={prepare} onDiscardPrepared={discard} onSubmitBatch={submit} onClose={vi.fn()} />);
-  await waitFor(() => expect(prepare).toHaveBeenCalledTimes(4));
+  await waitFor(() => expect(prepare).toHaveBeenCalledTimes(5));
   await act(async () => { work[1].resolve(preview(1)); await work[1].promise; });
 
   const fast = within(await screen.findByRole('article', { name: '快速视频' }));
