@@ -301,7 +301,7 @@ async fn ui_bridge_matcher_failure_mode_emits_progress_and_real_video_fallback_r
     }, &sender).await.unwrap();
     let initial = receiver.try_recv().unwrap();
     assert_eq!(initial["type"], "progress");
-    assert_eq!(initial["value"]["pending"].as_array().unwrap().len(), 2);
+    assert!(initial["value"]["pending"].as_array().unwrap().is_empty());
     assert!(entries.as_array().unwrap().iter().all(|entry| entry["kind"] == "web_video"));
     assert!(state.store.list().unwrap().is_empty());
 }
