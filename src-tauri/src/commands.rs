@@ -586,9 +586,28 @@ fn fail_engine_submission_text(store: &TaskStore, task: &DownloadTask, error: St
     message
 }
 
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct DownloadScanProgress {
+    pub entries: Vec<crate::ScannedInput>,
+    pub pending: Vec<String>,
+}
+
 #[tauri::command]
-pub async fn scan_download_inputs(input: String) -> Vec<crate::ScannedInput> {
-    crate::web_video::routing::scan(&input).await
+pub async fn scan_download_inputs(
+    webview: tauri::Webview,
+    input: String,
+    on_progress: Option<tauri::ipc::JavaScriptChannelId>,
+) -> Vec<crate::ScannedInput> {
+    let on_progress = on_progress.map(|id| id.channel_on::<_, DownloadScanProgress>(webview));
+    crate::web_video::routing::scan_with_progress(&input, |entries, pending| {
+        if let Some(channel) = &on_progress {
+            let _ = channel.send(DownloadScanProgress {
+                entries: entries.to_vec(),
+                pending: pending.to_vec(),
+            });
+        }
+    })
+    .await
 }
 
 const MAX_DROPPED_TORRENT_BYTES: usize = 16 * 1024 * 1024;

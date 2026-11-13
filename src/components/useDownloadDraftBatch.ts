@@ -1,5 +1,5 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
-import { ConfirmResource, ParseDownloadResult, ScanDownloadResult, VideoFormat } from '../lib/types';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { ConfirmResource, ParseDownloadResult, ScanDownloadProgress, ScanDownloadResult, VideoFormat } from '../lib/types';
 import { t } from '../i18n';
 
 export type DownloadDraftStatus = 'parsing' | 'ready' | 'access_code_required' | 'failed';
@@ -22,7 +22,7 @@ export interface DownloadDraftItem {
 }
 
 interface Options {
-  scan(input: string): Promise<ScanDownloadResult[]>;
+  scan(input: string, onProgress?: (progress: ScanDownloadProgress) => void): Promise<ScanDownloadResult[]>;
   prepare(input: string, accessCode?: string, probeVideo?: boolean): Promise<ParseDownloadResult>;
   discard(reference: string): Promise<void>;
   concurrency?: number;
@@ -202,37 +202,68 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
     await Promise.allSettled([...new Set(references)].map(reference => discard(reference)));
   }, [discard]);
 
+  const discardAllRef = useRef(discardAll);
+  discardAllRef.current = discardAll;
+  useEffect(() => () => { void discardAllRef.current(); }, []);
+
   const start = useCallback(async (input: string) => {
     void discardAll();
     const session = sessionRef.current;
     setItems([]);
     if (!input.trim()) return;
-    let scanned: ScanDownloadResult[];
-    try { scanned = await scan(input); }
-    catch (error) { scanned = [{ input, valid: false, message: errorMessage(error) }]; }
-    if (session !== sessionRef.current) return;
-    const candidates: ScanDownloadResult[] = scanned.length
-      ? scanned
-      : [{ input, valid: false, message: '未发现受支持的有效下载链接' }];
-    const next = candidates.map<DownloadDraftItem>((entry, index) => ({
-      id: `${session}-${index}`,
-      input: entry.input,
-      kind: entry.valid ? entry.kind : undefined,
-      canProbeVideo: entry.valid && entry.canProbeVideo,
-      probeVideo: entry.valid && entry.kind === 'web_video',
-      status: entry.valid ? 'parsing' : 'failed',
-      selected: entry.valid,
-      error: entry.valid ? undefined : entry.message,
-      accessCode: '',
-      expanded: false,
-      submitted: false,
-      generation: 0,
-    }));
-    itemsRef.current = next;
-    setItems(next);
-    queueRef.current = next.filter(item => item.status === 'parsing').map(item => ({ id: item.id, generation: item.generation }));
-    pumpRef.current();
-  }, [scan, discardAll]);
+    const ids = new Map<number, string>();
+    const released = new Set<string>();
+    let finished = false;
+    const receive = ({ entries, pending }: ScanDownloadProgress) => {
+      if (finished || session !== sessionRef.current) return;
+      const waiting = new Set(pending);
+      const next = [...itemsRef.current];
+      const work: WorkItem[] = [];
+      for (const [position, entry] of entries.entries()) {
+        let id = ids.get(position);
+        let index = id ? next.findIndex(item => item.id === id) : -1;
+        // Scan snapshots retain entry order, including repeated URLs. Keep
+        // each row independent and never restore a removed or queued row.
+        if (id && (index < 0 || released.has(id))) continue;
+        if (!id) {
+          id = `${session}-${position}`;
+          ids.set(position, id);
+          index = next.length;
+          next.push({ id, input: entry.input, status: 'parsing', selected: entry.valid,
+            accessCode: '', expanded: false, submitted: false, generation: 0 });
+        }
+        const item = next[index];
+        next[index] = {
+          ...item,
+          kind: entry.valid ? entry.kind : undefined,
+          canProbeVideo: entry.valid && entry.canProbeVideo,
+          probeVideo: entry.valid && entry.kind === 'web_video',
+          status: entry.valid ? 'parsing' : 'failed',
+          selected: item.selected && entry.valid,
+          error: entry.valid ? undefined : entry.message,
+        };
+        if (!waiting.has(entry.input)) {
+          released.add(id);
+          if (entry.valid) work.push({ id, generation: item.generation });
+        }
+      }
+      itemsRef.current = next;
+      setItems(next);
+      queueRef.current.push(...work);
+      pumpRef.current();
+    };
+    try {
+      const entries = await scan(input, receive);
+      receive({ entries: entries.length ? entries : [{ input, valid: false, message: t('download.noSupportedLinks') }], pending: [] });
+    } catch (error) {
+      if (session !== sessionRef.current) return;
+      const message = errorMessage(error);
+      if (!ids.size) receive({ entries: [{ input, valid: false, message }], pending: [] });
+      else replaceItems(current => current.map(item => released.has(item.id) ? item : { ...item, status: 'failed', error: message }));
+    } finally {
+      finished = true;
+    }
+  }, [scan, discardAll, replaceItems]);
 
   const retry = useCallback((id: string, probeVideo?: boolean) => {
     let work: WorkItem | undefined;
@@ -242,7 +273,8 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4 
       const mode = probeVideo ?? item.probeVideo;
       const superseded = item.result?.confirmation?.taskId;
       work = { id, generation, superseded, accessCodeRetry: item.status === 'access_code_required' };
-      return { ...item, status: 'parsing', selected: mode || probeVideo !== undefined || item.selected, probeVideo: mode, error: undefined, result: superseded ? item.result : undefined, generation };
+      const selected = item.selected || probeVideo !== undefined || (item.status === 'failed' && mode === true);
+      return { ...item, status: 'parsing', selected, probeVideo: mode, error: undefined, result: superseded ? item.result : undefined, generation };
     }));
     if (work) {
       queueRef.current.push(work);

@@ -144,6 +144,11 @@ export type ScanDownloadResult =
   | { input: string; valid: true; kind: DownloadInputKind; canProbeVideo?: boolean; message?: never }
   | { input: string; valid: false; kind?: never; message: string };
 
+export interface ScanDownloadProgress {
+  entries: ScanDownloadResult[];
+  pending: string[];
+}
+
 export type CloudShareProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc';
 
 export interface CloudShareAccessCodeRequired {

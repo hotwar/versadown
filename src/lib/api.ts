@@ -1,6 +1,6 @@
 import { AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, PrivacyTaskVisibility, QueueTask, ScanDownloadResult, TaskActionResult, TaskCommand } from './types';
 import { videoConfirmation, videoMessage } from './webVideo';
-import type { VideoPreview } from './types';
+import type { ScanDownloadProgress, VideoPreview } from './types';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import { version as appVersion } from '../../src-tauri/tauri.conf.json';
 import type { ThemeId } from './theme';
@@ -151,7 +151,7 @@ export async function discardPreparedDownload(taskId: string): Promise<void> {
   await invoke('discard_prepared_download', { taskId });
 }
 
-export async function scanDownloadInputs(input: string): Promise<ScanDownloadResult[]> {
+export async function scanDownloadInputs(input: string, onProgress?: (progress: ScanDownloadProgress) => void): Promise<ScanDownloadResult[]> {
   if (!isTauriRuntime()) {
     const source = input.trim();
     try {
@@ -171,7 +171,10 @@ export async function scanDownloadInputs(input: string): Promise<ScanDownloadRes
     }
     return [{ input: source, valid: false, message: '未发现受支持的有效下载链接' }];
   }
-  return invoke<ScanDownloadResult[]>('scan_download_inputs', { input });
+  if (!onProgress) return invoke<ScanDownloadResult[]>('scan_download_inputs', { input });
+  const progressChannel = new Channel<ScanDownloadProgress>();
+  progressChannel.onmessage = onProgress;
+  return invoke<ScanDownloadResult[]>('scan_download_inputs', { input, onProgress: progressChannel });
 }
 
 function encodeBase64(bytes: Uint8Array): string {
