@@ -238,6 +238,9 @@ pub fn run() -> i32 {
         return exit_code;
     }
     let mut context = tauri::generate_context!();
+    let instance_identifier =
+        startup_options.single_instance_identifier(&context.config().identifier);
+    context.config_mut().identifier = instance_identifier;
     agent_runtime::configure_window_creation(
         &mut context.config_mut().app.windows,
         startup_options.agent_host,
@@ -251,8 +254,9 @@ pub fn run() -> i32 {
         .manage(external_links::PendingExternalLinks::default())
         .manage(agent_runtime::RuntimeState::new(startup_options.clone()));
     // A second launch, such as a link clicked in a browser, hands its arguments
-    // to the running app and exits. Background UI tests run their own instance.
-    let builder = if std::env::var("VERSADOWN_BACKGROUND_UI_TEST").as_deref() == Ok("1") {
+    // to the running app and exits. Background tests normally skip activation
+    // IPC; the explicit fixture uses a profile-specific identifier instead.
+    let builder = if !startup_options.use_single_instance() {
         builder
     } else {
         builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {

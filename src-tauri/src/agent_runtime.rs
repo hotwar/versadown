@@ -7,12 +7,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 
+use sha2::{Digest, Sha256};
 use tauri::{AppHandle, Manager, WebviewWindowBuilder};
 
 #[derive(Clone, Debug)]
 pub(crate) struct StartupOptions {
     pub agent_host: bool,
     pub background_ui_test: bool,
+    pub test_single_instance: bool,
     pub data_dir: PathBuf,
 }
 
@@ -20,16 +22,58 @@ impl StartupOptions {
     pub fn from_env() -> std::io::Result<Self> {
         let background_ui_test =
             std::env::var("VERSADOWN_BACKGROUND_UI_TEST").as_deref() == Ok("1");
-        let data_dir = profile_directory(
+        Self::from_inputs(
+            is_agent_host_request(std::env::args_os().skip(1)),
             background_ui_test,
+            std::env::var("VERSADOWN_TEST_SINGLE_INSTANCE").as_deref() == Ok("1"),
             std::env::var_os("VERSADOWN_TEST_DATA_DIR").map(PathBuf::from),
             crate::cli_protocol::default_discovery_path(),
-        )?;
+        )
+    }
+
+    fn from_inputs(
+        agent_host: bool,
+        background_ui_test: bool,
+        test_single_instance: bool,
+        test_directory: Option<PathBuf>,
+        discovery: Option<PathBuf>,
+    ) -> std::io::Result<Self> {
+        if test_single_instance && !background_ui_test {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "test single-instance mode requires an isolated background test",
+            ));
+        }
+        let mut data_dir = profile_directory(background_ui_test, test_directory, discovery)?;
+        if test_single_instance {
+            // Existing canonical directories bind both GUI and Agent launches
+            // to one test identity, including equivalent path spellings.
+            data_dir = data_dir.canonicalize()?;
+            if !data_dir.is_dir() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput, "test profile must be a directory",
+                ));
+            }
+        }
         Ok(Self {
-            agent_host: is_agent_host_request(std::env::args_os().skip(1)),
+            agent_host,
             background_ui_test,
+            test_single_instance,
             data_dir,
         })
+    }
+
+    pub fn use_single_instance(&self) -> bool {
+        !self.background_ui_test || self.test_single_instance
+    }
+
+    pub fn single_instance_identifier(&self, production_identifier: &str) -> String {
+        if self.background_ui_test && self.test_single_instance {
+            let digest = Sha256::digest(self.data_dir.as_os_str().as_encoded_bytes());
+            format!("{production_identifier}.agenttest-{digest:x}")
+        } else {
+            production_identifier.to_owned()
+        }
     }
 }
 
@@ -303,7 +347,8 @@ mod tests {
     fn agent_runtime_disabled_missing_or_invalid_settings_fail_closed() {
         let profile = tempfile::tempdir().unwrap();
         let mut options = StartupOptions {
-            agent_host: true, background_ui_test: false, data_dir: profile.path().to_owned(),
+            agent_host: true, background_ui_test: false, test_single_instance: false,
+            data_dir: profile.path().to_owned(),
         };
         assert_eq!(check_agent_startup(&options), Err(4));
         std::fs::write(profile.path().join("settings.json"), "invalid").unwrap();
@@ -337,7 +382,8 @@ mod tests {
         assert!(!is_agent_host_request(["magnet:?xt=urn:btih:test"]));
         let profile = tempfile::tempdir().unwrap();
         let state = RuntimeState::new(StartupOptions {
-            agent_host: true, background_ui_test: false, data_dir: profile.path().to_owned(),
+            agent_host: true, background_ui_test: false, test_single_instance: false,
+            data_dir: profile.path().to_owned(),
         });
         assert!(!state.desktop_enabled.load(Ordering::Acquire));
         assert!(state.defer_reveal(Some("downloads")));
@@ -367,7 +413,8 @@ mod tests {
         use std::sync::Arc;
         let profile = tempfile::tempdir().unwrap();
         let state = Arc::new(RuntimeState::new(StartupOptions {
-            agent_host: true, background_ui_test: false, data_dir: profile.path().to_owned(),
+            agent_host: true, background_ui_test: false, test_single_instance: false,
+            data_dir: profile.path().to_owned(),
         }));
         assert!(state.initialize_ui(|| Err("creation failed".into())).is_err());
         assert!(!state.ui_initialized.load(Ordering::Acquire));
@@ -388,5 +435,50 @@ mod tests {
         for worker in workers { worker.join().unwrap(); }
         assert_eq!(creations.load(Ordering::SeqCst), 1);
         assert!(state.desktop_enabled.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn agent_runtime_test_single_instance_identity_is_bound_to_its_profile() {
+        let profile = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let identifier = "com.versadown.desktop";
+        let background = StartupOptions::from_inputs(
+            true, true, true, Some(profile.path().to_owned()), None,
+        ).unwrap();
+        let desktop = StartupOptions::from_inputs(
+            false, true, true, Some(profile.path().join(".")), None,
+        ).unwrap();
+        let unrelated = StartupOptions::from_inputs(
+            true, true, true, Some(other.path().to_owned()), None,
+        ).unwrap();
+        assert!(background.use_single_instance());
+        assert_eq!(background.data_dir, desktop.data_dir);
+        assert_eq!(background.single_instance_identifier(identifier), desktop.single_instance_identifier(identifier));
+        assert_ne!(background.single_instance_identifier(identifier), unrelated.single_instance_identifier(identifier));
+        assert_ne!(background.single_instance_identifier(identifier), identifier);
+
+        let production = StartupOptions::from_inputs(
+            false, false, false, None, Some(profile.path().join("cli/connection.json")),
+        ).unwrap();
+        assert!(production.use_single_instance());
+        assert_eq!(production.single_instance_identifier(identifier), identifier);
+        let legacy_test = StartupOptions::from_inputs(
+            false, true, false, Some(profile.path().to_owned()), None,
+        ).unwrap();
+        assert!(!legacy_test.use_single_instance());
+        assert_eq!(legacy_test.single_instance_identifier(identifier), identifier);
+    }
+
+    #[test]
+    fn agent_runtime_test_single_instance_requires_explicit_absolute_existing_profile() {
+        let profile = tempfile::tempdir().unwrap();
+        let discovery = Some(profile.path().join("cli/connection.json"));
+        assert!(StartupOptions::from_inputs(false, false, true, Some(profile.path().to_owned()), discovery.clone()).is_err());
+        assert!(StartupOptions::from_inputs(false, true, true, None, discovery.clone()).is_err());
+        assert!(StartupOptions::from_inputs(false, true, true, Some(PathBuf::from("relative-test-profile")), discovery.clone()).is_err());
+        assert!(StartupOptions::from_inputs(false, true, true, Some(profile.path().join("missing")), discovery).is_err());
+        let file = profile.path().join("not-a-directory");
+        std::fs::write(&file, "test").unwrap();
+        assert!(StartupOptions::from_inputs(false, true, true, Some(file), None).is_err());
     }
 }
