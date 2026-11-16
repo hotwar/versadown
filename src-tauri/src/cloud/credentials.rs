@@ -17,6 +17,90 @@ use zeroize::Zeroize;
 #[path = "credentials_macos.rs"]
 mod macos;
 
+/// The Secret Service resolves a locked item by showing an unlock prompt and
+/// waiting for it without any limit, while keyring holds its store lock. Where
+/// that prompt never appears (deepin after gnome-keyring was restarted), every
+/// credential access - including the startup restore on the GTK main thread -
+/// blocks forever. Ask first: neither `SearchItems` nor `Locked` ever prompts,
+/// so a locked store fails fast into the existing degraded startup instead.
+#[cfg(target_os = "linux")]
+mod secret_service {
+    use std::collections::HashMap;
+    use zbus::{
+        blocking::Connection,
+        zvariant::{OwnedObjectPath, OwnedValue},
+    };
+
+    const DESTINATION: &str = "org.freedesktop.secrets";
+    /// New items are created here; creating one also prompts while it is locked.
+    const DEFAULT_COLLECTION: &str = "/org/freedesktop/secrets/aliases/default";
+
+    pub(super) fn is_locked(service: &str) -> bool {
+        // If the service cannot be asked, let keyring report the real error.
+        query(service).is_ok_and(|status| status.any_locked())
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub(super) struct LockStatus {
+        pub(super) locked_items: usize,
+        pub(super) default_collection_locked: bool,
+    }
+
+    impl LockStatus {
+        pub(super) fn any_locked(&self) -> bool {
+            self.locked_items > 0 || self.default_collection_locked
+        }
+    }
+
+    fn query(service: &str) -> zbus::Result<LockStatus> {
+        let connection = Connection::session()?;
+        let reply = connection.call_method(
+            Some(DESTINATION),
+            "/org/freedesktop/secrets",
+            Some("org.freedesktop.Secret.Service"),
+            "SearchItems",
+            &(HashMap::from([("service", service)]),),
+        )?;
+        let (_unlocked, locked): (Vec<OwnedObjectPath>, Vec<OwnedObjectPath>) =
+            reply.body().deserialize()?;
+        // A missing default collection is created on first save; it is not locked.
+        let default_collection_locked = connection
+            .call_method(
+                Some(DESTINATION),
+                DEFAULT_COLLECTION,
+                Some("org.freedesktop.DBus.Properties"),
+                "Get",
+                &("org.freedesktop.Secret.Collection", "Locked"),
+            )
+            .ok()
+            .and_then(|reply| reply.body().deserialize::<OwnedValue>().ok())
+            .and_then(|value| bool::try_from(value).ok())
+            .unwrap_or(false);
+        Ok(LockStatus {
+            locked_items: locked.len(),
+            default_collection_locked,
+        })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::LockStatus;
+
+        #[test]
+        fn a_locked_item_or_default_collection_must_not_be_accessed() {
+            let status = |locked_items, default_collection_locked| LockStatus {
+                locked_items,
+                default_collection_locked,
+            };
+            // Reading a locked item would prompt and wait without limit.
+            assert!(status(1, false).any_locked());
+            // Saving a new item into a locked default collection prompts too.
+            assert!(status(0, true).any_locked());
+            assert!(!status(0, false).any_locked());
+        }
+    }
+}
+
 #[cfg(any(windows, test))]
 #[path = "credentials_windows.rs"]
 mod windows;
@@ -225,6 +309,7 @@ impl SystemCredentialStore {
         if !credential_key_is_supported(key) {
             return Err(QuarkError::Storage);
         }
+        ensure_unlocked(&self.service)?;
         Entry::new(&self.service, key).map_err(|error| credential_error("open", key, error, None))
     }
 }
@@ -315,7 +400,18 @@ impl CredentialStore for SystemCredentialStore {
     }
 }
 
+/// Fails instead of letting keyring wait on an unlock prompt (see `secret_service`).
+fn ensure_unlocked(_service: &str) -> Result<(), QuarkError> {
+    #[cfg(target_os = "linux")]
+    if secret_service::is_locked(_service) {
+        eprintln!("Secret Service collection is locked; not waiting for an unlock prompt");
+        return Err(QuarkError::Storage);
+    }
+    Ok(())
+}
+
 fn share_protector_entry() -> Result<Entry, QuarkError> {
+    ensure_unlocked(SHARE_PROTECTOR_SERVICE)?;
     Entry::new(SHARE_PROTECTOR_SERVICE, SHARE_PROTECTOR_KEY).map_err(|_| QuarkError::Storage)
 }
 

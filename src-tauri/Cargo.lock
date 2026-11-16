@@ -5661,6 +5661,7 @@ dependencies = [
  "webview2-com",
  "windows",
  "winreg",
+ "zbus",
  "zeroize",
 ]
 
