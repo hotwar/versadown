@@ -41,7 +41,7 @@ vd-cli.exe result TASK_ID --json
 ```
 
 ```json
-{"ok":false,"error":{"code":"HOST_UNAVAILABLE","message":"VD is unavailable. Start the VD application first."}}
+{"ok":false,"error":{"code":"HOST_UNAVAILABLE","message":"Unable to connect to the local VD Agent service. Confirm VD is running, enable 'Allow local Agent access' in Settings > Advanced, and check the discovery file configuration.","retryable":false,"next_action":"inspect_desktop"}}
 ```
 
 以上成功示例省略了其余任务字段。任务字段是专用安全投影，不包含下载 URL、账号凭据或引擎令牌。`list` 结果为 `data.tasks` 数组及 `next_cursor`；`status/add` 为 `data` 中的任务。`wait` 因任务失败或取消结束时也携带任务投影。时间字段为 Unix epoch 秒，长度为 bytes、速度为 bytes/second。`ok:true` 表示本次调用成功；例如 status 可以成功查到一个 failed 任务，add 成功也不代表文件下载完成。
@@ -64,6 +64,8 @@ vd-cli.exe result TASK_ID --json
 ## 发现与隔离实例
 
 Windows 默认发现文件是 `%APPDATA%\com.versadown.desktop\cli\connection.json`。使用 `--discovery PATH` 或 `VD_CLI_DISCOVERY` 可显式选择实例；命令行优先。发现文件含本机接口令牌，不应分享、打印或加入版本控制。
+
+`HOST_UNAVAILABLE`（退出码 3，`next_action: inspect_desktop`）表示无法发现或连接本机 Agent 服务，不能据此断定 VD 未启动。即使 VD 和 MCP 进程都在运行，未启用 Agent 调用也可能没有发现文件。请确认 VD 已启动，在「设置 → 高级」中启用「允许本机 Agent 调用」并授权下载目录，再检查 `--discovery` / `VD_CLI_DISCOVERY` 是否指向该实例的发现文件。`HOST_DISABLED` 仅表示明确收到 Agent 调用已关闭的响应，对应退出码 4 和 `enable_desktop_agent`；客户端不会通过读取桌面设置猜测授权状态。完成检查后重新调用 `health`。
 
 接口协议版本为 1：客户端对 `http://127.0.0.1:PORT/v1/call` 发出 JSON POST 并使用 Bearer 鉴权。客户端禁用代理和重定向。主程序仅监听回环地址，并拒绝浏览器来源的调用。CLI 不支持远端宿主或自动拉起主程序。
 
@@ -110,6 +112,8 @@ Start VD, enable Agent access in desktop settings and authorize output directori
 `add URL --directory ABSOLUTE_PATH --request-id ID` submits an HTTP/HTTPS single-file download. Retry with the same request ID and arguments. Reusing an ID for different arguments yields `REQUEST_CONFLICT`; a different ID for an existing download source yields `DUPLICATE`. Private tasks are always excluded, regardless of the desktop privacy unlock state.
 
 `wait ID --timeout SECONDS` waits for completion, including pending cleanup. Timeout and Ctrl-C end only the client operation; they never cancel the task. An interrupted `add` may still have been accepted, so retry using its original request ID. Discovery can be overridden with `--discovery PATH` or `VD_CLI_DISCOVERY`. Keep the discovery file private because it contains the local authentication token. The exit-code table above is language-independent.
+
+`HOST_UNAVAILABLE` (exit code 3, `next_action: inspect_desktop`) means the local Agent service could not be discovered or reached; it does not prove VD is stopped. Even with VD and MCP processes running, disabled Agent access can leave no discovery file. Confirm VD is running, enable **Allow local Agent access** in **Settings > Advanced**, authorize output directories, and check that any `--discovery` / `VD_CLI_DISCOVERY` override points to that instance. `HOST_DISABLED` is reserved for an explicit disabled-access response (exit code 4, `enable_desktop_agent`); the client does not read desktop settings to infer authorization. Retry `health` after these checks.
 
 `list` is paginated (default 50, maximum 100). Use `--parent-id ID` for direct children and pass the returned `next_cursor` with unchanged filters. `result ID` returns authorized final file paths and existence; `TASK_NOT_READY` means check status later. A successful status query can describe a failed download. Never equate `ok:true` with completed file transfer.
 

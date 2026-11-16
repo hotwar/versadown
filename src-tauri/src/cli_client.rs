@@ -181,8 +181,28 @@ mod tests {
     async fn discovery_limits_and_version_are_enforced() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("connection.json");
+        for (lang, guidance) in [
+            ("en", ["VD is running", "enable", "Allow local Agent access", "Settings > Advanced", "discovery file"]),
+            ("zh-CN", ["VD 已启动", "启用", "允许本机 Agent 调用", "设置 → 高级", "发现文件"]),
+        ] {
+            let client = LocalClient::new(Some(path.clone()), lang).unwrap();
+            let response = client.discover().await.err().unwrap();
+            assert_eq!(cli_protocol::exit_code(&response), 3);
+            let error = response.error.unwrap();
+            assert_eq!(error.code, "HOST_UNAVAILABLE");
+            assert_eq!(error.next_action.as_deref(), Some("inspect_desktop"));
+            assert!(!error.retryable);
+            for instruction in guidance {
+                assert!(error.message.contains(instruction), "missing {lang} guidance: {instruction}");
+            }
+
+            let disabled = Response::failure("HOST_DISABLED", lang);
+            assert_eq!(cli_protocol::exit_code(&disabled), 4);
+            let error = disabled.error.unwrap();
+            assert_eq!(error.code, "HOST_DISABLED");
+            assert_eq!(error.next_action.as_deref(), Some("enable_desktop_agent"));
+        }
         let client = LocalClient::new(Some(path.clone()), "en").unwrap();
-        assert_eq!(client.discover().await.err().unwrap().error.unwrap().code,"HOST_UNAVAILABLE");
         std::fs::write(&path," ".repeat(16_385)).unwrap();
         assert_eq!(client.discover().await.err().unwrap().error.unwrap().code,"PROTOCOL_ERROR");
         std::fs::write(&path,json!({"version":999,"port":1234,"token":"a".repeat(64)}).to_string()).unwrap();

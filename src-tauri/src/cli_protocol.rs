@@ -53,7 +53,7 @@ pub struct ApiError {
 impl ApiError {
     pub fn new(code: &str, lang: &str) -> Self {
         let (retryable, next_action) = match code {
-            "HOST_UNAVAILABLE" => (false, Some("start_desktop")),
+            "HOST_UNAVAILABLE" => (false, Some("inspect_desktop")),
             "HOST_DISABLED" => (false, Some("enable_desktop_agent")),
             "FORBIDDEN" => (false, Some("review_directory_permissions")),
             "AUTH_REQUIRED" => (false, Some("open_desktop_login")),
@@ -175,8 +175,8 @@ pub fn message(key: &str, lang: &str) -> &'static str {
     match (key, zh) {
         ("INVALID_ARGUMENT", false) => "Invalid arguments. Use help for usage.",
         ("INVALID_ARGUMENT", true) => "参数无效，请使用 help 查看用法。",
-        ("HOST_UNAVAILABLE", false) => "VD is unavailable. Start the VD application first.",
-        ("HOST_UNAVAILABLE", true) => "VD 不可用，请先启动 VD 主程序。",
+        ("HOST_UNAVAILABLE", false) => "Unable to connect to the local VD Agent service. Confirm VD is running, enable 'Allow local Agent access' in Settings > Advanced, and check the discovery file configuration.",
+        ("HOST_UNAVAILABLE", true) => "无法连接 VD 的本机 Agent 服务。请确认 VD 已启动，在设置 → 高级中启用“允许本机 Agent 调用”，并检查发现文件配置。",
         ("UNAUTHORIZED", false) => "Local interface authentication failed.",
         ("UNAUTHORIZED", true) => "本机接口鉴权失败。",
         ("HOST_DISABLED", false) => "Agent access is disabled. Enable it in VD settings.",
