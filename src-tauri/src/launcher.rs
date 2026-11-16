@@ -287,7 +287,8 @@ mod tests {
 
     #[test]
     fn tray_clicks_are_dispatched_off_the_native_event_loop() {
-        let source = include_str!("launcher.rs");
+        // Git may check this source out with CRLF on Windows.
+        let source = include_str!("launcher.rs").replace("\r\n", "\n");
         assert!(source.contains(
             "tauri::async_runtime::spawn(async move {\n                    reveal_manager"
         ));
