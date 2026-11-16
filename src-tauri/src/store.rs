@@ -13,6 +13,9 @@ use uuid::Uuid;
 #[path = "store_share_membership_tests.rs"]
 mod share_membership_tests;
 
+#[path = "store/agent_resources.rs"]
+mod agent_resources;
+
 use crate::{
     cloud::CloudProvider,
     models::{
@@ -429,6 +432,7 @@ impl TaskStore {
             options_json TEXT NOT NULL,
             dispatched INTEGER NOT NULL DEFAULT 0
         );")?;
+        agent_resources::create_tables(&connection)?;
         connection.execute_batch("CREATE TABLE IF NOT EXISTS cloud_download_accounts (id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL, account_id TEXT NOT NULL);")?;
         let schema = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         schema.execute_batch("CREATE TABLE IF NOT EXISTS video_task_formats (
@@ -478,7 +482,7 @@ impl TaskStore {
     ) -> Result<CliCreateOutcome, StoreError> {
         if options.directory.as_ref().is_none_or(|path| !path.is_absolute())
             || options.allow_overwrite || options.continue_download
-            || new_task.kind != "file" || new_task.is_private
+            || !matches!(new_task.kind.as_str(), "file" | "ftp") || new_task.is_private
         {
             return Err(StoreError::InvalidCliIntent);
         }
@@ -537,7 +541,7 @@ impl TaskStore {
             )?;
             transaction.execute(
                 "UPDATE tasks SET aria_gid=?1,status='queued' WHERE id=?2",
-                params![gid, task.id.to_string()],
+                params![(task.kind != "ftp").then_some(&gid), task.id.to_string()],
             )?;
             task = find_with_connection(&transaction, task.id)?;
         }
@@ -546,11 +550,14 @@ impl TaskStore {
     }
 
     pub(crate) fn cli_dispatch_pending(&self, id: Uuid) -> Result<bool, StoreError> {
-        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
-        Ok(connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM cli_dispatch_intents WHERE task_id=?1 AND dispatched=0)",
-            [id.to_string()], |row| row.get(0),
-        )?)
+        let direct = {
+            let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+            connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM cli_dispatch_intents WHERE task_id=?1 AND dispatched=0)",
+                [id.to_string()], |row| row.get::<_, bool>(0),
+            )?
+        };
+        Ok(direct || self.agent_resource_dispatch_pending(id)?)
     }
 
     pub(crate) fn cli_intent_directory(&self, id: Uuid) -> Result<Option<std::path::PathBuf>, StoreError> {
@@ -568,7 +575,8 @@ impl TaskStore {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let mut statement = connection.prepare(
             "SELECT i.task_id,i.gid,i.options_json FROM cli_dispatch_intents i
-             JOIN tasks t ON t.id=i.task_id WHERE i.dispatched=0 ORDER BY t.created_at,t.id",
+             JOIN tasks t ON t.id=i.task_id WHERE i.dispatched=0
+             OR (t.kind='ftp' AND t.status IN ('queued','downloading')) ORDER BY t.created_at,t.id",
         )?;
         let rows = statement.query_map([], |row| Ok((
             row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
@@ -581,6 +589,14 @@ impl TaskStore {
                 options: serde_json::from_str(&options).map_err(|_| StoreError::InvalidCliIntent)?,
             })
         }).collect()
+    }
+
+    pub(crate) fn has_cli_intent(&self, id: Uuid) -> Result<bool, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cli_dispatch_intents WHERE task_id=?1)",
+            [id.to_string()], |row| row.get(0),
+        )?)
     }
 
     pub(crate) fn finish_cli_dispatch(&self, id: Uuid) -> Result<(), StoreError> {

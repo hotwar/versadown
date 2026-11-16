@@ -72,7 +72,7 @@ async fn call(State(host): State<Arc<Host>>, headers: HeaderMap, body: axum::bod
         let _permit = permit;
         let started = Instant::now();
         let command = match request.command.as_str() {
-            "health" | "add" | "list" | "status" | "result" | "pause" | "resume" | "cancel" => request.command.clone(),
+            "health" | "add" | "batch_add" | "prepare" | "confirm" | "list" | "status" | "result" | "pause" | "resume" | "cancel" => request.command.clone(),
             _ => "invalid".into(),
         };
         let request_id = audit_request_id(request.request_id.as_deref()).map(str::to_owned);
@@ -207,7 +207,7 @@ pub(crate) fn refresh(app: &tauri::AppHandle) -> std::io::Result<()> {
     tauri::async_runtime::spawn(async move {
         if let Ok(listener) = tokio::net::TcpListener::from_std(listener) {
             let router = Router::new().route("/v1/call", post(call))
-                .layer(DefaultBodyLimit::max(16 * 1024)).with_state(host);
+                .layer(DefaultBodyLimit::max(512 * 1024)).with_state(host);
             let _ = axum::serve(listener, router).with_graceful_shutdown(async { let _ = stopped.await; }).await;
         }
     });

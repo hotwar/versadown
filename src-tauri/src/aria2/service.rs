@@ -21,6 +21,9 @@ use super::{
     TransferSnapshot,
 };
 
+#[path = "cli_bt_dispatch.rs"]
+mod cli_bt_dispatch;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DownloadAction {
     Pause,

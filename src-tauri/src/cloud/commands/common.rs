@@ -117,6 +117,8 @@ pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
             "quark_share_transfer_failed"
         }
         QuarkError::Provider(_) => "provider_error",
+        QuarkError::InvalidInput(message) if message=="agent.error.cloudWriteRequired" => "CLOUD_WRITE_REQUIRED",
+        QuarkError::InvalidInput(message) if message=="agent.error.forbidden" => "FORBIDDEN",
         QuarkError::InvalidInput(_) => "invalid_input",
         QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => "provider_unsupported",
     }

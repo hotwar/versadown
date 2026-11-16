@@ -1,4 +1,10 @@
 const messages = {
+  'agent.error.CLI_RECOVERY_REQUIRED': 'This Agent task needs review in VD before recovery. Existing files were preserved.',
+  'agent.error.FORBIDDEN': 'The task is outside the authorized Agent download directories.',
+  'agent.error.ACTION_FAILED': 'Unable to perform this Agent task action.',
+  'agent.error.INTERNAL_ERROR': 'Unable to read or update the Agent task state.',
+  'agent.error.INVALID_ARGUMENT': 'This action is not available for the Agent task.',
+  'agent.error.CLOUD_WRITE_REQUIRED': 'This share requires a cloud save operation. Review and perform it in VD.',
   'settings.agent.enabled': 'Allow local Agent access',
   'settings.agent.scope': 'Allow CLI and MCP clients to view and control all non-private tasks. Private tasks stay inaccessible.',
   'settings.agent.description': 'Changes take effect after saving. CLI / MCP can start VersaDown in the background when needed, without opening the desktop first. Disabling access blocks further calls without cancelling downloads. Clients running as your system user share this access.',

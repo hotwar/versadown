@@ -49,10 +49,28 @@ fn share_preflight_user_error(error: QuarkError) -> QuarkError {
     }
 }
 
+pub(crate) async fn resolve_agent_share_read_only(
+    app: AppHandle,
+    source: &str,
+) -> Result<ResolvedCloudDownload, QuarkError> {
+    let (provider, _, _) = share::parse_stable_cloud_share_source(source)?;
+    let source = source.to_owned();
+    run_share_session_read_work(app, provider, move |state, http| {
+        let adapter = share::provider_share_adapter(provider, &state.store, http)?;
+        share::resolve_agent_share_read_only_with(&state.share_plans, adapter.as_ref(), &source)
+    }).await
+}
+
 pub async fn resolve_stable_cloud_share_download(
     app: AppHandle,
     source: &str,
 ) -> Result<ResolvedCloudDownload, QuarkError> {
+    // This check also covers URL refresh and later GUI/Agent resume calls.
+    let direct_only = app.try_state::<AppState>().ok_or(QuarkError::Storage)?
+        .store.is_agent_direct_share_source(source).map_err(|_| QuarkError::Storage)?;
+    if direct_only {
+        return resolve_agent_share_read_only(app, source).await;
+    }
     let (provider, _, _) = share::parse_stable_cloud_share_source(source)?;
     let source = source.to_owned();
     let control = Arc::new(share::ShareWorkControl::new(
@@ -540,6 +558,9 @@ pub(crate) fn schedule_cloud_share_cleanup(app: AppHandle, task: &DownloadTask) 
     if task.status != TaskStatus::Completed || !task.source.starts_with("cloud-share://") {
         return;
     }
+    if app.try_state::<AppState>().map(|state| state.store.is_agent_resource_task(task.id).unwrap_or(true)).unwrap_or(true) {
+        return;
+    }
     let id = task.id;
     tauri::async_runtime::spawn(async move {
         let _ = cleanup_cloud_share_task(app, id, false).await;
@@ -568,6 +589,9 @@ pub(crate) async fn cleanup_cloud_share_task(
 ) -> Result<DownloadTask, QuarkError> {
     let state = app.try_state::<AppState>().ok_or(QuarkError::Storage)?;
     let task = state.store.find(id).map_err(|_| QuarkError::Storage)?;
+    if state.store.is_agent_resource_task(id).map_err(|_| QuarkError::Storage)? {
+        return Ok(task);
+    }
     share::parse_stable_cloud_share_source(&task.source)?;
     if task.status != TaskStatus::Completed {
         return Err(QuarkError::InvalidInput(
@@ -608,6 +632,9 @@ pub(crate) async fn cleanup_cloud_share_task_inner(
 ) -> Result<DownloadTask, QuarkError> {
     let state = app.try_state::<AppState>().ok_or(QuarkError::Storage)?;
     let task = state.store.find(id).map_err(|_| QuarkError::Storage)?;
+    if state.store.is_agent_resource_task(id).map_err(|_| QuarkError::Storage)? {
+        return Ok(task);
+    }
     if task.status != TaskStatus::Completed {
         return Err(QuarkError::InvalidInput(
             "只有已完成的分享任务可以重试清理".into(),

@@ -159,6 +159,26 @@ pub async fn cloud_list_directory(
     .await
 }
 
+/// Resolve account ownership and read the directory in one session operation.
+/// The caller exposes only opaque local selection handles to the Agent.
+pub(crate) async fn prepare_agent_cloud_directory(
+    app: AppHandle,
+    provider: CloudProvider,
+    expected: Option<(String, String)>,
+) -> Result<(String, CloudDirectory), QuarkError> {
+    run_session_work(app, provider, SessionWorkKind::Read, move |state, http| {
+        let account = restore_account(provider, &state.store, http)?;
+        if let Some((owner, _)) = &expected {
+            validate_download_account(Some(&account.id), owner)?;
+        }
+        record_restored_account(state, provider, &account)?;
+        let parent = expected.as_ref().map(|(_, id)| id.as_str())
+            .unwrap_or(ProviderRegistry::global().get(provider).root_directory_id);
+        let directory = list_cloud_directory(provider, &state.store, http, parent)?;
+        Ok((account.id, directory))
+    }).await
+}
+
 fn validate_share_options(
     provider: CloudProvider,
     options: &CloudShareOptions,

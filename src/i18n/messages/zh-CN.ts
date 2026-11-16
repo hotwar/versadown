@@ -1,4 +1,10 @@
 const messages = {
+  'agent.error.CLI_RECOVERY_REQUIRED': '此 Agent 任务需要先在 VD 中检查恢复状态，已有文件已保留。',
+  'agent.error.FORBIDDEN': '此任务超出了 Agent 已授权的下载目录范围。',
+  'agent.error.ACTION_FAILED': '无法执行此 Agent 任务操作。',
+  'agent.error.INTERNAL_ERROR': '无法读取或更新 Agent 任务状态。',
+  'agent.error.INVALID_ARGUMENT': '此 Agent 任务暂不支持该操作。',
+  'agent.error.CLOUD_WRITE_REQUIRED': '此分享需要云端转存，请在 VD 中审阅并操作。',
   'settings.agent.enabled': '允许本机 Agent 调用',
   'settings.agent.scope': '允许 CLI 和 MCP 客户端查看、控制全部非隐私任务；隐私任务始终不可访问。',
   'settings.agent.description': '保存后生效。CLI / MCP 可按需在后台启动万能下载，无需预先打开主界面。关闭授权只阻止后续调用，不取消下载。同一系统用户运行的客户端共用此授权。',

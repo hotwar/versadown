@@ -3,8 +3,10 @@
 mod cli_protocol;
 #[path = "../cli_client.rs"]
 mod cli_client;
+#[path = "../cli_setup.rs"]
+mod cli_setup;
 
-use cli_protocol::{Request, Response, PROTOCOL_VERSION};
+use cli_protocol::{BatchItemInput, Request, ResourceConfirmInput, ResourcePrepareInput, Response, PROTOCOL_VERSION};
 use cli_client::LocalClient;
 use serde_json::json;
 use std::{path::PathBuf, process::ExitCode, time::Duration};
@@ -15,6 +17,7 @@ struct Options {
     timeout: Duration,
     lang: String,
     no_start: bool,
+    input_file: Option<PathBuf>,
 }
 
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, ()> {
@@ -24,6 +27,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, ()> {
     let mut discovery = None;
     let mut timeout = None;
     let mut no_start = false;
+    let mut input_file = None;
     let mut lang = if std::env::var("LANG").unwrap_or_default().starts_with("zh") {
         "zh-CN".to_string()
     } else { "en".to_string() };
@@ -31,6 +35,12 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, ()> {
         let field = match word.as_str() {
             "--json" => continue,
             "--no-start" if !no_start => { no_start = true; continue; }
+            "--file" if input_file.is_none() => {
+                let value = words.next().ok_or(())?;
+                if value.is_empty() { return Err(()); }
+                input_file = Some(PathBuf::from(value));
+                continue;
+            }
             "--help" | "-h" => { positional.push("help".into()); continue; }
             "--version" | "-V" => { positional.push("version".into()); continue; }
             "--lang" => {
@@ -73,39 +83,40 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, ()> {
     }
     let command = positional.first().map(String::as_str).unwrap_or("help");
     match command {
-        "help" | "version" | "health" | "list" if positional.len() <= 1 => {}
+        "help" | "version" | "health" | "list" | "doctor" | "mcp-config" if positional.len() <= 1 => {}
+        "batch-add" | "prepare" | "confirm" if positional.len() == 1 && input_file.is_some() => {}
         "status" | "pause" | "resume" | "cancel" | "wait" | "result" if positional.len() == 2 => {
             if positional[1].is_empty() { return Err(()); }
             request.task_id = Some(positional[1].clone());
         }
         "add" if positional.len() == 2 => {
-            let url = url::Url::parse(&positional[1]).map_err(|_| ())?;
-            if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
-                || !url.username().is_empty() || url.password().is_some() { return Err(()); }
+            if !valid_direct_url(&positional[1]) { return Err(()); }
             if !request.directory.as_ref().is_some_and(|d| std::path::Path::new(d).is_absolute())
-                || !request.request_id.as_ref().is_some_and(|id| id.len() <= 128 && id.chars().all(|c| c.is_ascii_alphanumeric() || "-_.:".contains(c))) {
+                || !request.request_id.as_ref().is_some_and(|id| valid_request_id(id)) {
                 return Err(());
             }
             request.url = Some(positional[1].clone());
         }
         _ => return Err(()),
     }
+    if !matches!(command, "batch-add" | "prepare" | "confirm") && input_file.is_some() { return Err(()); }
     if command != "add" && (request.directory.is_some() || request.request_id.is_some()) { return Err(()); }
     if command != "list" && (request.status.is_some() || request.query.is_some() || request.parent_id.is_some() || request.cursor.is_some() || request.limit.is_some()) { return Err(()); }
     if let Some(status) = &request.status {
         if !matches!(status.as_str(), "draft" | "queued" | "parsing" | "awaiting_user" | "downloading" | "paused" | "processing" | "completed" | "failed" | "cancelled" | "recycled") { return Err(()); }
     }
-    request.command = command.to_string();
+    request.command = if command == "batch-add" { "batch_add" } else { command }.to_string();
     request.lang = Some(lang.clone());
-    Ok(Options { request, discovery, timeout: timeout.unwrap_or(Duration::from_secs(if command == "wait" {300} else {30})), lang, no_start })
+    Ok(Options { request, discovery, timeout: timeout.unwrap_or(Duration::from_secs(if command == "wait" {300} else {30})), lang, no_start, input_file })
 }
 
 fn help(lang: &str) -> Response {
     Response::success(json!({
         "description": cli_protocol::message("HELP", lang),
-        "commands": ["help", "version", "health", "add URL --directory PATH --request-id ID", "list [--status STATUS] [--query TEXT] [--parent-id ID] [--cursor CURSOR] [--limit 1..100]", "status ID", "pause ID", "resume ID", "cancel ID", "wait ID [--timeout SECONDS]", "result ID"],
+        "commands": ["help", "version", "doctor", "mcp-config", "health", "add URL --directory PATH --request-id ID", "batch-add --file JSON_FILE", "prepare --file JSON_FILE", "confirm --file JSON_FILE", "list [--status STATUS] [--query TEXT] [--parent-id ID] [--cursor CURSOR] [--limit 1..100]", "status ID", "pause ID", "resume ID", "cancel ID", "wait ID [--timeout SECONDS]", "result ID"],
         "options": ["--json", "--lang en|zh-CN", "--discovery PATH", "--no-start", "--timeout SECONDS"],
-        "protocol_version": PROTOCOL_VERSION
+        "protocol_version": PROTOCOL_VERSION,
+        "agent_guide": cli_setup::agent_guide(lang)
     }))
 }
 
@@ -128,20 +139,92 @@ fn terminal(response: &Response, lang: &str) -> Option<Response> {
 async fn execute(options: &Options) -> Response {
     match options.request.command.as_str() {
         "help" => return help(&options.lang),
-        "version" => return Response::success(json!({"name":"vd-cli", "version": env!("CARGO_PKG_VERSION"), "protocol_version": PROTOCOL_VERSION})),
+        "version" => return Response::success(json!({"name":"vd-cli", "version": env!("CARGO_PKG_VERSION"), "protocol_version": PROTOCOL_VERSION,
+            "build_commit":cli_protocol::build_commit(), "build_dirty":cli_protocol::build_dirty()})),
+        "doctor" => return cli_setup::doctor(options.discovery.clone(), &options.lang).await,
+        "mcp-config" => return cli_setup::mcp_config(options.discovery.clone(), options.no_start, &options.lang),
         _ => {}
+    }
+    let mut request = options.request.clone();
+    if let Some(file) = &options.input_file {
+        if load_request_file(&mut request, file).await.is_err() {
+            return Response::failure("INVALID_ARGUMENT", &options.lang);
+        }
     }
     let client = match LocalClient::new(options.discovery.clone(), &options.lang) {
         Ok(client) => client.with_auto_start(!options.no_start), Err(error) => return error,
     };
-    if options.request.command != "wait" { return client.call(&options.request).await; }
-    let mut request = options.request.clone();
+    if request.command != "wait" { return client.call(&request).await; }
     request.command = "status".into();
     loop {
         let response = client.call(&request).await;
         if let Some(result) = terminal(&response, &options.lang) { return result; }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
+}
+
+fn valid_request_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+}
+
+fn valid_direct_url(input: &str) -> bool {
+    if input.is_empty() || input.len() > 8192 { return false; }
+    let Ok(url) = url::Url::parse(input) else { return false; };
+    matches!(url.scheme(), "http" | "https" | "ftp") && url.host_str().is_some()
+        && url.username().is_empty() && url.password().is_none() && url.fragment().is_none()
+}
+
+fn bounded(value: &str, max: usize) -> bool { !value.trim().is_empty() && value.len() <= max }
+
+async fn read_input_file(path: &std::path::Path) -> Result<Vec<u8>, ()> {
+    use tokio::io::AsyncReadExt;
+    const MAX_BYTES: u64 = 256 * 1024;
+    let metadata = tokio::fs::metadata(path).await.map_err(|_| ())?;
+    if !metadata.is_file() || metadata.len() > MAX_BYTES { return Err(()); }
+    let file = tokio::fs::File::open(path).await.map_err(|_| ())?;
+    let mut bytes = Vec::new();
+    file.take(MAX_BYTES + 1).read_to_end(&mut bytes).await.map_err(|_| ())?;
+    if bytes.len() > MAX_BYTES as usize { return Err(()); }
+    Ok(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes).to_vec())
+}
+
+async fn load_request_file(request: &mut Request, path: &std::path::Path) -> Result<(), ()> {
+    let bytes = read_input_file(path).await?;
+    match request.command.as_str() {
+        "batch_add" => {
+            let items: Vec<BatchItemInput> = serde_json::from_slice(&bytes).map_err(|_| ())?;
+            if items.is_empty() || items.len() > 20 { return Err(()); }
+            let mut request_ids = std::collections::HashSet::new();
+            for item in &items {
+                // Keep per-item URL/directory semantics on the host so CLI and
+                // MCP expose the same partial-success batch contract.
+                if item.url.is_empty() || item.url.len() > 8192 || item.directory.is_empty() || item.directory.len() > 4096
+                    || !valid_request_id(&item.request_id) || !request_ids.insert(item.request_id.clone()) {
+                    return Err(());
+                }
+            }
+            request.items = Some(items);
+        }
+        "prepare" => {
+            let input: ResourcePrepareInput = serde_json::from_slice(&bytes).map_err(|_| ())?;
+            if !matches!(input.kind.as_str(), "video" | "cloud" | "share" | "torrent") || input.input.len() > 8192
+                || input.provider.as_deref().is_some_and(|value| !bounded(value, 32))
+                || input.parent_id.as_deref().is_some_and(|value| !bounded(value, 256))
+                || input.access_code.as_deref().is_some_and(|value| !bounded(value, 128)) { return Err(()); }
+            request.prepare = Some(input);
+        }
+        "confirm" => {
+            let input: ResourceConfirmInput = serde_json::from_slice(&bytes).map_err(|_| ())?;
+            if !bounded(&input.preparation_id, 128) || !bounded(&input.directory, 4096)
+                || !std::path::Path::new(&input.directory).is_absolute() || !valid_request_id(&input.request_id)
+                || input.selection_ids.is_empty() || input.selection_ids.len() > 100
+                || input.selection_ids.iter().any(|value| !bounded(value, 256))
+                || input.selection_ids.iter().collect::<std::collections::HashSet<_>>().len() != input.selection_ids.len() { return Err(()); }
+            request.confirm = Some(input);
+        }
+        _ => return Err(()),
+    }
+    Ok(())
 }
 
 async fn run(options: &Options, interrupt: impl std::future::Future<Output = std::io::Result<()>>) -> Response {
@@ -214,6 +297,74 @@ mod tests {
         for args in [vec!["list","--limit","0"],vec!["list","--limit","101"],vec!["list","--limit","2","--limit","2"],vec!["result","id","--cursor","x"],vec!["health","--parent-id","x"]] {
             assert!(options(&args).is_err(),"{args:?}");
         }
+    }
+
+    #[test]
+    fn setup_and_resource_commands_have_unambiguous_file_inputs() {
+        assert_eq!(options(&["doctor"]).unwrap().request.command, "doctor");
+        assert_eq!(options(&["mcp-config", "--no-start"]).unwrap().request.command, "mcp-config");
+        for (command, wire) in [("batch-add", "batch_add"), ("prepare", "prepare"), ("confirm", "confirm")] {
+            let parsed = options(&[command, "--file", "中文 input.json"]).unwrap();
+            assert_eq!(parsed.request.command, wire);
+            assert_eq!(parsed.input_file.unwrap(), PathBuf::from("中文 input.json"));
+            assert!(options(&[command]).is_err());
+            assert!(options(&[command, "--file", "one.json", "--file", "two.json"]).is_err());
+        }
+        for command in ["health", "doctor", "mcp-config", "list"] {
+            assert!(options(&[command, "--file", "input.json"]).is_err());
+        }
+        let directory = std::env::temp_dir();
+        assert!(options(&["add", "ftp://example.test/file.bin", "--directory", directory.to_str().unwrap(), "--request-id", "ftp-1"]).is_ok());
+        for url in ["ftp://name:secret@example.test/a", "https://example.test/a#fragment"] {
+            assert!(options(&["add", url, "--directory", directory.to_str().unwrap(), "--request-id", "x"]).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn batch_file_validates_envelope_before_contacting_host_but_keeps_item_semantics() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("batch.json");
+        let one = json!({"url":"https://example.test/a", "directory":directory.path(), "request_id":"one"});
+        let bad_semantics = json!({"url":"not-a-url", "directory":"relative", "request_id":"two"});
+        std::fs::write(&file, json!([one.clone(),bad_semantics]).to_string()).unwrap();
+        let mut request = Request {command:"batch_add".into(), ..Request::default()};
+        load_request_file(&mut request, &file).await.unwrap();
+        assert_eq!(request.items.unwrap().len(), 2, "item semantic failures belong to the host");
+        for invalid in [json!([]), json!(vec![one.clone();21]), json!([one.clone(),one.clone()]),
+            json!([{"url":"https://example.test/a","directory":"relative","request_id":"bad id"}]),
+            json!([{"url":"https://example.test/a","directory":"relative","request_id":"one","credential":"secret"}])] {
+            std::fs::write(&file, invalid.to_string()).unwrap();
+            let parsed = options(&["batch-add", "--file", file.to_str().unwrap(), "--discovery", directory.path().join("missing.json").to_str().unwrap()]).unwrap();
+            assert_eq!(execute(&parsed).await.error.unwrap().code, "INVALID_ARGUMENT");
+        }
+        std::fs::write(&file, vec![b' ';256*1024+1]).unwrap();
+        assert!(read_input_file(&file).await.is_err());
+        assert!(read_input_file(directory.path()).await.is_err());
+        assert!(!directory.path().join("agent-start.lock").exists());
+    }
+
+    #[tokio::test]
+    async fn resource_files_validate_structure_and_bound_choices_without_echoing_secrets() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("resource.json");
+        std::fs::write(&file, "\u{feff}{\"kind\":\"cloud\",\"provider\":\"quark\"}").unwrap();
+        let mut request = Request {command:"prepare".into(), ..Request::default()};
+        load_request_file(&mut request, &file).await.unwrap();
+        assert_eq!(request.prepare.unwrap().input, "");
+        std::fs::write(&file, json!({"preparation_id":"prepared","selection_ids":["choice"],"directory":directory.path(),"request_id":"confirm-1"}).to_string()).unwrap();
+        let mut request = Request {command:"confirm".into(), ..Request::default()};
+        load_request_file(&mut request, &file).await.unwrap();
+        assert_eq!(request.confirm.unwrap().selection_ids, vec!["choice"]);
+        for selections in [Vec::<String>::new(), vec!["choice".into();101], vec!["choice".into();2]] {
+            std::fs::write(&file, json!({"preparation_id":"prepared","selection_ids":selections,"directory":directory.path(),"request_id":"confirm-1"}).to_string()).unwrap();
+            let mut request = Request {command:"confirm".into(), ..Request::default()};
+            assert!(load_request_file(&mut request, &file).await.is_err());
+        }
+        std::fs::write(&file, json!({"kind":"share","input":"https://example.test/share","access_code":"test-private-code","unexpected":true}).to_string()).unwrap();
+        let parsed = options(&["prepare", "--file", file.to_str().unwrap(), "--discovery", directory.path().join("missing.json").to_str().unwrap()]).unwrap();
+        let result = execute(&parsed).await;
+        assert_eq!(result.error.as_ref().unwrap().code, "INVALID_ARGUMENT");
+        assert!(!serde_json::to_string(&result).unwrap().contains("test-private-code"));
     }
 
     #[test]

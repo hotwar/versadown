@@ -15,6 +15,15 @@ afterEach(() => {
   Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
 });
 
+it('translates resource recovery errors without exposing unknown backend details', async () => {
+  const { runTaskAction } = await import('./api');
+  const { t } = await import('../i18n');
+  native.invoke.mockRejectedValueOnce('agent.error.CLI_RECOVERY_REQUIRED');
+  await expect(runTaskAction('resource-task', 'resume')).rejects.toThrow(t('agent.error.CLI_RECOVERY_REQUIRED'));
+  native.invoke.mockRejectedValueOnce('agent.error.secret-provider-diagnostic');
+  await expect(runTaskAction('resource-task', 'pause')).rejects.toThrow(t('agent.error.ACTION_FAILED'));
+});
+
 it('uses the dedicated Agent authorization command and translates safe backend errors', async () => {
   const { configureAgentAccess, defaultSettings } = await import('./api');
   const settings = { enabled: true, allowedDirectories: ['C:\\Downloads'] };

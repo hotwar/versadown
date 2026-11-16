@@ -617,6 +617,8 @@ pub async fn queue_cloud_dispatch(
                 },
                 |resolved| async move {
                     let state = submit_app.state::<AppState>();
+                    crate::cli_resources::authorize_task(&submit_app,id)
+                        .map_err(|_|QuarkError::InvalidInput("agent.error.forbidden".into()))?;
                     if !share {
                         check_dispatch_owner(&submit_app, &state.store, provider, id)?;
                     }

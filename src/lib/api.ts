@@ -230,6 +230,11 @@ export async function runTaskAction(taskId: string, action: Extract<TaskCommand,
   if (!isTauriRuntime()) return {};
   return duplicateResult(await invoke<NativeTaskOutcome>('task_action', { taskId, action }).catch(error => {
     if (typeof error === 'string' && error.startsWith('video.error.')) throw new Error(videoMessage(error));
+    if (typeof error === 'string' && error.startsWith('agent.error.')) {
+      const known = ['CLI_RECOVERY_REQUIRED', 'FORBIDDEN', 'ACTION_FAILED', 'INTERNAL_ERROR', 'INVALID_ARGUMENT', 'CLOUD_WRITE_REQUIRED'];
+      const key = known.includes(error.slice('agent.error.'.length)) ? error as TranslationKey : 'agent.error.ACTION_FAILED';
+      throw new Error(t(key));
+    }
     throw error;
   }));
 }

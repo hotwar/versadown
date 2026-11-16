@@ -1,5 +1,5 @@
 //! Shared local transport for CLI and MCP. Never opens the task database.
-use crate::cli_protocol::{self, ApiError, Discovery, HealthDto, Request, Response, TaskDto, TaskListDto, TaskResultDto, PROTOCOL_VERSION};
+use crate::cli_protocol::{self, ApiError, BatchAddDto, Discovery, HealthDto, PreparedResourceDto, ResourceConfirmDto, Request, Response, TaskDto, TaskListDto, TaskResultDto, PROTOCOL_VERSION};
 use std::{path::PathBuf, time::Duration};
 #[path = "cli_bootstrap.rs"]
 mod bootstrap;
@@ -142,6 +142,9 @@ pub(crate) async fn call(client: &reqwest::Client, discovery: &Discovery, reques
             "health" => project::<HealthDto>(data),
             "list" => project_tasks(data, lang),
             "result" => project::<TaskResultDto>(data),
+            "batch_add" => project_batch(data, lang),
+            "prepare" => project::<PreparedResourceDto>(data),
+            "confirm" => project::<ResourceConfirmDto>(data),
             "add" | "status" | "pause" | "resume" | "cancel" => project_task(data, lang),
             _ => Err(()),
         };
@@ -159,7 +162,7 @@ fn project<T: serde::de::DeserializeOwned + serde::Serialize>(data: serde_json::
 }
 
 fn known_error(code: &str) -> bool {
-    matches!(code, "INVALID_ARGUMENT" | "HOST_UNAVAILABLE" | "UNAUTHORIZED" | "NOT_FOUND" | "REQUEST_CONFLICT" | "DUPLICATE" | "INTERNAL_ERROR" | "TASK_FAILED" | "TASK_CANCELLED" | "TIMEOUT" | "INTERRUPTED" | "PROTOCOL_ERROR" | "UNSUPPORTED" | "ENGINE_UNAVAILABLE" | "ACTION_FAILED" | "FORBIDDEN" | "HOST_DISABLED" | "TASK_NOT_READY" | "BUSY" | "AUTH_REQUIRED" | "CLI_RECOVERY_REQUIRED")
+    matches!(code, "INVALID_ARGUMENT" | "HOST_UNAVAILABLE" | "UNAUTHORIZED" | "NOT_FOUND" | "REQUEST_CONFLICT" | "DUPLICATE" | "INTERNAL_ERROR" | "TASK_FAILED" | "TASK_CANCELLED" | "TIMEOUT" | "INTERRUPTED" | "PROTOCOL_ERROR" | "UNSUPPORTED" | "ENGINE_UNAVAILABLE" | "ACTION_FAILED" | "FORBIDDEN" | "HOST_DISABLED" | "TASK_NOT_READY" | "BUSY" | "AUTH_REQUIRED" | "CLI_RECOVERY_REQUIRED" | "PREPARATION_EXPIRED" | "CLOUD_WRITE_REQUIRED" | "METADATA_UNAVAILABLE" | "RESOURCE_LIMIT" | "ACCESS_CODE_REQUIRED")
 }
 
 fn sanitize_task(mut task: TaskDto, lang: &str) -> TaskDto {
@@ -169,7 +172,7 @@ fn sanitize_task(mut task: TaskDto, lang: &str) -> TaskDto {
     // This field is a finite action identifier, never arbitrary host text.
     if task.required_action.as_deref().is_some_and(|action| !matches!(action,
         "start_desktop" | "enable_desktop_agent" | "review_directory_permissions" | "open_desktop_login"
-        | "refresh_discovery" | "query_task" | "retry_same_request" | "inspect_desktop" | "resume_task")) {
+        | "refresh_discovery" | "query_task" | "retry_same_request" | "inspect_desktop" | "resume_task" | "prepare_again" | "open_desktop_share" | "reduce_selection" | "provide_access_code")) {
         task.required_action = Some("inspect_desktop".into());
     }
     task
@@ -186,10 +189,47 @@ fn project_tasks(data: serde_json::Value, lang: &str) -> Result<serde_json::Valu
     serde_json::to_value(list).map_err(|_| ())
 }
 
+fn project_batch(data: serde_json::Value, lang: &str) -> Result<serde_json::Value, ()> {
+    let mut batch: BatchAddDto = serde_json::from_value(data).map_err(|_| ())?;
+    if batch.items.is_empty() || batch.items.len() > 20 { return Err(()); }
+    let mut accepted = 0;
+    for item in &mut batch.items {
+        if item.ok {
+            if item.error.is_some() { return Err(()); }
+            item.data = Some(sanitize_task(item.data.take().ok_or(())?, lang));
+            accepted += 1;
+        } else {
+            if item.data.is_some() { return Err(()); }
+            let error = item.error.take().ok_or(())?;
+            if !known_error(&error.code) { return Err(()); }
+            let mut safe = ApiError::new(&error.code, lang);
+            safe.retry_after_ms = error.retry_after_ms.map(|ms| ms.min(86_400_000));
+            item.error = Some(safe);
+        }
+    }
+    if batch.accepted != accepted || batch.failed != batch.items.len() as u32 - accepted { return Err(()); }
+    serde_json::to_value(batch).map_err(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn batch_projection_rejects_inconsistent_totals_and_redacts_nested_errors() {
+        let mut data = json!({"items":[{"request_id":"stable-1","ok":false,
+            "error":{"code":"FORBIDDEN","message":"secret cookie","next_action":"secret action"},"token":"secret"}],
+            "accepted":0,"failed":1});
+        let safe = project_batch(data.clone(), "zh-CN").unwrap();
+        assert!(!safe.to_string().contains("secret"));
+        assert_eq!(safe["items"][0]["error"]["next_action"], "review_directory_permissions");
+        data["accepted"] = json!(1);
+        assert!(project_batch(data.clone(), "en").is_err());
+        data["accepted"] = json!(0);
+        data["items"][0]["ok"] = json!(true);
+        assert!(project_batch(data, "en").is_err());
+    }
 
     #[tokio::test]
     async fn transport_authenticates_and_redacts_server_errors() {

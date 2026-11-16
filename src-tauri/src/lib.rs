@@ -12,6 +12,8 @@ mod cli_protocol;
 mod cli_service;
 mod cli_host;
 mod cli_dispatch;
+mod cli_resources;
+mod cli_bt;
 mod agent_access;
 mod agent_runtime;
 mod connectors;
@@ -365,6 +367,7 @@ pub fn run() -> i32 {
             if !startup_health.credentials_unavailable {
                 commands::purge_tianyi_local_state(&store, &cloud).map_err(std::io::Error::other)?;
             }
+            store.recover_agent_resource_intents()?;
             store.recover_video_downloads()?;
             store.recover_interrupted_cloud_directories()?;
             // aria2 persists the short-lived direct URL it received from a
@@ -515,6 +518,7 @@ pub fn run() -> i32 {
                 }),
             );
             app.manage(cli_dispatcher);
+            cli_resources::start(app.handle().clone());
             if let Err(error) = cli_host::start(app.handle(), &data_dir) {
                 if startup_options.agent_host {
                     return Err(error.into());

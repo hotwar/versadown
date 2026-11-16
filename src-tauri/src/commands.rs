@@ -2279,6 +2279,15 @@ async fn run_local_task_action(
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let mut current = state.store.find(id).map_err(|error| error.to_string())?;
     ensure_private_task_access(&state, &current)?;
+    if matches!(action.as_str(), "pause" | "resume" | "cancel") {
+        if let Some(task) = crate::cli_resources::control_pending(&app, id, &action).await
+            .map_err(|code| format!("agent.error.{code}"))? {
+            let _ = emit_task_update_for_task(&app, &state.store, None, task.clone());
+            return task_action_outcome(&state.store, task, None);
+        }
+        // A resource submission may have finished while the control gate was held.
+        current = state.store.find(id).map_err(|error| error.to_string())?;
+    }
     if let Some(dispatcher) = app.try_state::<Arc<crate::cli_dispatch::CliDispatcher>>() {
         let control = match action.as_str() {
             "pause" => Some(DownloadAction::Pause),

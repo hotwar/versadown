@@ -9,8 +9,8 @@ mod transfer;
 
 use crate::commands::{self, AppState};
 use crate::{DownloadTask, NewTask, TaskStatus, TaskStore};
-use std::{collections::HashMap, path::Path, sync::Arc};
-use tauri::State;
+use std::{collections::HashMap, path::Path, sync::{Arc,OnceLock}};
+use tauri::{State,AppHandle};
 use tokio::sync::{oneshot, Mutex, Semaphore};
 use uuid::Uuid;
 
@@ -33,6 +33,7 @@ pub(crate) struct VideoDownloads {
     slots: Arc<Semaphore>,
     jobs: Mutex<HashMap<Uuid, Job>>,
     previews: previews::Previews,
+    agent_application: OnceLock<AppHandle>,
 }
 
 impl VideoDownloads {
@@ -47,7 +48,12 @@ impl VideoDownloads {
             slots: Arc::new(Semaphore::new(usize::from(limit.clamp(1, 3)))),
             jobs: Mutex::default(),
             previews: Default::default(),
+            agent_application: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn bind_agent_application(&self,app:AppHandle) {
+        let _=self.agent_application.set(app);
     }
 
     pub(crate) async fn prepare(
@@ -58,6 +64,16 @@ impl VideoDownloads {
         let preview = extractor::inspect(page, proxy).await?;
         self.previews.remember(&preview)?;
         Ok(preview)
+    }
+
+    /// Agent confirmation has already committed the task, format and output.
+    pub(crate) async fn start_agent_task(
+        &self,
+        state: &AppState,
+        task: DownloadTask,
+    ) -> Result<DownloadTask, String> {
+        let (proxy, rate) = network_options(state)?;
+        self.start(task, proxy, rate).await
     }
 
     async fn submit(
@@ -187,12 +203,21 @@ impl VideoDownloads {
         let mut task = queued.clone();
         let (stop, mut stopped) = oneshot::channel();
         let (slots, store, emit) = (self.slots.clone(), self.store.clone(), self.emit.clone());
+        let agent_application=self.agent_application.get().cloned();
         let job = tauri::async_runtime::spawn(async move {
             let _permit = tokio::select! {
                 biased;
                 _ = &mut stopped => return,
                 permit = slots.acquire_owned() => match permit { Ok(p) => p, Err(_) => return },
             };
+            if store.is_agent_resource_task(task.id).unwrap_or(true) {
+                let authorized=agent_application.as_ref().ok_or("FORBIDDEN")
+                    .and_then(|app|crate::cli_resources::authorize_task(app,task.id));
+                if let Err(code)=authorized {
+                    if let Ok(saved)=store.fail_with_code(task.id,Some(code),crate::cli_protocol::message(code,"en")) {emit(saved);}
+                    return;
+                }
+            }
             task.status = TaskStatus::Downloading;
             let publish = |task: &DownloadTask| {
                 if let Ok(saved) = store.apply_transfer_snapshot(task.clone()) {
@@ -298,6 +323,45 @@ pub(crate) fn network_options(state: &AppState) -> Result<(Option<String>, u64),
         commands::proxy_url(&settings.proxy)?,
         settings.aria2.overall_download_limit,
     ))
+}
+
+pub(crate) struct AgentPreparedVideo {
+    pub page: String,
+    pub selector: String,
+    pub media_id: String,
+    pub name: String,
+    pub size_bytes: Option<u64>,
+    pub detail: String,
+}
+
+/// Only extractor metadata is requested here. No task or transfer is created.
+pub(crate) async fn prepare_agent_video(
+    state: &AppState,
+    input: &str,
+) -> Result<Vec<AgentPreparedVideo>, String> {
+    let page = routing::resolve(input, true).await?.ok_or("video.error.unsupported")?;
+    let (proxy, _) = network_options(state)?;
+    let preview = state.web_video.prepare(page, proxy.as_deref()).await?;
+    let title: String = preview.title.chars().scan(0, |bytes, c| {
+        *bytes += c.len_utf8();
+        (*bytes <= 160).then_some(c)
+    }).collect();
+    Ok(preview.formats.into_iter().map(|format| {
+        let quality = match (format.width, format.height) {
+            (0, 0) => String::new(),
+            (0, height) => format!(" [{height}p]"),
+            (width, 0) => format!(" [w{width}]"),
+            (width, height) => format!(" [{width}x{height}]"),
+        };
+        AgentPreparedVideo {
+            page: preview.page_url.clone(), selector: format.id,
+            media_id: preview.media_id.clone(),
+            name: crate::cloud::commands::safe_filename(&format!("{}{quality}.{}", title.trim(), format.ext)),
+            size_bytes: format.bytes,
+            detail: format!("{}x{} {}{}", format.width, format.height, format.ext,
+                if format.estimated { " estimated_size" } else { "" }),
+        }
+    }).collect())
 }
 
 #[tauri::command]

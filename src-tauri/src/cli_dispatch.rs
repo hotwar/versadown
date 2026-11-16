@@ -39,10 +39,27 @@ impl CliDispatcher {
     pub(crate) fn notify(&self) { self.wake.notify_one(); }
 
     async fn dispatch_pending(&self) {
-        let Ok(service) = self.runtime.service().await else { return; };
+        let service = self.runtime.service().await.ok();
         let Ok(intents) = self.store.pending_cli_intents() else { return; };
         for intent in intents {
             let _gate = self.gate.lock().await;
+            if self.store.find(intent.task_id).is_ok_and(|task| task.kind == "ftp") {
+                if let Err(error) = self.runtime.dispatch_cli_ftp_intent(&intent, self.authorize.as_ref()).await {
+                    let code = match error {
+                        crate::ftp::FtpDownloadError::InvalidOption("recovery checkpoint") => Some("CLI_RECOVERY_REQUIRED"),
+                        crate::ftp::FtpDownloadError::InvalidOption("engine is stopping") => None,
+                        crate::ftp::FtpDownloadError::InvalidOption(_) | crate::ftp::FtpDownloadError::InvalidUrl(_)
+                            | crate::ftp::FtpDownloadError::MissingFilePath => Some("INVALID_ARGUMENT"),
+                        _ => None,
+                    };
+                    if let Some(code) = code {
+                        let _ = self.store.fail_with_code(intent.task_id, Some(code), crate::cli_protocol::message(code, "en"));
+                        let _ = self.store.finish_cli_dispatch(intent.task_id);
+                    }
+                }
+                continue;
+            }
+            let Some(service) = &service else { continue; };
             // Errors may mean that an RPC was accepted. Leave the intent and
             // its fixed GID for reconciliation, and do not log raw RPC errors.
             if let Err(error) = service.dispatch_cli_intent(&intent, self.authorize.as_ref()).await {
@@ -64,6 +81,14 @@ impl CliDispatcher {
     /// This also works while the engine is unavailable or starting.
     pub(crate) async fn control_pending(&self, id: Uuid, action: DownloadAction) -> Result<Option<DownloadTask>, StoreError> {
         let _gate = self.gate.lock().await;
+        // The FTP scheduler lives in this process. Serialize its controls with
+        // restart dispatch even after the initial receipt was acknowledged.
+        if self.store.find(id).is_ok_and(|task| task.kind == "ftp")
+            && self.store.has_cli_intent(id)? && !self.store.files(id)?.is_empty()
+        {
+            let task = self.runtime.control(id, action).await.map_err(|_| StoreError::InvalidCliIntent)?;
+            return Ok(Some(task));
+        }
         let task = self.store.control_pending_cli(id, action)?;
         if task.is_some() { self.notify(); }
         Ok(task)

@@ -593,6 +593,13 @@ impl EngineRuntime {
         Ok(stat)
     }
 
+    pub(crate) async fn dispatch_cli_ftp_intent(
+        self: &Arc<Self>, intent: &crate::store::CliDispatchIntent,
+        authorize: &(dyn Fn(&std::path::Path) -> bool + Send + Sync),
+    ) -> Result<DownloadTask, crate::ftp::FtpDownloadError> {
+        self.ftp.dispatch_cli_intent(intent, authorize).await
+    }
+
     pub async fn submit_uri_with_options(
         self: &Arc<Self>,
         task_id: uuid::Uuid,

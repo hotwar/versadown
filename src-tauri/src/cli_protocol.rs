@@ -5,6 +5,14 @@ use serde_json::Value;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
+pub fn build_commit() -> Option<String> {
+    option_env!("VERSADOWN_BUILD_COMMIT").filter(|value| value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())).map(str::to_owned)
+}
+
+pub fn build_dirty() -> Option<bool> {
+    option_env!("VERSADOWN_BUILD_DIRTY").and_then(|value| match value { "true" => Some(true), "false" => Some(false), _ => None })
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Request {
@@ -17,6 +25,12 @@ pub struct Request {
     pub directory: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub items: Option<Vec<BatchItemInput>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prepare: Option<ResourcePrepareInput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirm: Option<ResourceConfirmInput>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -57,6 +71,11 @@ impl ApiError {
             "HOST_DISABLED" => (false, Some("enable_desktop_agent")),
             "FORBIDDEN" => (false, Some("review_directory_permissions")),
             "AUTH_REQUIRED" => (false, Some("open_desktop_login")),
+            "CLOUD_WRITE_REQUIRED" => (false, Some("open_desktop_share")),
+            "PREPARATION_EXPIRED" => (false, Some("prepare_again")),
+            "METADATA_UNAVAILABLE" => (false, Some("prepare_again")),
+            "RESOURCE_LIMIT" => (false, Some("reduce_selection")),
+            "ACCESS_CODE_REQUIRED" => (false, Some("provide_access_code")),
             "UNAUTHORIZED" => (false, Some("refresh_discovery")),
             "TASK_NOT_READY" => (true, Some("query_task")),
             "BUSY" => (true, Some("retry_same_request")),
@@ -98,6 +117,87 @@ pub struct TaskListDto {
     pub next_cursor: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct BatchItemInput {
+    #[schemars(length(min = 1, max = 8192))]
+    pub url: String,
+    #[schemars(length(min = 1, max = 4096))]
+    pub directory: String,
+    #[schemars(length(min = 1, max = 128), regex(pattern = "^[A-Za-z0-9_.:-]+$"))]
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct BatchItemResult {
+    pub request_id: String,
+    pub ok: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<TaskDto>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ApiError>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct BatchAddDto {
+    pub items: Vec<BatchItemResult>,
+    pub accepted: u32,
+    pub failed: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResourcePrepareInput {
+    #[schemars(length(min = 1, max = 32))]
+    pub kind: String,
+    #[serde(default)]
+    #[schemars(length(max = 8192))]
+    pub input: String,
+    #[schemars(length(min = 1, max = 32))]
+    pub provider: Option<String>,
+    #[schemars(length(min = 1, max = 256))]
+    pub parent_id: Option<String>,
+    #[schemars(length(min = 1, max = 128))]
+    pub access_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceConfirmInput {
+    #[schemars(length(min = 1, max = 128))]
+    pub preparation_id: String,
+    #[schemars(length(min = 1, max = 100))]
+    pub selection_ids: Vec<String>,
+    #[schemars(length(min = 1, max = 4096))]
+    pub directory: String,
+    #[schemars(length(min = 1, max = 128), regex(pattern = "^[A-Za-z0-9_.:-]+$"))]
+    pub request_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ResourceChoiceDto {
+    pub selection_id: String,
+    pub name: String,
+    pub kind: String,
+    pub size_bytes: Option<u64>,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct PreparedResourceDto {
+    pub preparation_id: String,
+    pub expires_at: i64,
+    pub kind: String,
+    pub resources: Vec<ResourceChoiceDto>,
+    pub effects: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct ResourceConfirmDto {
+    pub preparation_id: String,
+    pub task_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ArtifactDto {
     pub path: String,
@@ -133,6 +233,8 @@ pub struct LimitsDto {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HealthDto {
     pub version: String,
+    pub build_commit: Option<String>,
+    pub build_dirty: Option<bool>,
     pub protocol_version: u32,
     pub instance_id: String,
     pub engine_available: bool,
@@ -185,6 +287,16 @@ pub fn message(key: &str, lang: &str) -> &'static str {
         ("FORBIDDEN", true) => "此操作超出了已授权的下载目录范围。",
         ("AUTH_REQUIRED", false) => "Complete account authorization in the VD application.",
         ("AUTH_REQUIRED", true) => "请在 VD 主程序中完成账号授权。",
+        ("CLOUD_WRITE_REQUIRED", false) => "This resource requires a cloud save operation. Open VD to review and perform it; Agent download access does not grant cloud write permission.",
+        ("CLOUD_WRITE_REQUIRED", true) => "此资源需要云端转存，请打开 VD 审阅并操作；Agent 下载权限不包含云端写入权限。",
+        ("PREPARATION_EXPIRED", false) => "The prepared resource is missing or expired. Prepare it again and review the available selections.",
+        ("PREPARATION_EXPIRED", true) => "资源准备记录不存在或已过期，请重新解析并检查可选资源。",
+        ("METADATA_UNAVAILABLE", false) => "Verified torrent metadata is unavailable. Prepare an authorized local torrent file or retry after metadata becomes available.",
+        ("METADATA_UNAVAILABLE", true) => "暂时无法取得可校验的种子元数据。请准备已授权目录内的种子文件，或在元数据可用后重试。",
+        ("RESOURCE_LIMIT", false) => "The resource or selection exceeds this operation's limits. Use a smaller folder or selection.",
+        ("RESOURCE_LIMIT", true) => "资源或选择超出本操作的限制，请使用较小的目录或选择范围。",
+        ("ACCESS_CODE_REQUIRED", false) => "This share requires a valid access code. Ask the user for the code and prepare it again.",
+        ("ACCESS_CODE_REQUIRED", true) => "此分享需要有效提取码，请向用户获取提取码后重新解析。",
         ("TASK_NOT_READY", false) => "Final files are not ready. Query the task status first.",
         ("TASK_NOT_READY", true) => "最终文件尚未就绪，请先查询任务状态。",
         ("CLI_RECOVERY_REQUIRED", false) => "Recovery requires review in VD. Existing files were preserved.",
@@ -213,8 +325,8 @@ pub fn message(key: &str, lang: &str) -> &'static str {
         ("ENGINE_UNAVAILABLE", true) => "下载引擎不可用。",
         ("ACTION_FAILED", false) => "The task action could not be completed.",
         ("ACTION_FAILED", true) => "无法完成此任务操作。",
-        ("HELP", false) => "Enable Agent access and authorize download directories once in VD settings. Commands start the default VD host in the background when needed; --no-start or an explicit discovery path connects only. All commands emit one JSON result. add accepts an HTTP/HTTPS file URL, an absolute directory and a request ID. Reuse the same request ID and arguments when retrying. wait never cancels the task on timeout or Ctrl-C.",
-        ("HELP", true) => "首次在 VD 设置中启用 Agent 调用并授权下载目录。命令按需启动默认 VD 后台宿主；--no-start 或显式发现文件路径只连接已有宿主。所有命令输出一条 JSON 结果。add 接受 HTTP/HTTPS 文件地址、绝对保存目录和请求 ID；重试时复用相同请求 ID 与参数。wait 超时或 Ctrl-C 不会取消任务。",
+        ("HELP", false) => "Enable Agent access and authorize download directories once in VD settings. Commands start the default host on demand; --no-start or explicit discovery connects only. doctor is read-only, mcp-config generates configuration without writing it. add accepts HTTP/HTTPS/FTP files. batch-add --file accepts up to 20 independent requests; inspect every item. Complex resources use prepare/confirm --file. Reuse request IDs and identical arguments when retrying. wait timeout or Ctrl-C never cancels tasks.",
+        ("HELP", true) => "首次在 VD 设置中启用 Agent 调用并授权下载目录。命令按需启动默认宿主；--no-start 或显式发现文件路径只连接。doctor 只读诊断，mcp-config 生成配置但不写入。add 接受 HTTP/HTTPS/FTP 文件；batch-add --file 最多提交 20 项独立请求，需检查逐项结果。复杂资源使用 prepare/confirm --file。重试复用请求 ID 和原参数；wait 超时或 Ctrl-C 不取消任务。",
         (_, false) => "The operation failed. Inspect the VD application for details.",
         (_, true) => "操作失败，请在 VD 主程序中查看详情。",
     }
@@ -223,10 +335,11 @@ pub fn message(key: &str, lang: &str) -> &'static str {
 pub fn exit_code(response: &Response) -> u8 {
     if response.ok { return 0; }
     match response.error.as_ref().map(|e| e.code.as_str()) {
-        Some("INVALID_ARGUMENT" | "UNSUPPORTED") => 2,
+        Some("INVALID_ARGUMENT" | "UNSUPPORTED" | "RESOURCE_LIMIT") => 2,
         Some("HOST_UNAVAILABLE") => 3,
         Some("ENGINE_UNAVAILABLE" | "ACTION_FAILED") => 1,
-        Some("UNAUTHORIZED" | "FORBIDDEN" | "HOST_DISABLED" | "AUTH_REQUIRED") => 4,
+        Some("UNAUTHORIZED" | "FORBIDDEN" | "HOST_DISABLED" | "AUTH_REQUIRED" | "CLOUD_WRITE_REQUIRED" | "ACCESS_CODE_REQUIRED") => 4,
+        Some("PREPARATION_EXPIRED") => 5,
         Some("NOT_FOUND") => 5,
         Some("REQUEST_CONFLICT" | "DUPLICATE") => 6,
         Some("TIMEOUT") => 7,

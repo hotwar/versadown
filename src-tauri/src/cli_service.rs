@@ -10,7 +10,8 @@ use tauri::{AppHandle, Manager};
 
 use crate::{
     cli_protocol::{Request, Response, ApiError, TaskDto, TaskListDto, TaskResultDto,
-        ArtifactDto, HealthDto, CapabilitiesDto, LimitsDto, PROTOCOL_VERSION},
+        ArtifactDto, HealthDto, CapabilitiesDto, LimitsDto, BatchItemInput, BatchItemResult,
+        BatchAddDto, PROTOCOL_VERSION},
     commands::{self, AppState},
     models::{NewTask, QueueTaskPayload},
     parser::CandidateKind,
@@ -20,7 +21,7 @@ use crate::{
 
 type ApiResult<T> = Result<T, &'static str>;
 
-fn public_task(task: &QueueTaskPayload) -> TaskDto {
+pub(crate) fn public_task(task: &QueueTaskPayload) -> TaskDto {
     TaskDto {
         id: task.id.clone(),
         // Some old tasks use their entire input as the display name. Never
@@ -138,6 +139,7 @@ fn authorized_outputs_with(
     if files.is_empty() && group.is_none() {
         // cli_dispatch provides the durable destination for accepted work.
         let directory = store.cli_intent_directory(id).map_err(|_| "INTERNAL_ERROR")?
+            .or(store.agent_resource_directory(id)?)
             .ok_or("FORBIDDEN")?;
         authorize(&directory, true)?;
     }
@@ -216,11 +218,11 @@ where
 
 fn direct_source(source: &str) -> ApiResult<String> {
     let candidate = crate::parser::validate_download_input(source).map_err(|_| "INVALID_ARGUMENT")?;
-    if candidate.kind != CandidateKind::Direct {
+    if !matches!(candidate.kind, CandidateKind::Direct | CandidateKind::Ftp) {
         return Err("UNSUPPORTED");
     }
     let parsed = url::Url::parse(&candidate.source).map_err(|_| "INVALID_ARGUMENT")?;
-    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none()
+    if !matches!(parsed.scheme(), "http" | "https" | "ftp") || parsed.host_str().is_none()
         || !parsed.username().is_empty() || parsed.password().is_some()
         || parsed.fragment().is_some()
     {
@@ -235,15 +237,103 @@ fn fingerprint(source: &str, directory: &str) -> String {
     format!("{:x}", Sha256::digest(parameters))
 }
 
+fn valid_request_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128
+        && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
+}
+
+fn validate_batch(items: &[BatchItemInput]) -> ApiResult<()> {
+    if items.is_empty() || items.len() > 20 { return Err("INVALID_ARGUMENT"); }
+    let mut ids = std::collections::HashSet::new();
+    for item in items {
+        // Validate every echoed identity before the first transaction. In
+        // particular, an invalid ID must not be a channel for returning URLs.
+        if !valid_request_id(&item.request_id) || !ids.insert(&item.request_id)
+            || item.url.is_empty() || item.url.len() > 8192
+            || item.directory.is_empty() || item.directory.len() > 4096
+        {
+            return Err("INVALID_ARGUMENT");
+        }
+    }
+    Ok(())
+}
+
+async fn batch_add_with<F, Fut>(items: &[BatchItemInput], lang: &str, mut submit: F) -> ApiResult<BatchAddDto>
+where
+    F: FnMut(BatchItemInput) -> Fut,
+    Fut: std::future::Future<Output = ApiResult<TaskDto>>,
+{
+    validate_batch(items)?;
+    let mut results = Vec::with_capacity(items.len());
+    let mut accepted = 0;
+    for item in items {
+        let result = match submit(item.clone()).await {
+            Ok(task) => {
+                accepted += 1;
+                BatchItemResult { request_id: item.request_id.clone(), ok: true, data: Some(task), error: None }
+            },
+            Err(code) => BatchItemResult { request_id: item.request_id.clone(), ok: false,
+                data: None, error: Some(ApiError::new(code, lang)) },
+        };
+        results.push(result);
+    }
+    Ok(BatchAddDto { failed: items.len() as u32 - accepted, accepted, items: results })
+}
+
+fn create_direct_intent(store: &TaskStore, source: &str, directory: &str, id: &str,
+    options: &crate::UriSubmissionOptions) -> ApiResult<crate::DownloadTask>
+{
+    let mut new_task = NewTask::direct(source);
+    new_task.kind = if url::Url::parse(source).is_ok_and(|url| url.scheme() == "ftp") { "ftp" } else { "file" }.into();
+    new_task.name = url::Url::parse(source).ok()
+        .and_then(|url| url.path_segments()?.next_back().map(str::to_owned))
+        .filter(|name| !name.is_empty()).unwrap_or_else(|| "download".into());
+    match store.create_cli_task_with_intent(id, &fingerprint(source, directory), new_task, options)
+        .map_err(|error| match error { crate::store::StoreError::NotFound(_) => "NOT_FOUND", _ => "INTERNAL_ERROR" })?
+    {
+        CliCreateOutcome::Conflict => Err("REQUEST_CONFLICT"),
+        CliCreateOutcome::Duplicate => Err("DUPLICATE"),
+        CliCreateOutcome::Busy => Err("BUSY"),
+        CliCreateOutcome::Replayed(task) | CliCreateOutcome::Created(task) => Ok(task),
+    }
+}
+
+async fn add_one(app: &AppHandle, input: BatchItemInput) -> ApiResult<TaskDto> {
+    let state = app.state::<AppState>();
+    if !valid_request_id(&input.request_id) { return Err("INVALID_ARGUMENT"); }
+    if input.url.len() > 8192 || input.directory.len() > 4096 { return Err("INVALID_ARGUMENT"); }
+    let source = direct_source(&input.url)?;
+    let directory = Path::new(&input.directory);
+    if input.directory.trim().is_empty() || !directory.is_absolute() { return Err("INVALID_ARGUMENT"); }
+    let authorized_directory = crate::agent_access::authorize_directory(&state, directory)?;
+    let directory = authorized_directory.to_str().ok_or("INVALID_ARGUMENT")?;
+    let options = commands::download_submission_options_for_directory(&state, Some(directory))
+        .map_err(|_| "INVALID_ARGUMENT")?;
+    if url::Url::parse(&source).is_ok_and(|url| url.scheme() == "ftp")
+        && (!options.headers.is_empty() || options.proxy.is_some()) {
+        return Err("UNSUPPORTED");
+    }
+    let directory = options.directory.as_deref().and_then(Path::to_str).ok_or("INVALID_ARGUMENT")?;
+    crate::agent_access::authorize_directory(&state, Path::new(directory))?;
+    let task = create_direct_intent(&state.store, &source, directory, &input.request_id, &options)?;
+    app.state::<std::sync::Arc<crate::cli_dispatch::CliDispatcher>>().notify();
+    let _ = commands::emit_task_update_for_task(app, &state.store, None, task.clone());
+    serde_json::from_value(host_status(app, &task.id.to_string()).await?).map_err(|_| "INTERNAL_ERROR")
+}
+
 fn validate_request(request: &Request) -> ApiResult<()> {
     let task_command = matches!(request.command.as_str(), "status" | "result" | "pause" | "resume" | "cancel");
     if task_command != request.task_id.is_some()
         || (request.command != "add" && (request.url.is_some() || request.directory.is_some() || request.request_id.is_some()))
+        || (request.command == "batch_add") != request.items.is_some()
+        || (request.command == "prepare") != request.prepare.is_some()
+        || (request.command == "confirm") != request.confirm.is_some()
         || (request.command != "list" && (request.status.is_some() || request.query.is_some()
             || request.parent_id.is_some() || request.cursor.is_some() || request.limit.is_some()))
     {
         return Err("INVALID_ARGUMENT");
     }
+    if let Some(items) = &request.items { validate_batch(items)?; }
     if let Some(id) = &request.task_id {
         if id.len() > 256 || (uuid::Uuid::parse_str(id).is_err() && !id.starts_with("group:")) { return Err("INVALID_ARGUMENT"); }
     }
@@ -284,10 +374,11 @@ async fn execute_inner(app: &AppHandle, request: &Request) -> ApiResult<Value> {
     match request.command.as_str() {
         "health" => serde_json::to_value(HealthDto {
             version: env!("CARGO_PKG_VERSION").into(), protocol_version: PROTOCOL_VERSION,
+            build_commit: crate::cli_protocol::build_commit(), build_dirty: crate::cli_protocol::build_dirty(),
             instance_id: crate::cli_host::instance_id(app), engine_available: state.runtime.status().available,
-            capabilities: CapabilitiesDto { new_download_protocols: vec!["http".into(), "https".into()],
+            capabilities: CapabilitiesDto { new_download_protocols: vec!["http".into(), "https".into(), "ftp".into()],
                 task_types: ["file", "cloud", "web_video", "directory", "magnet", "ftp"].map(str::to_owned).to_vec(),
-                operations: ["health", "add", "list", "status", "pause", "resume", "cancel", "result"].map(str::to_owned).to_vec(),
+                operations: ["health", "add", "batch_add", "prepare", "confirm", "list", "status", "pause", "resume", "cancel", "result"].map(str::to_owned).to_vec(),
                 private_tasks: false },
             limits: LimitsDto { list_default_limit: 50, list_max_limit: 100, poll_interval_ms: 1000,
                 max_response_bytes: 8 * 1024 * 1024, max_pending_tasks: 1000 },
@@ -310,42 +401,23 @@ async fn execute_inner(app: &AppHandle, request: &Request) -> ApiResult<Value> {
             }
             // Completed files are never deleted by an automation cancel.
             if matches!(task.status, TaskStatus::Completed | TaskStatus::Recycled) { return Err("ACTION_FAILED"); }
+            if crate::cli_resources::control_pending(app, uuid::Uuid::parse_str(id).map_err(|_| "INVALID_ARGUMENT")?, &request.command).await?.is_some() {
+                return host_status(app, id).await;
+            }
             control_public(&state.store, id, &request.command, |id, action| async move {
                 commands::dispatch_task_action(id, action, app.clone()).await.map(|_| ())
             }).await?;
             host_status(app, id).await
         }
         "add" => {
-            let source = direct_source(request.url.as_deref().ok_or("INVALID_ARGUMENT")?)?;
-            let directory = request.directory.as_deref().filter(|directory| !directory.trim().is_empty()).ok_or("INVALID_ARGUMENT")?;
-            if !std::path::Path::new(directory).is_absolute() { return Err("INVALID_ARGUMENT"); }
-            let authorized_directory = crate::agent_access::authorize_directory(&state, Path::new(directory))?;
-            let directory = authorized_directory.to_str().ok_or("INVALID_ARGUMENT")?;
-            let id = request.request_id.as_deref().ok_or("INVALID_ARGUMENT")?;
-            if id.is_empty() || id.len() > 128 || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte)) {
-                return Err("INVALID_ARGUMENT");
-            }
-            let options = commands::download_submission_options_for_directory(&state, Some(directory))
-                .map_err(|_| "INVALID_ARGUMENT")?;
-            let directory = options.directory.as_deref().and_then(std::path::Path::to_str).ok_or("INVALID_ARGUMENT")?;
-            crate::agent_access::authorize_directory(&state, Path::new(directory))?;
-            let mut new_task = NewTask::direct(source.clone());
-            new_task.name = url::Url::parse(&source).ok()
-                .and_then(|url| url.path_segments()?.next_back().map(str::to_owned))
-                .filter(|name| !name.is_empty()).unwrap_or_else(|| "download".into());
-            let outcome = state.store.create_cli_task_with_intent(id, &fingerprint(&source, directory), new_task, &options)
-                .map_err(|error| match error { crate::store::StoreError::NotFound(_) => "NOT_FOUND", _ => "INTERNAL_ERROR" })?;
-            let task = match outcome {
-                CliCreateOutcome::Conflict => return Err("REQUEST_CONFLICT"),
-                CliCreateOutcome::Duplicate => return Err("DUPLICATE"),
-                CliCreateOutcome::Busy => return Err("BUSY"),
-                CliCreateOutcome::Replayed(task) => return host_status(app, &task.id.to_string()).await,
-                CliCreateOutcome::Created(task) => task,
-            };
-            app.state::<std::sync::Arc<crate::cli_dispatch::CliDispatcher>>().notify();
-            let _ = commands::emit_task_update_for_task(app, &state.store, None, task.clone());
-            host_status(app, &task.id.to_string()).await
+            let task = add_one(app, BatchItemInput { url: request.url.clone().ok_or("INVALID_ARGUMENT")?,
+                directory: request.directory.clone().ok_or("INVALID_ARGUMENT")?,
+                request_id: request.request_id.clone().ok_or("INVALID_ARGUMENT")? }).await?;
+            serde_json::to_value(task).map_err(|_| "INTERNAL_ERROR")
         }
+        "batch_add" => serde_json::to_value(batch_add_with(request.items.as_deref().ok_or("INVALID_ARGUMENT")?,
+            request.lang.as_deref().unwrap_or("en"), |item| add_one(app, item)).await?).map_err(|_| "INTERNAL_ERROR"),
+        "prepare" | "confirm" => crate::cli_resources::handle(app.clone(), request).await,
         _ => Err("INVALID_ARGUMENT"),
     }
 }
@@ -447,11 +519,81 @@ mod tests {
     }
 
     #[test]
-    fn cli_direct_input_is_limited_to_http_files() {
+    fn cli_direct_input_accepts_anonymous_ftp_and_http_files_without_url_credentials() {
         assert!(direct_source("https://example.test/file.bin?signature=secret").is_ok());
-        for source in ["ftp://example.test/file", "https://example.test/list.m3u8", "https://example.test/a.mpd", "https://www.youtube.com/watch?v=abcdefghijk", "https://pan.baidu.com/s/123", "magnet:?xt=urn:btih:0123456789012345678901234567890123456789", "https://name:secret@example.test/file", "https://example.test/file#secret"] {
+        assert!(direct_source("ftp://example.test/pub/archive.zip").is_ok());
+        for source in ["ftp://name:secret@example.test/file", "ftp://name@example.test/file", "ftp://example.test/pub/", "ftps://example.test/file", "https://example.test/list.m3u8", "https://example.test/a.mpd", "https://www.youtube.com/watch?v=abcdefghijk", "https://pan.baidu.com/s/123", "magnet:?xt=urn:btih:0123456789012345678901234567890123456789", "https://name:secret@example.test/file", "https://example.test/file#secret"] {
             assert!(direct_source(source).is_err(), "accepted {source}");
         }
+    }
+
+    fn accept_batch_fixture(store: &TaskStore, item: BatchItemInput) -> ApiResult<TaskDto> {
+        let source = direct_source(&item.url)?;
+        let options = crate::UriSubmissionOptions { directory: Some(item.directory.clone().into()), ..Default::default() };
+        let task = create_direct_intent(store, &source, &item.directory, &item.request_id, &options)?;
+        serde_json::from_value(status(store, &task.id.to_string(), false)?).map_err(|_| "INTERNAL_ERROR")
+    }
+
+    #[tokio::test]
+    async fn cli_batch_partial_failure_replays_successes_and_retries_only_unaccepted_items() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("tasks.db");
+        let destination = directory.path().to_string_lossy().into_owned();
+        let mut items = vec![
+            BatchItemInput { url: "https://example.test/one.bin?token=secret".into(), directory: destination.clone(), request_id: "one".into() },
+            BatchItemInput { url: "ftp://name:secret@example.test/two.bin".into(), directory: destination.clone(), request_id: "two".into() },
+            BatchItemInput { url: "https://example.test/one.bin?token=secret".into(), directory: destination.clone(), request_id: "duplicate".into() },
+        ];
+        let original_id;
+        {
+            let store = TaskStore::open_path(&database).unwrap();
+            let first = batch_add_with(&items, "en", |item| std::future::ready(accept_batch_fixture(&store, item))).await.unwrap();
+            assert_eq!((first.accepted, first.failed), (1, 2));
+            assert_eq!(first.items.iter().map(|item| item.request_id.as_str()).collect::<Vec<_>>(), vec!["one", "two", "duplicate"]);
+            assert_eq!(first.items[1].error.as_ref().unwrap().code, "INVALID_ARGUMENT");
+            assert_eq!(first.items[2].error.as_ref().unwrap().code, "DUPLICATE");
+            let json = serde_json::to_string(&first).unwrap();
+            assert!(!json.contains("secret") && !json.contains("example.test"));
+            original_id = first.items[0].data.as_ref().unwrap().id.clone();
+        }
+        let store = TaskStore::open_path(&database).unwrap();
+        items[1].url = "ftp://example.test/two.bin".into();
+        items[2].url = "https://example.test/three.bin".into();
+        let retry = batch_add_with(&items, "en", |item| std::future::ready(accept_batch_fixture(&store, item))).await.unwrap();
+        assert_eq!((retry.accepted, retry.failed), (3, 0));
+        assert_eq!(retry.items[0].data.as_ref().unwrap().id, original_id);
+        assert_eq!(retry.items[1].data.as_ref().unwrap().kind, "ftp");
+        assert_eq!(store.list().unwrap().len(), 3);
+        items[0].url = "https://example.test/different.bin".into();
+        let conflict = batch_add_with(&items, "en", |item| std::future::ready(accept_batch_fixture(&store, item))).await.unwrap();
+        assert_eq!(conflict.items[0].error.as_ref().unwrap().code, "REQUEST_CONFLICT");
+        assert_eq!(store.list().unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn cli_batch_invalid_envelope_never_invokes_submission() {
+        let item = BatchItemInput { url: "https://example.test/file".into(), directory: "ignored".into(), request_id: "one".into() };
+        let mut invalid_id = item.clone();
+        invalid_id.request_id = "https://secret.test/?token=secret".into();
+        let mut long_url = item.clone();
+        long_url.request_id = "two".into();
+        long_url.url = "a".repeat(8193);
+        let mut empty_directory = item.clone();
+        empty_directory.request_id = "two".into();
+        empty_directory.directory.clear();
+        for items in [Vec::new(), vec![item.clone(), item.clone()], vec![item.clone(), invalid_id],
+            vec![item.clone(), long_url], vec![item.clone(), empty_directory], vec![item; 21]] {
+            let result = batch_add_with(&items, "en", |_| {
+                panic!("invalid batch reached submission");
+                #[allow(unreachable_code)]
+                std::future::ready(Err("INTERNAL_ERROR"))
+            }).await;
+            assert_eq!(result.unwrap_err(), "INVALID_ARGUMENT");
+        }
+        let misplaced = Request { command: "health".into(), items: Some(Vec::new()), ..Default::default() };
+        assert_eq!(validate_request(&misplaced), Err("INVALID_ARGUMENT"));
+        let missing = Request { command: "batch_add".into(), ..Default::default() };
+        assert_eq!(validate_request(&missing), Err("INVALID_ARGUMENT"));
     }
 
     #[test]
