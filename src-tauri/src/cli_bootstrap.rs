@@ -1,6 +1,8 @@
 //! On-demand launch shared by CLI and MCP. Never reads desktop settings or data.
 use crate::cli_protocol::Response;
-use std::{fs::OpenOptions, future::Future, path::{Path, PathBuf}, process::{Child, Command, Stdio}, time::Duration};
+use std::{fs::OpenOptions, future::Future, path::{Path, PathBuf}, time::Duration};
+#[cfg(not(windows))]
+use std::process::{Child, Command, Stdio};
 
 const START_TIMEOUT: Duration = Duration::from_secs(20);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -18,8 +20,10 @@ trait StartedHost {
     fn exit_code(&mut self) -> std::io::Result<Option<i32>>;
 }
 
+#[cfg(not(windows))]
 struct DetachedHost(Option<Child>);
 
+#[cfg(not(windows))]
 impl StartedHost for DetachedHost {
     fn exit_code(&mut self) -> std::io::Result<Option<i32>> {
         self.0.as_mut().expect("host process handle").try_wait()
@@ -41,15 +45,10 @@ impl Drop for DetachedHost {
     }
 }
 
+#[cfg(not(windows))]
 fn launch(executable: &Path) -> std::io::Result<DetachedHost> {
     let mut command = Command::new(executable);
     command.arg("--agent-host").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        // No console and no inherited Ctrl-C group. Do not kill on client exit.
-        command.creation_flags(0x00000008 | 0x00000200);
-    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -57,6 +56,58 @@ fn launch(executable: &Path) -> std::io::Result<DetachedHost> {
         unsafe { command.pre_exec(|| if libc::setsid() < 0 { Err(std::io::Error::last_os_error()) } else { Ok(()) }); }
     }
     command.spawn().map(|child| DetachedHost(Some(child)))
+}
+
+#[cfg(windows)]
+struct DetachedHost(std::os::windows::io::OwnedHandle);
+
+#[cfg(windows)]
+impl StartedHost for DetachedHost {
+    fn exit_code(&mut self) -> std::io::Result<Option<i32>> {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::{Foundation::{HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT}, System::Threading::{GetExitCodeProcess, WaitForSingleObject}};
+        let handle = HANDLE(self.0.as_raw_handle());
+        // The owned process handle remains valid throughout both calls.
+        unsafe {
+            match WaitForSingleObject(handle, 0) {
+                WAIT_TIMEOUT => Ok(None),
+                WAIT_OBJECT_0 => {
+                    let mut code = 0;
+                    GetExitCodeProcess(handle, &mut code).map_err(std::io::Error::from)?;
+                    Ok(Some(code as i32))
+                }
+                _ => Err(std::io::Error::last_os_error()),
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn launch(executable: &Path) -> std::io::Result<DetachedHost> {
+    use std::os::windows::{ffi::OsStrExt, io::{FromRawHandle, OwnedHandle}};
+    use windows::{core::{PCWSTR, PWSTR}, Win32::System::Threading::{CreateProcessW, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS, PROCESS_INFORMATION, STARTUPINFOW}};
+    let mut application: Vec<u16> = executable.as_os_str().encode_wide().collect();
+    if application.contains(&0) || application.contains(&(b'"' as u16)) {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid host executable path"));
+    }
+    // This entry point has one fixed argument and never invokes a shell.
+    let mut command: Vec<u16> = std::iter::once(b'"' as u16).chain(application.iter().copied())
+        .chain("\" --agent-host".encode_utf16()).chain(std::iter::once(0)).collect();
+    application.push(0);
+    let startup = STARTUPINFOW { cb: std::mem::size_of::<STARTUPINFOW>() as u32, ..Default::default() };
+    let mut process = PROCESS_INFORMATION::default();
+    // Command::spawn on stable Rust inherits *all* inheritable handles, even
+    // with null stdio. That kept MCP pipes open until the host exited. Explicit
+    // false isolates every handle without mutating the parent's handle flags.
+    // Buffers live through CreateProcessW; returned handles transfer to RAII.
+    unsafe {
+        CreateProcessW(PCWSTR(application.as_ptr()), Some(PWSTR(command.as_mut_ptr())),
+            None, None, false, DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP,
+            None, PCWSTR::null(), &startup, &mut process).map_err(std::io::Error::from)?;
+        let host = OwnedHandle::from_raw_handle(process.hProcess.0);
+        drop(OwnedHandle::from_raw_handle(process.hThread.0));
+        Ok(DetachedHost(host))
+    }
 }
 
 pub(super) async fn ensure_host<T, Probe, Pending>(discovery_path: &Path, lang: &str, probe: Probe) -> Result<T, Response>
