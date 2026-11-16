@@ -185,7 +185,8 @@ impl TaskStore {
              WHERE (source LIKE 'cloud://%' OR source LIKE 'cloud-share://%')
                AND (status IN ('queued', 'downloading') OR
                     (status = 'parsing' AND aria_gid IS NULL) OR
-                    (status = 'failed' AND aria_error_code IN ('6', '8', '22', '24')))",
+                    (status = 'failed' AND aria_error_code IN ('6', '8', '22', '24')))
+               AND NOT EXISTS(SELECT 1 FROM agent_resource_dispatch d WHERE d.task_id=tasks.id AND d.phase!=2)",
         )?;
         let ids = statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -675,7 +676,8 @@ impl TaskStore {
     pub(crate) fn recover_video_downloads(&self) -> Result<(), StoreError> {
         let conn = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         conn.execute("UPDATE tasks SET status='paused', download_speed=0, eta_seconds=NULL
-                      WHERE kind='web_video' AND status IN ('queued','downloading','processing','parsing')", [])?;
+                      WHERE kind='web_video' AND status IN ('queued','downloading','processing','parsing')
+                      AND NOT EXISTS(SELECT 1 FROM agent_resource_dispatch d WHERE d.task_id=tasks.id AND d.phase!=2)", [])?;
         Ok(())
     }
 
@@ -2482,6 +2484,34 @@ fn validate_path_component(component: &str) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_resource_pending_intents_keep_ownership_during_desktop_startup_recovery() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut owned = Vec::new();
+        let mut ordinary = Vec::new();
+        for (kind, source) in [("web_video", "https://example.test/watch"), ("cloud", "cloud://quark/file") ] {
+            for is_agent in [true, false] {
+                let task = store.create(NewTask { source: source.into(), name: "sample.bin".into(), kind: kind.into(), is_private: false }).unwrap();
+                assert_eq!(task.status, TaskStatus::Parsing);
+                if is_agent {
+                    store.connection.lock().unwrap().execute(
+                        "INSERT INTO agent_resource_dispatch(task_id,source,directory,payload_json,phase) VALUES(?1,?2,'unused','{}',0)",
+                        params![task.id.to_string(), source],
+                    ).unwrap();
+                    owned.push(task.id);
+                } else { ordinary.push(task.id); }
+            }
+        }
+        store.recover_video_downloads().unwrap();
+        store.defer_startup_cloud_downloads().unwrap();
+        for id in &owned { assert_eq!(store.find(*id).unwrap().status, TaskStatus::Parsing); }
+        for id in &ordinary { assert_eq!(store.find(*id).unwrap().status, TaskStatus::Paused); }
+        for id in &owned { store.finish_agent_resource_dispatch(*id).unwrap(); }
+        store.recover_video_downloads().unwrap();
+        store.defer_startup_cloud_downloads().unwrap();
+        for id in owned { assert_eq!(store.find(id).unwrap().status, TaskStatus::Paused); }
+    }
     use crate::{
         cloud::CloudProvider,
         models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem},

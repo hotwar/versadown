@@ -148,7 +148,7 @@ Windows 默认发现文件是 `%APPDATA%\com.versadown.desktop\cli\connection.js
 | 工具 | 用途 |
 | --- | --- |
 | `vd_health` | 查询宿主、能力和限制 |
-| `vd_download_add` | HTTP/HTTPS 单文件新建，重试复用 request_id |
+| `vd_download_add` | HTTP/HTTPS/FTP 单文件新建，重试复用 request_id |
 | `vd_download_batch_add` | 1–20 项独立 HTTP/HTTPS/FTP 新建，逐项结果与幂等 |
 | `vd_resource_prepare` | 视频、网盘、分享、BT 的资源准备与选择 |
 | `vd_resource_confirm` | 确认已准备的选择，返回持久任务 ID |
@@ -162,6 +162,8 @@ Windows 默认发现文件是 `%APPDATA%\com.versadown.desktop\cli\connection.js
 11 个工具通过 `structuredContent` 返回同一业务 envelope，并在文本 content 中提供 JSON。`isError = !ok`，查询失败任务、部分失败的批次仍可为 `isError:false`。未知工具属于协议错误；已知工具的参数/业务失败返回可读业务错误。工具 outputSchema 基于共享 DTO；注解不代替宿主授权。MCP 没有 wait，Agent 应每 1–5 秒查询 status，不把会话结束当作 cancel。上传、云端写入和分享创建未开放；分享下载也不会自动转存或删除云端文件。
 
 Windows Quick 构建在相同产物目录收集 `versadown.exe`、`vd-cli.exe` 和 `vd-mcp-server.exe`。应使用配套版本；本说明不代表安装包及 macOS/Linux 已经实机验收。
+
+FTP 当前使用匿名登录，不接收 URL 内嵌凭据，也不经全局 HTTP 代理。BT 当前支持 v1 种子、最多 100 个文件和安全 UTF-8 路径；磁力依赖用户配置的元数据服务返回可校验的真实种子。确认时指定的授权目录下会为 BT 创建独立任务子目录，避免覆盖其他任务文件。视频还需要可用的 yt-dlp、FFmpeg 与适用的 JavaScript 运行时；分发时应保留完整 `binaries/` 和配套工具。
 
 ## English
 
@@ -179,7 +181,7 @@ A profile startup lock coordinates clients; a separate lifetime lock gives one h
 
 Health success means the local API is ready. The engine may still be initializing; inspect `data.engine_available` separately. Successful submission means acceptance, not completion.
 
-`add URL --directory ABSOLUTE_PATH --request-id ID` submits an HTTP/HTTPS single-file download. Retry with the same request ID and arguments. Reusing an ID for different arguments yields `REQUEST_CONFLICT`; a different ID for an existing download source yields `DUPLICATE`. Private tasks are always excluded, regardless of the desktop privacy unlock state.
+`add URL --directory ABSOLUTE_PATH --request-id ID` submits an HTTP/HTTPS/FTP single-file download. Retry with the same request ID and arguments. Reusing an ID for different arguments yields `REQUEST_CONFLICT`; a different ID for an existing download source yields `DUPLICATE`. Private tasks are always excluded, regardless of the desktop privacy unlock state. FTP is anonymous and does not use the global HTTP proxy. BT currently supports v1 metadata, at most 100 files and safe UTF-8 paths; magnets require a configured metadata service to return verified torrent bytes. BT outputs use an isolated task subdirectory. Preserve the complete bundle, including `binaries/` and video tools.
 
 `wait ID --timeout SECONDS` waits for completion, including pending cleanup. Timeout and Ctrl-C end only the client operation; they never cancel the task. An interrupted `add` may still have been accepted, so retry using its original request ID. Discovery can be overridden with `--discovery PATH` or `VD_CLI_DISCOVERY`. Keep the discovery file private because it contains the local authentication token. The exit-code table above is language-independent.
 
@@ -187,4 +189,4 @@ Health success means the local API is ready. The engine may still be initializin
 
 `list` is paginated (default 50, maximum 100). Use `--parent-id ID` for direct children and pass the returned `next_cursor` with unchanged filters. `result ID` returns authorized final file paths and existence; `TASK_NOT_READY` means check status later. A successful status query can describe a failed download. Never equate `ok:true` with completed file transfer.
 
-Configure `vd-mcp-server` as a local stdio MCP server, optionally with `--discovery PATH` and `--lang en`. Its eight tools are listed above. MCP stdout contains only protocol messages; help and diagnostics use stderr. Results include both structuredContent and JSON text, with isError equal to !ok. Poll status every 1–5 seconds, then obtain result; closing the MCP session never requests task cancellation. SDK and local API versions are separate. Windows Quick outputs all three executables; cross-platform release acceptance is recorded separately.
+Configure `vd-mcp-server` as a local stdio MCP server, optionally with `--discovery PATH` and `--lang en`. Its eleven tools are listed above. MCP stdout contains only protocol messages; help and diagnostics use stderr. Results include both structuredContent and JSON text, with isError equal to !ok. Poll status every 1–5 seconds, then obtain result; closing the MCP session never requests task cancellation. SDK and local API versions are separate. Windows Quick outputs all three executables; cross-platform release acceptance is recorded separately.

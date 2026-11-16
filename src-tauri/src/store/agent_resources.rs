@@ -335,6 +335,7 @@ impl TaskStore {
         if phase!=0&&phase!=3 {
             let payload:String=storage(connection.query_row("SELECT payload_json FROM agent_resource_dispatch WHERE task_id=?1",[id.to_string()],|r|r.get(0)))?;
             if action!="resume"||!matches!(serde_json::from_str::<ResourceTarget>(&payload),Ok(ResourceTarget::Bt{..})){return Ok(None)}
+            if phase==2&&task.status==TaskStatus::Cancelled {return Err("ACTION_FAILED")}
         }
         let next=match (task.status,action) {
             (TaskStatus::Parsing|TaskStatus::Queued,"pause")=>Some("paused"),

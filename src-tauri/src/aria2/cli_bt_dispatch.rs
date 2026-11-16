@@ -42,7 +42,8 @@ impl DownloadService {
         if matches!(task.status, TaskStatus::Paused | TaskStatus::Cancelled | TaskStatus::Recycled | TaskStatus::Completed | TaskStatus::Failed) {
             if let Some(status) = &existing {
                 if matches!(task.status, TaskStatus::Cancelled | TaskStatus::Recycled) {
-                    if self.api().remove(&gid).await.is_err() { self.api().force_remove(&gid).await?; }
+                    if matches!(status.status.as_str(), "active" | "waiting" | "paused")
+                        && self.api().remove(&gid).await.is_err() { self.api().force_remove(&gid).await?; }
                 } else if task.status == TaskStatus::Paused && matches!(status.status.as_str(), "active" | "waiting") {
                     self.api().force_pause(&gid).await?;
                 }

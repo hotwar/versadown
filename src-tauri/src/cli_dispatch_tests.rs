@@ -337,3 +337,30 @@ async fn cli_bt_revocation_after_add_keeps_paused_job_and_retry_does_not_duplica
     assert_eq!(engine.adds.load(Ordering::SeqCst), 1);
     assert_eq!(engine.tell_status(&gid).await.unwrap().status, "active");
 }
+
+#[tokio::test]
+async fn cli_bt_pending_stop_reconciles_an_uncertain_active_job_without_directory_grant() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let metadata = torrent_fixture();
+    let mut task = torrent_task(&store, &metadata);
+    let engine = Arc::new(Engine::default());
+    let service = DownloadService::new(engine.clone(), store.clone());
+    let options = UriSubmissionOptions { directory: Some(directory.path().into()), ..Default::default() };
+    engine.lose_add_response.store(true, Ordering::SeqCst);
+    assert!(service.dispatch_cli_torrent(task.id, &metadata, &[2], &options, &|_| true).await.is_err());
+    task = store.find(task.id).unwrap();
+    let gid = task.aria_gid.clone().unwrap();
+    engine.state(&gid, "active").unwrap();
+    task.status = TaskStatus::Paused;
+    store.apply_transfer_snapshot(task.clone()).unwrap();
+    let paused = service.dispatch_cli_torrent(task.id, &metadata, &[2], &options, &|_| false).await.unwrap();
+    assert_eq!(paused.status, TaskStatus::Paused);
+    assert_eq!(engine.tell_status(&gid).await.unwrap().status, "paused");
+    task.status = TaskStatus::Cancelled;
+    store.apply_transfer_snapshot(task.clone()).unwrap();
+    service.dispatch_cli_torrent(task.id, &metadata, &[2], &options, &|_| false).await.unwrap();
+    service.dispatch_cli_torrent(task.id, &metadata, &[2], &options, &|_| false).await.unwrap();
+    assert_eq!(engine.tell_status(&gid).await.unwrap().status, "removed");
+    assert_eq!(engine.adds.load(Ordering::SeqCst), 1);
+}

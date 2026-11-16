@@ -96,21 +96,27 @@ fn validate_url(value:&str)->ResultCode<()> {
     Ok(())
 }
 
+enum ResourceRequest<'a> {Prepare(&'a ResourcePrepareInput),Confirm(&'a ResourceConfirmInput)}
+fn resource_request(request:&Request)->ResultCode<ResourceRequest<'_>> {
+    match request.command.as_str() {
+        "prepare"=>Ok(ResourceRequest::Prepare(request.prepare.as_ref().ok_or("INVALID_ARGUMENT")?)),
+        "confirm"=>Ok(ResourceRequest::Confirm(request.confirm.as_ref().ok_or("INVALID_ARGUMENT")?)),
+        _=>Err("INVALID_ARGUMENT"),
+    }
+}
 pub(crate) async fn handle(app:AppHandle,request:&Request)->ResultCode<Value> {
     let state=app.state::<AppState>();
     if !state.settings.lock().map_err(|_|"INTERNAL_ERROR")?.agent_access.enabled {return Err("HOST_DISABLED")}
-    match request.command.as_str() {
-        "resource_prepare"=> {
-            let input=request.prepare.as_ref().ok_or("INVALID_ARGUMENT")?;
+    match resource_request(request)? {
+        ResourceRequest::Prepare(input)=> {
             let plan=tokio::time::timeout(Duration::from_secs(30),prepare(&app,input)).await.map_err(|_|"TIMEOUT")??;
             state.store.save_agent_resource_plan(&plan,now())?;
             serde_json::to_value(plan.public()).map_err(|_|"INTERNAL_ERROR")
         }
-        "resource_confirm"=> {
-            let result=confirm(&app,request.confirm.as_ref().ok_or("INVALID_ARGUMENT")?).await?;
+        ResourceRequest::Confirm(input)=> {
+            let result=confirm(&app,input).await?;
             serde_json::to_value(result).map_err(|_|"INTERNAL_ERROR")
         }
-        _=>Err("INVALID_ARGUMENT"),
     }
 }
 
@@ -313,6 +319,15 @@ async fn dispatch_existing(app:&AppHandle,id:Uuid,directory:&Path,target:&Resour
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn agent_resource_real_wire_commands_reach_their_typed_payloads() {
+        let prepare:Request=serde_json::from_value(serde_json::json!({"command":"prepare","prepare":{"kind":"cloud","provider":"quark","input":""}})).unwrap();
+        assert!(matches!(resource_request(&prepare),Ok(ResourceRequest::Prepare(input)) if input.kind=="cloud"&&input.provider.as_deref()==Some("quark")));
+        let confirm:Request=serde_json::from_value(serde_json::json!({"command":"confirm","confirm":{"preparation_id":"prepared","selection_ids":["selected"],"directory":"fixture","request_id":"retry"}})).unwrap();
+        assert!(matches!(resource_request(&confirm),Ok(ResourceRequest::Confirm(input)) if input.preparation_id=="prepared"&&input.request_id=="retry"));
+        let wrong_payload:Request=serde_json::from_value(serde_json::json!({"command":"confirm","prepare":{"kind":"cloud","provider":"quark","input":""}})).unwrap();
+        assert!(matches!(resource_request(&wrong_payload),Err("INVALID_ARGUMENT")));
+    }
     #[test]
     fn agent_resource_public_preview_hides_provider_identity_and_download_internals() {
         let plan=ResourcePlan{id:Uuid::new_v4().to_string(),expires_at:123,kind:"cloud".into(),effects:vec!["download_after_confirmation".into()],bt:None,
