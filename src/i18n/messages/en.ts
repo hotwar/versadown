@@ -1,7 +1,7 @@
 const messages = {
   'settings.agent.enabled': 'Allow local Agent access',
   'settings.agent.scope': 'Allow CLI and MCP clients to view and control all non-private tasks. Private tasks stay inaccessible.',
-  'settings.agent.description': 'VersaDown must remain running. Changes take effect after saving. Disabling blocks further calls without cancelling downloads. Clients running as your system user share this access.',
+  'settings.agent.description': 'Changes take effect after saving. CLI / MCP can start VersaDown in the background when needed, without opening the desktop first. Disabling access blocks further calls without cancelling downloads. Clients running as your system user share this access.',
   'settings.agent.directories': 'Allowed download directories',
   'settings.agent.directoriesHint': 'One existing absolute directory per line, up to 16. New downloads, resuming existing tasks and accessing result paths must stay within these directories.',
   'settings.agent.browse': 'Add directory',

@@ -213,8 +213,8 @@ pub fn message(key: &str, lang: &str) -> &'static str {
         ("ENGINE_UNAVAILABLE", true) => "下载引擎不可用。",
         ("ACTION_FAILED", false) => "The task action could not be completed.",
         ("ACTION_FAILED", true) => "无法完成此任务操作。",
-        ("HELP", false) => "VD must be running. All commands emit one JSON result. add accepts an HTTP/HTTPS file URL, an absolute directory and a request ID. Reuse the same request ID and arguments when retrying. wait never cancels the task on timeout or Ctrl-C.",
-        ("HELP", true) => "请先启动 VD。所有命令输出一条 JSON 结果。add 接受 HTTP/HTTPS 文件地址、绝对保存目录和请求 ID；重试时复用相同请求 ID 与参数。wait 超时或 Ctrl-C 不会取消任务。",
+        ("HELP", false) => "Enable Agent access and authorize download directories once in VD settings. Commands start the default VD host in the background when needed; --no-start or an explicit discovery path connects only. All commands emit one JSON result. add accepts an HTTP/HTTPS file URL, an absolute directory and a request ID. Reuse the same request ID and arguments when retrying. wait never cancels the task on timeout or Ctrl-C.",
+        ("HELP", true) => "首次在 VD 设置中启用 Agent 调用并授权下载目录。命令按需启动默认 VD 后台宿主；--no-start 或显式发现文件路径只连接已有宿主。所有命令输出一条 JSON 结果。add 接受 HTTP/HTTPS 文件地址、绝对保存目录和请求 ID；重试时复用相同请求 ID 与参数。wait 超时或 Ctrl-C 不会取消任务。",
         (_, false) => "The operation failed. Inspect the VD application for details.",
         (_, true) => "操作失败，请在 VD 主程序中查看详情。",
     }

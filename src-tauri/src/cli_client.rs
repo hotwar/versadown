@@ -1,12 +1,15 @@
 //! Shared local transport for CLI and MCP. Never opens the task database.
 use crate::cli_protocol::{self, ApiError, Discovery, HealthDto, Request, Response, TaskDto, TaskListDto, TaskResultDto, PROTOCOL_VERSION};
 use std::{path::PathBuf, time::Duration};
+#[path = "cli_bootstrap.rs"]
+mod bootstrap;
 
 #[derive(Clone)]
 pub struct LocalClient {
     http: reqwest::Client,
     discovery: Option<PathBuf>,
     lang: String,
+    auto_start: bool,
 }
 
 impl LocalClient {
@@ -16,14 +19,23 @@ impl LocalClient {
             .connect_timeout(Duration::from_secs(3))
             .timeout(Duration::from_secs(30)).build()
             .map_err(|_| Response::failure("INTERNAL_ERROR", lang))?;
-        Ok(Self { http, discovery, lang: lang.to_owned() })
+        Ok(Self { http, discovery, lang: lang.to_owned(), auto_start: true })
+    }
+
+    pub fn with_auto_start(mut self, enabled: bool) -> Self {
+        self.auto_start = enabled;
+        self
+    }
+
+    fn discovery_path(&self) -> Result<PathBuf, Response> {
+        self.discovery.clone()
+            .or_else(|| std::env::var_os("VD_CLI_DISCOVERY").map(PathBuf::from))
+            .or_else(cli_protocol::default_discovery_path)
+            .ok_or_else(|| Response::failure("HOST_UNAVAILABLE", &self.lang))
     }
 
     async fn discover(&self) -> Result<Discovery, Response> {
-        let path = self.discovery.clone()
-            .or_else(|| std::env::var_os("VD_CLI_DISCOVERY").map(PathBuf::from))
-            .or_else(cli_protocol::default_discovery_path)
-            .ok_or_else(|| Response::failure("HOST_UNAVAILABLE", &self.lang))?;
+        let path = self.discovery_path()?;
         // Bound the read itself, not just a potentially unbounded allocation.
         use tokio::io::AsyncReadExt;
         let file = tokio::fs::File::open(path).await
@@ -42,7 +54,32 @@ impl LocalClient {
     }
 
     pub async fn call(&self, request: &Request) -> Response {
-        let discovery = match self.discover().await { Ok(value) => value, Err(error) => return error };
+        let automatic = bootstrap::automatic_start_allowed(!self.auto_start, self.discovery.is_some(), std::env::var_os("VD_CLI_DISCOVERY").is_some());
+        let discovery = if automatic {
+            let path = match self.discovery_path() { Ok(path) => path, Err(error) => return error };
+            // Probe only health before spawning. Once a business request has
+            // been sent, a disconnect must never launch and replay that request.
+            match bootstrap::ensure_host(&path, &self.lang, || self.probe()).await {
+                Ok((_discovery, health)) if request.command == "health" => return health,
+                Ok((discovery, _)) => discovery,
+                Err(error) => return error,
+            }
+        } else {
+            match self.discover().await { Ok(value) => value, Err(error) => return error }
+        };
+        self.call_discovered(discovery, request).await
+    }
+
+    async fn probe(&self) -> Result<(Discovery, Response), Response> {
+        let discovery = self.discover().await?;
+        let request = Request { command: "health".into(), lang: Some(self.lang.clone()), ..Request::default() };
+        let health = self.call_discovered(discovery, &request).await;
+        if !health.ok { return Err(health); }
+        // Refresh in case the health probe observed a rotated credential.
+        Ok((self.discover().await?, health))
+    }
+
+    async fn call_discovered(&self, discovery: Discovery, request: &Request) -> Response {
         let response = call(&self.http, &discovery, request, &self.lang).await;
         // Only retry a rejected request when discovery actually changed. No
         // timeout/disconnect replay: acceptance may already have happened.
@@ -174,6 +211,37 @@ mod tests {
             &Request {command:"health".into(),..Request::default()},"en").await;
         assert!(!serde_json::to_string(&response).unwrap().contains("secret"));
         assert_eq!(cli_protocol::exit_code(&response),1);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn accepted_business_request_is_not_replayed_after_disconnect() {
+        use tokio::io::AsyncReadExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("connection.json");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::fs::write(&path, serde_json::to_vec(&Discovery { version: 1, port, token: "a".repeat(64) }).unwrap()).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                let mut received = Vec::new();
+                while !String::from_utf8_lossy(&received).contains("same-intent") {
+                    let mut bytes = [0; 4096];
+                    let size = stream.read(&mut bytes).await.unwrap();
+                    assert!(size > 0 && received.len() + size <= 16_384);
+                    received.extend_from_slice(&bytes[..size]);
+                }
+            }).await.unwrap();
+            // Simulate acceptance followed by a lost response. The caller must
+            // use its original request ID to retry, never automatically replay.
+            drop(stream);
+            assert!(tokio::time::timeout(Duration::from_millis(150), listener.accept()).await.is_err());
+        });
+        let response = LocalClient::new(Some(path), "en").unwrap().call(&Request {
+            command: "add".into(), request_id: Some("same-intent".into()), ..Request::default()
+        }).await;
+        assert_eq!(response.error.unwrap().code, "HOST_UNAVAILABLE");
         server.await.unwrap();
     }
 

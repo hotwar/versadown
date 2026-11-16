@@ -500,6 +500,22 @@ pub fn toggle_manager_from_launcher(
 }
 
 pub(crate) fn reveal_manager(app: &AppHandle, destination: Option<&str>) {
+    if crate::agent_runtime::defer_reveal(app, destination) {
+        return;
+    }
+    let target = app.clone();
+    let destination = destination.map(str::to_owned);
+    // A background host has no manager yet. Create its UI on the main thread,
+    // without opening another task store or download runtime.
+    let _ = app.run_on_main_thread(move || {
+        if crate::agent_runtime::ensure_desktop_ui(&target).is_err() {
+            return;
+        }
+        reveal_existing_manager(&target, destination.as_deref());
+    });
+}
+
+fn reveal_existing_manager(app: &AppHandle, destination: Option<&str>) {
     let Some(manager) = app.get_webview_window("main") else {
         return;
     };

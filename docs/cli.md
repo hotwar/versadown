@@ -1,8 +1,10 @@
 # VD CLI 与 MCP
 
-`vd-cli.exe`（macOS/Linux 为 `vd-cli`）通过鉴权的本机接口控制已运行的 VD。主程序持有数据库、账号与下载引擎。CLI 不启动主程序，也不直接打开任务库。
+`vd-cli.exe`（macOS/Linux 为 `vd-cli`）通过鉴权的本机接口调用 VD。默认实例未运行时，CLI / MCP 会按需启动同目录的 `versadown --agent-host`，等待本机 API 就绪。后台宿主持有数据库、账号与下载引擎；客户端不直接打开任务库。本文描述当前开发分支行为，已生成的旧版程序需要重新配套构建才能获得自动启动能力。
 
-先在桌面设置中启用 Agent/自动化访问并授权下载目录，再调用 `health` 检查能力与限制。CLI 和 MCP 共用宿主权限；GUI 已解锁隐私任务也不会授予它们访问权。取消本机访问会阻止后续调用，已受理任务仍由桌面管理。此接口以当前操作系统用户为信任边界，不提供同用户下不同 Agent 的强隔离。
+首次在桌面「设置 → 高级」中启用「允许本机 Agent 调用」并授权下载目录，保存后再调用 `health` 检查能力与限制。之后无需预先打开主界面。后台启动不创建主界面、悬浮窗或托盘；用户正常打开 VD 时，在同一宿主中创建桌面界面，继续使用同一批任务。CLI 和 MCP 共用宿主权限；GUI 已解锁隐私任务也不会授予它们访问权。取消本机访问会阻止后续调用，已受理任务仍由宿主管理。此接口以当前操作系统用户为信任边界，不提供同用户下不同 Agent 的强隔离。
+
+后台模式复用 Tauri 和现有下载运行时，仍需要受支持的桌面运行环境；它不是面向无图形环境服务器的独立 Headless 核心。需要交互验证的网盘密码登录不会在纯后台阶段自动弹窗，应按 `AUTH_REQUIRED` 指引打开 VD 完成登录。
 
 ## 命令
 
@@ -10,6 +12,7 @@
 vd-cli.exe help --lang zh-CN
 vd-cli.exe version
 vd-cli.exe health --json
+vd-cli.exe health --no-start --json
 vd-cli.exe add "https://example.com/file.zip" --directory "C:\Downloads\中文 目录" --request-id download-001 --json
 vd-cli.exe list --status downloading --query file --json
 vd-cli.exe list --parent-id DIRECTORY_TASK_ID --limit 50 --json
@@ -22,7 +25,7 @@ vd-cli.exe wait TASK_ID --timeout 300 --json
 vd-cli.exe result TASK_ID --json
 ```
 
-所有命令输出一条 JSON 结果。`--json` 可省略。stdout 只包含结果，stderr 留给诊断。`--lang en|zh-CN` 选择错误和帮助文案；错误码与字段名不会随语言变化。
+所有命令输出一条 JSON 结果。`--json` 可省略。stdout 只包含结果，stderr 留给诊断。`--lang en|zh-CN` 选择错误和帮助文案；错误码与字段名不会随语言变化。`--no-start` 禁止自动启动，只连接已有宿主；`help`、`version` 始终不启动宿主。
 
 第一批 `add` 仅接受 HTTP/HTTPS 单文件下载，必须指定绝对保存目录和请求 ID。请求 ID 使用 1–128 个 ASCII 字母、数字或 `-_.:`。重试时复用同一请求 ID 与参数；不同参数复用 ID 返回 `REQUEST_CONFLICT`。不同 ID 提交已经存在的来源返回 `DUPLICATE`。这两类冲突含义不同。URL 用户名/密码不受支持。
 
@@ -63,17 +66,21 @@ vd-cli.exe result TASK_ID --json
 
 ## 发现与隔离实例
 
-Windows 默认发现文件是 `%APPDATA%\com.versadown.desktop\cli\connection.json`。使用 `--discovery PATH` 或 `VD_CLI_DISCOVERY` 可显式选择实例；命令行优先。发现文件含本机接口令牌，不应分享、打印或加入版本控制。
+Windows 默认发现文件是 `%APPDATA%\com.versadown.desktop\cli\connection.json`。使用 `--discovery PATH` 或 `VD_CLI_DISCOVERY` 可显式选择实例；命令行优先。显式指定发现文件时始终只连接已有实例，不会回退到默认实例或自动启动另一个宿主。发现文件含本机接口令牌，不应分享、打印或加入版本控制。
 
 `HOST_UNAVAILABLE`（退出码 3，`next_action: inspect_desktop`）表示无法发现或连接本机 Agent 服务，不能据此断定 VD 未启动。即使 VD 和 MCP 进程都在运行，未启用 Agent 调用也可能没有发现文件。请确认 VD 已启动，在「设置 → 高级」中启用「允许本机 Agent 调用」并授权下载目录，再检查 `--discovery` / `VD_CLI_DISCOVERY` 是否指向该实例的发现文件。`HOST_DISABLED` 仅表示明确收到 Agent 调用已关闭的响应，对应退出码 4 和 `enable_desktop_agent`；客户端不会通过读取桌面设置猜测授权状态。完成检查后重新调用 `health`。
 
-接口协议版本为 1：客户端对 `http://127.0.0.1:PORT/v1/call` 发出 JSON POST 并使用 Bearer 鉴权。客户端禁用代理和重定向。主程序仅监听回环地址，并拒绝浏览器来源的调用。CLI 不支持远端宿主或自动拉起主程序。
+默认模式先以 `health` 探测宿主，确认不可达后按需启动。启动等待上限为 20 秒，CLI 的整体 `--timeout` 可以更早结束等待；启动超时不会取消已经受理的下载。缺少配套宿主或启动失败返回 `HOST_UNAVAILABLE`；宿主明确拒绝未启用的授权时返回 `HOST_DISABLED`；超时返回 `TIMEOUT`。客户端不会读取桌面配置或替用户授权。
+
+多个 CLI / MCP 客户端共用启动锁，宿主在打开任务库和引擎前取得同一 profile 的独占锁。CLI 结束、MCP 正常断开或进程退出不会请求停止宿主；用户在桌面明确退出 VD 则停止宿主，下一次允许自动启动的调用会重新启动它。操作系统或第三方客户端强制结束整个进程树属于外部终止，不承诺下载继续。
+
+接口协议版本为 1：客户端对 `http://127.0.0.1:PORT/v1/call` 发出 JSON POST 并使用 Bearer 鉴权。客户端禁用代理和重定向。主程序仅监听回环地址，并拒绝浏览器来源的调用。CLI 不支持远端宿主。
 
 每次调用重新读取发现文件；鉴权失败时只在文件已更换的情况下重试一次。下载提交的超时/断连不会自动重试，因为宿主可能已经接受该请求。调用方用原 request_id 重试。CLI 和 MCP 共享同一本机 API 客户端。
 
 ## MCP
 
-`vd-mcp-server.exe` 是独立 stdio MCP 适配器，由支持 MCP 的 Agent 客户端管理其进程。它连接桌面宿主，不启动另一套下载引擎。关闭 MCP 会话不取消下载。stdout 仅输出 MCP JSON-RPC；诊断以及 `--help` / `--version` 信息输出到 stderr。
+`vd-mcp-server.exe` 是独立 stdio MCP 适配器，由支持 MCP 的 Agent 客户端管理其进程。它按需连接或启动共享 VD 宿主，不启动另一套下载引擎。握手和工具列表不会启动宿主，第一次工具调用才按需连接。关闭 MCP 会话不取消下载。stdout 仅输出 MCP JSON-RPC；诊断以及 `--help` / `--version` 信息输出到 stderr。
 
 采用 `mcpServers` 格式的客户端可使用下列配置；替换为实际程序路径，具体配置文件位置以所用客户端版本为准：
 
@@ -107,7 +114,11 @@ Windows Quick 构建在相同产物目录收集 `versadown.exe`、`vd-cli.exe` �
 
 ## English
 
-Start VD, enable Agent access in desktop settings and authorize output directories before invoking `vd-cli`. Every CLI command emits one JSON envelope to stdout. `--json` is optional; `--lang en` selects English messages. Use `help` for the command grammar. Both adapters share the same host authorization; neither starts a new download engine.
+Enable Agent access once in VD's desktop settings and authorize output directories. The CLI and MCP then start the default host on demand using the sibling `versadown --agent-host` executable. The background host creates no main window, launcher or tray; opening VD normally creates its desktop in that same process. This is the current development branch behavior and requires matching rebuilt binaries. It reuses Tauri and the existing runtime, not a standalone server Headless core; a supported desktop environment is still required. Interactive password recovery waits for the user to open VD.
+
+Every CLI command emits one JSON envelope to stdout. `--json` is optional; `--lang en` selects English messages. Use `help` for the command grammar. Both adapters share the same host authorization and download engine. `--no-start`, `--discovery PATH`, or `VD_CLI_DISCOVERY` selects connect-only behavior. Help/version and MCP initialization/tool listing never start the host. Startup waits up to 20 seconds, bounded further by the CLI operation timeout. The client probes health before startup and never replays an already-sent business operation after a transport failure.
+
+A profile startup lock coordinates clients; a separate lifetime lock gives one host ownership of its task database and engine. Normal client exit or MCP disconnect leaves the host running. Explicitly quitting VD stops it; a later automatic-start call can start it again. External termination of an entire process tree is outside this guarantee.
 
 `add URL --directory ABSOLUTE_PATH --request-id ID` submits an HTTP/HTTPS single-file download. Retry with the same request ID and arguments. Reusing an ID for different arguments yields `REQUEST_CONFLICT`; a different ID for an existing download source yields `DUPLICATE`. Private tasks are always excluded, regardless of the desktop privacy unlock state.
 

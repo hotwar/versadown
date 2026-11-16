@@ -1,7 +1,7 @@
 const messages = {
   'settings.agent.enabled': '允许本机 Agent 调用',
   'settings.agent.scope': '允许 CLI 和 MCP 客户端查看、控制全部非隐私任务；隐私任务始终不可访问。',
-  'settings.agent.description': '万能下载需保持运行。保存后生效；关闭只阻止后续调用，不取消下载。同一系统用户运行的客户端共用此授权。',
+  'settings.agent.description': '保存后生效。CLI / MCP 可按需在后台启动万能下载，无需预先打开主界面。关闭授权只阻止后续调用，不取消下载。同一系统用户运行的客户端共用此授权。',
   'settings.agent.directories': '允许的下载目录',
   'settings.agent.directoriesHint': '每行一个已存在的绝对目录，最多 16 个。新建、继续已有下载和读取结果路径均须位于这些目录内。',
   'settings.agent.browse': '添加目录',

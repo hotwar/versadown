@@ -444,7 +444,10 @@ pub(crate) fn browser_password_login(
     expected_account: Option<&str>,
     challenge: bool,
 ) -> Result<CloudAccount, QuarkError> {
-    if !browser_login::supports_browser_password(provider) {
+    // Password recovery can show an interactive verification window. An
+    // Agent-started host must wait for the user to open the desktop first.
+    if crate::agent_runtime::is_background_host(app)
+        || !browser_login::supports_browser_password(provider) {
         return Err(QuarkError::WebAuthorizationRequired);
     }
     let label = format!("cloud-password-{}", provider.key());

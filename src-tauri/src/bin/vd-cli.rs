@@ -14,6 +14,7 @@ struct Options {
     discovery: Option<PathBuf>,
     timeout: Duration,
     lang: String,
+    no_start: bool,
 }
 
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, ()> {
@@ -22,12 +23,14 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, ()> {
     let mut request = Request::default();
     let mut discovery = None;
     let mut timeout = None;
+    let mut no_start = false;
     let mut lang = if std::env::var("LANG").unwrap_or_default().starts_with("zh") {
         "zh-CN".to_string()
     } else { "en".to_string() };
     while let Some(word) = words.next() {
         let field = match word.as_str() {
             "--json" => continue,
+            "--no-start" if !no_start => { no_start = true; continue; }
             "--help" | "-h" => { positional.push("help".into()); continue; }
             "--version" | "-V" => { positional.push("version".into()); continue; }
             "--lang" => {
@@ -94,14 +97,14 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, ()> {
     }
     request.command = command.to_string();
     request.lang = Some(lang.clone());
-    Ok(Options { request, discovery, timeout: timeout.unwrap_or(Duration::from_secs(if command == "wait" {300} else {30})), lang })
+    Ok(Options { request, discovery, timeout: timeout.unwrap_or(Duration::from_secs(if command == "wait" {300} else {30})), lang, no_start })
 }
 
 fn help(lang: &str) -> Response {
     Response::success(json!({
         "description": cli_protocol::message("HELP", lang),
         "commands": ["help", "version", "health", "add URL --directory PATH --request-id ID", "list [--status STATUS] [--query TEXT] [--parent-id ID] [--cursor CURSOR] [--limit 1..100]", "status ID", "pause ID", "resume ID", "cancel ID", "wait ID [--timeout SECONDS]", "result ID"],
-        "options": ["--json", "--lang en|zh-CN", "--discovery PATH", "--timeout SECONDS"],
+        "options": ["--json", "--lang en|zh-CN", "--discovery PATH", "--no-start", "--timeout SECONDS"],
         "protocol_version": PROTOCOL_VERSION
     }))
 }
@@ -129,7 +132,7 @@ async fn execute(options: &Options) -> Response {
         _ => {}
     }
     let client = match LocalClient::new(options.discovery.clone(), &options.lang) {
-        Ok(client) => client, Err(error) => return error,
+        Ok(client) => client.with_auto_start(!options.no_start), Err(error) => return error,
     };
     if options.request.command != "wait" { return client.call(&options.request).await; }
     let mut request = options.request.clone();
@@ -198,6 +201,9 @@ mod tests {
         assert_eq!(list.request.cursor.as_deref(), Some("opaque"));
         assert_eq!(list.request.limit, Some(50));
         assert_eq!(options(&["result", "task"]).unwrap().request.command,"result");
+        assert!(options(&["health", "--no-start"]).unwrap().no_start);
+        assert!(!options(&["health"]).unwrap().no_start);
+        assert!(options(&["health", "--no-start", "--no-start"]).is_err());
     }
 
     #[test]
