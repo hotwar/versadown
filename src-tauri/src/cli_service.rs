@@ -378,7 +378,7 @@ async fn execute_inner(app: &AppHandle, request: &Request) -> ApiResult<Value> {
             instance_id: crate::cli_host::instance_id(app), engine_available: state.runtime.status().available,
             capabilities: CapabilitiesDto { new_download_protocols: vec!["http".into(), "https".into(), "ftp".into()],
                 prepared_resource_kinds: Some(["video", "cloud", "share", "torrent"].map(str::to_owned).to_vec()),
-                task_types: ["file", "cloud", "web_video", "directory", "magnet", "ftp"].map(str::to_owned).to_vec(),
+                task_types: ["file", "cloud", "web_video", "directory", "magnet", "torrent", "ftp"].map(str::to_owned).to_vec(),
                 operations: ["health", "add", "batch_add", "prepare", "confirm", "list", "status", "pause", "resume", "cancel", "result"].map(str::to_owned).to_vec(),
                 private_tasks: false },
             limits: LimitsDto { list_default_limit: 50, list_max_limit: 100, poll_interval_ms: 1000,
