@@ -506,13 +506,17 @@ pub(crate) fn reveal_manager(app: &AppHandle, destination: Option<&str>) {
     }
     let target = app.clone();
     let destination = destination.map(str::to_owned);
-    // A background host has no manager yet. Create its UI on the main thread,
-    // without opening another task store or download runtime.
-    let _ = app.run_on_main_thread(move || {
-        if crate::agent_runtime::ensure_desktop_ui(&target).is_err() {
+    // WebView2 creation from a synchronous UI event can deadlock. A blocking
+    // worker creates the desktop; its native subclass is installed separately
+    // on the owner thread before the finished window is revealed there.
+    tauri::async_runtime::spawn_blocking(move || {
+        if crate::agent_runtime::ensure_desktop_ui_from_worker(&target).is_err() {
             return;
         }
-        reveal_existing_manager(&target, destination.as_deref());
+        let visible_app = target.clone();
+        let _ = target.run_on_main_thread(move || {
+            reveal_existing_manager(&visible_app, destination.as_deref());
+        });
     });
 }
 

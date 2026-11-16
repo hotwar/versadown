@@ -115,6 +115,7 @@ pub(crate) struct RuntimeState {
     options: StartupOptions,
     desktop_enabled: AtomicBool,
     ui_initialized: AtomicBool,
+    ui_initialization: Mutex<()>,
     pending: Mutex<PendingDesktop>,
 }
 
@@ -124,6 +125,7 @@ impl RuntimeState {
             desktop_enabled: AtomicBool::new(!options.agent_host),
             options,
             ui_initialized: AtomicBool::new(false),
+            ui_initialization: Mutex::new(()),
             pending: Mutex::new(PendingDesktop::default()),
         }
     }
@@ -141,6 +143,18 @@ impl RuntimeState {
         let mut pending = self.pending.lock().unwrap_or_else(|e| e.into_inner());
         pending.ready = true;
         pending.reveal.take()
+    }
+
+    fn initialize_ui(&self, initialize: impl FnOnce() -> Result<(), String>) -> Result<(), String> {
+        let _initialization = self.ui_initialization.lock()
+            .map_err(|_| "desktop initialization lock unavailable".to_owned())?;
+        if self.ui_initialized.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        initialize()?;
+        self.ui_initialized.store(true, Ordering::Release);
+        self.desktop_enabled.store(true, Ordering::Release);
+        Ok(())
     }
 }
 
@@ -160,13 +174,57 @@ pub(crate) fn finish_setup(app: &AppHandle) {
     }
 }
 
-/// Called on the main thread after AppState exists, both at normal startup and
-/// when a user opens a desktop that was initially started by an Agent.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UiInitializationThread {
+    Setup,
+    Worker,
+}
+
+/// Initial setup already runs on the UI thread before event dispatch begins.
 pub(crate) fn ensure_desktop_ui(app: &AppHandle) -> Result<(), String> {
-    let runtime = app.state::<RuntimeState>();
-    if runtime.ui_initialized.load(Ordering::Acquire) {
-        return Ok(());
+    ensure_desktop_ui_on(app, UiInitializationThread::Setup)
+}
+
+/// Dynamic WebView2 creation must run outside synchronous UI event handlers.
+/// Only blocking workers call this entry; their initialization mutex never
+/// blocks the UI thread that must service Tauri's window-creation requests.
+pub(crate) fn ensure_desktop_ui_from_worker(app: &AppHandle) -> Result<(), String> {
+    ensure_desktop_ui_on(app, UiInitializationThread::Worker)
+}
+
+fn on_main_thread<T: Send + 'static>(
+    app: &AppHandle,
+    operation: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    app.run_on_main_thread(move || { let _ = sender.send(operation()); })
+        .map_err(|error| error.to_string())?;
+    receiver.recv().map_err(|_| "desktop UI thread unavailable".to_owned())?
+}
+
+fn ensure_launcher_for_initialization(
+    app: &AppHandle,
+    visibility: crate::LauncherVisibility,
+    thread: UiInitializationThread,
+) -> Result<Option<tauri::WebviewWindow>, String> {
+    // Linux's related WebKit view is !Send and its GTK configuration is direct;
+    // macOS's launcher helper also calls AppKit directly. Windows has neither
+    // dependency, so both its main and launcher WebViews stay on the worker.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if thread == UiInitializationThread::Worker {
+        let app_copy = app.clone();
+        return on_main_thread(app, move || {
+            crate::launcher_window::ensure_launcher_window(&app_copy, visibility)
+        });
     }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let _ = thread;
+    crate::launcher_window::ensure_launcher_window(app, visibility)
+}
+
+fn ensure_desktop_ui_on(app: &AppHandle, thread: UiInitializationThread) -> Result<(), String> {
+    let runtime = app.state::<RuntimeState>();
+    runtime.initialize_ui(|| {
     if app.get_webview_window("main").is_none() {
         let config = app.config().app.windows.iter()
             .find(|window| window.label == "main")
@@ -177,12 +235,17 @@ pub(crate) fn ensure_desktop_ui(app: &AppHandle) -> Result<(), String> {
     }
     let visibility = app.state::<crate::commands::AppState>().settings.lock()
         .map_err(|_| "settings lock unavailable".to_owned())?.launcher_visibility;
-    let launcher = crate::launcher_window::ensure_launcher_window(app, visibility)?;
+    let launcher = ensure_launcher_for_initialization(app, visibility, thread)?;
     if let Some(main) = app.get_webview_window("main") {
         crate::webview_memory::configure_webview(&main);
         #[cfg(windows)]
         if !runtime.options.background_ui_test {
-            crate::window_interaction::install(&main)?;
+            if thread == UiInitializationThread::Setup {
+                crate::window_interaction::install(&main)?;
+            } else {
+                let main_copy = main.clone();
+                on_main_thread(app, move || crate::window_interaction::install(&main_copy))?;
+            }
         }
         if !runtime.options.background_ui_test {
             main.set_min_size(Some(tauri::LogicalSize::new(960.0, 640.0)))
@@ -217,9 +280,8 @@ pub(crate) fn ensure_desktop_ui(app: &AppHandle) -> Result<(), String> {
             }
         });
     }
-    runtime.ui_initialized.store(true, Ordering::Release);
-    runtime.desktop_enabled.store(true, Ordering::Release);
     Ok(())
+    })
 }
 
 #[cfg(test)]
@@ -297,5 +359,34 @@ mod tests {
         assert!(!windows[1].create);
         configure_window_creation(&mut windows, true);
         assert!(windows.iter().all(|window| !window.create));
+    }
+
+    #[test]
+    fn agent_runtime_ui_initialization_is_serial_and_retryable_after_failure() {
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+        let profile = tempfile::tempdir().unwrap();
+        let state = Arc::new(RuntimeState::new(StartupOptions {
+            agent_host: true, background_ui_test: false, data_dir: profile.path().to_owned(),
+        }));
+        assert!(state.initialize_ui(|| Err("creation failed".into())).is_err());
+        assert!(!state.ui_initialized.load(Ordering::Acquire));
+        assert!(!state.desktop_enabled.load(Ordering::Acquire));
+        let creations = Arc::new(AtomicUsize::new(0));
+        let mut workers = Vec::new();
+        for _ in 0..8 {
+            let state = Arc::clone(&state);
+            let creations = Arc::clone(&creations);
+            workers.push(std::thread::spawn(move || {
+                state.initialize_ui(|| {
+                    creations.fetch_add(1, Ordering::SeqCst);
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    Ok(())
+                }).unwrap();
+            }));
+        }
+        for worker in workers { worker.join().unwrap(); }
+        assert_eq!(creations.load(Ordering::SeqCst), 1);
+        assert!(state.desktop_enabled.load(Ordering::Acquire));
     }
 }
