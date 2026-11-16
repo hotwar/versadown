@@ -49,7 +49,7 @@ pub(crate) async fn prepare(app: &AppHandle, input: &str) -> Result<BtPreparatio
                 else { url::Url::parse(&candidate.source).ok().and_then(|url| url.to_file_path().ok()).ok_or("INVALID_ARGUMENT")? };
             let path = crate::agent_access::authorize_file(&state, &path)?;
             let source = path.to_str().ok_or("INVALID_ARGUMENT")?.to_owned();
-            let torrent = crate::load_torrent_base64(&source).await.map_err(|_| "INVALID_ARGUMENT")?;
+            let torrent = crate::downloader::load_torrent_base64(&source).await.map_err(|_| "INVALID_ARGUMENT")?;
             crate::agent_access::authorize_file(&state, &path)?;
             (source, "torrent", torrent, None)
         },
@@ -68,7 +68,10 @@ pub(crate) async fn dispatch(app: &AppHandle, task_id: Uuid, metadata: &BtPrepar
 {
     let state = app.state::<crate::commands::AppState>();
     let root = options.directory.as_ref().ok_or("INVALID_ARGUMENT")?;
-    crate::agent_access::authorize_directory(&state, root)?;
+    let task = state.store.find(task_id).map_err(|_| "NOT_FOUND")?;
+    if !matches!(task.status, crate::TaskStatus::Paused | crate::TaskStatus::Cancelled | crate::TaskStatus::Recycled) {
+        crate::agent_access::authorize_directory(&state, root)?;
+    }
     let service = state.runtime.service().await.map_err(|_| "ENGINE_UNAVAILABLE")?;
     service.dispatch_cli_torrent(task_id, metadata, indices, options, &|path| {
         crate::agent_access::authorize_file(&state, path).is_ok()

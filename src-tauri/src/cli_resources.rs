@@ -46,7 +46,7 @@ impl ResourceTarget {
     pub(crate) fn new_task(&self)->ResultCode<NewTask> {
         let (source,name,kind)=match self {
             Self::Video{page,name,..}=>(page.clone(),name.clone(),"web_video"),
-            Self::Cloud{provider,file_id,name,folder:false,..}=>(format!("cloud://{}/{}",provider.key(),crate::cloud::types::encoded(file_id)),name.clone(),"cloud"),
+            Self::Cloud{provider,file_id,name,folder:false,..}=>(format!("cloud://{}/{}",provider.key(),crate::cloud::encoded(file_id)),name.clone(),"cloud"),
             Self::Share{source,name,..}=>(source.clone(),name.clone(),"cloud"),
             Self::Bt{metadata,..}=>(metadata.source.clone(),metadata.name.clone(),metadata.kind.as_str()),
             Self::Cloud{folder:true,..}|Self::BtFile{..}=>return Err("INVALID_ARGUMENT"),
@@ -73,7 +73,8 @@ fn safe_name(name:&str)->String {crate::cloud::commands::safe_filename(&name.cha
 pub(crate) fn cloud_error(error:QuarkError)->&'static str {match error {
     QuarkError::NotAuthorized|QuarkError::AuthorizationExpired|QuarkError::WebAuthorizationRequired|
     QuarkError::CaptchaRequired|QuarkError::AccountMismatch|QuarkError::SessionRenewedRetryOperation|
-    QuarkError::PikpakOperationVerificationRequired(_)=>"AUTH_REQUIRED",
+    QuarkError::PikpakOperationVerificationRequired(_)|QuarkError::AuthorizationPending|
+    QuarkError::BaiduOperationVerificationRequired=>"AUTH_REQUIRED",
     QuarkError::ProviderUnsupported=>"UNSUPPORTED",
     QuarkError::InvalidInput(ref message) if message=="agent.error.cloudWriteRequired"=>"CLOUD_WRITE_REQUIRED",
     QuarkError::DownloadEngineUnavailable=>"ENGINE_UNAVAILABLE",
@@ -212,12 +213,11 @@ async fn confirm(app:&AppHandle,input:&ResourceConfirmInput)->ResultCode<Resourc
 }
 
 pub(crate) async fn control_pending(app:&AppHandle,id:Uuid,action:&str)->ResultCode<Option<DownloadTask>> {
-    let _gate=DISPATCH_GATE.lock().await;
     let state=app.state::<AppState>();
-    if let Some(dir)=state.store.agent_resource_directory(id)? {
-        state.web_video.bind_agent_application(app.clone());
-        if action=="resume" {crate::agent_access::authorize_directory(&state,&dir)?;}
-    }
+    let Some(dir)=state.store.agent_resource_directory(id)? else{return Ok(None)};
+    let _gate=DISPATCH_GATE.lock().await;
+    state.web_video.bind_agent_application(app.clone());
+    if action=="resume" {crate::agent_access::authorize_directory(&state,&dir)?;}
     state.store.control_agent_resource_pending(id,action)
 }
 
@@ -242,13 +242,17 @@ pub(crate) fn start(app:AppHandle) {
             if let Ok(pending)=state.store.agent_resource_pending() {
                 for (id,directory,target) in pending {
                     let _gate=DISPATCH_GATE.lock().await;
-                    if !state.store.find(id).is_ok_and(|task|matches!(task.status,TaskStatus::Parsing|TaskStatus::Queued)&&!task.is_private){continue;}
-                    if let Err(code)=crate::agent_access::authorize_directory(&state,&directory) {
-                        let _=state.store.fail_with_code(id,Some(code),crate::cli_protocol::message(code,"en"));
+                    let Ok(task)=state.store.find(id) else{continue};
+                    let stopping=matches!(target,ResourceTarget::Bt{..})&&matches!(task.status,TaskStatus::Paused|TaskStatus::Cancelled);
+                    if task.is_private||(!stopping&&!matches!(task.status,TaskStatus::Parsing|TaskStatus::Queued)){continue;}
+                    if !stopping {if let Err(code)=crate::agent_access::authorize_directory(&state,&directory) {
+                        if matches!(target,ResourceTarget::Bt{..}) {let _=state.store.block_agent_resource_authorization(id,code);}
+                        else {let _=state.store.fail_with_code(id,Some(code),crate::cli_protocol::message(code,"en"));}
                         continue;
-                    }
+                    }}
                     if !state.runtime.status().available {continue;}
-                    if !state.store.claim_agent_resource(id).unwrap_or(false){continue;}
+                    let claimed=if stopping{state.store.claim_agent_resource_stop(id)}else{state.store.claim_agent_resource(id)};
+                    if !claimed.unwrap_or(false){continue;}
                     let outcome=dispatch_existing(&app,id,&directory,&target).await;
                     if let Err(code)=outcome {
                         if matches!(target,ResourceTarget::Bt{..})&&matches!(code,"ENGINE_UNAVAILABLE"|"TIMEOUT"|"UNKNOWN") {
@@ -258,7 +262,8 @@ pub(crate) fn start(app:AppHandle) {
                             let _=state.store.finish_agent_resource_dispatch(id);
                         }
                     }else if matches!(target,ResourceTarget::Bt{..}) {
-                        let _=state.store.finish_agent_resource_dispatch(id);
+                        if task.status==TaskStatus::Paused {let _=state.store.mark_agent_resource_stopped(id);}
+                        else {let _=state.store.finish_agent_resource_dispatch(id);}
                     }
                 }
             }
@@ -269,14 +274,17 @@ pub(crate) fn start(app:AppHandle) {
 
 async fn dispatch_existing(app:&AppHandle,id:Uuid,directory:&Path,target:&ResourceTarget)->ResultCode<()> {
     let state=app.state::<AppState>();
-    crate::agent_access::authorize_directory(&state,directory)?;
     let task=state.store.find(id).map_err(|_|"INTERNAL_ERROR")?;
-    if task.is_private||!matches!(task.status,TaskStatus::Parsing|TaskStatus::Queued) {return Err("FORBIDDEN")}
+    if task.is_private {return Err("FORBIDDEN")}
     if let ResourceTarget::Bt{metadata,indices}=target {
-        let options=crate::commands::download_submission_options_for_directory(&state,Some(&directory.to_string_lossy())).map_err(|_|"INVALID_ARGUMENT")?;
+        let options=if matches!(task.status,TaskStatus::Paused|TaskStatus::Cancelled) {
+            crate::UriSubmissionOptions{directory:Some(directory.to_path_buf()),..Default::default()}
+        }else{crate::commands::download_submission_options_for_directory(&state,Some(&directory.to_string_lossy())).map_err(|_|"INVALID_ARGUMENT")?};
         crate::cli_bt::dispatch(app,id,metadata,indices,&options).await?;
         return Ok(())
     }
+    crate::agent_access::authorize_directory(&state,directory)?;
+    if !matches!(task.status,TaskStatus::Parsing|TaskStatus::Queued) {return Err("FORBIDDEN")}
     let output=crate::output_path::reserve_unique_output_path(&state.store,id,directory,&task.name).map_err(|_|"ACTION_FAILED")?;
     crate::agent_access::authorize_file(&state,&output)?;
     let mut record=task.clone();record.total_length=target.size_bytes();
@@ -300,4 +308,32 @@ async fn dispatch_existing(app:&AppHandle,id:Uuid,directory:&Path,target:&Resour
     // Leave phase=dispatching until an engine binding or terminal state is durable.
     // On restart, uncertain submissions become CLI_RECOVERY_REQUIRED rather than replay.
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn agent_resource_public_preview_hides_provider_identity_and_download_internals() {
+        let plan=ResourcePlan{id:Uuid::new_v4().to_string(),expires_at:123,kind:"cloud".into(),effects:vec!["download_after_confirmation".into()],bt:None,
+            choices:vec![choice("sample.txt".into(),"file",Some(9),None,ResourceTarget::Cloud{provider:CloudProvider::Quark,account_id:"private-account".into(),file_id:"private-file-id".into(),name:"sample.txt".into(),size_bytes:Some(9),folder:false})]};
+        let public=serde_json::to_string(&plan.public()).unwrap();
+        assert!(!public.contains("private-account"));assert!(!public.contains("private-file-id"));assert!(!public.contains("cloud://"));
+        assert!(public.contains("sample.txt"));assert!(public.contains("selection_id"));
+    }
+    #[test]
+    fn agent_resource_confirmation_fingerprint_ignores_selection_order_but_binds_destination() {
+        let root=tempfile::tempdir().unwrap();
+        let mut input=ResourceConfirmInput{preparation_id:Uuid::new_v4().to_string(),selection_ids:vec!["one".into(),"two".into()],directory:root.path().to_string_lossy().into_owned(),request_id:"request".into()};
+        let fingerprint=confirm_fingerprint(&input,root.path()).unwrap();input.selection_ids.reverse();
+        assert_eq!(fingerprint,confirm_fingerprint(&input,root.path()).unwrap());
+        assert_ne!(fingerprint,confirm_fingerprint(&input,&root.path().join("other")).unwrap());
+    }
+    #[test]
+    fn agent_resource_url_and_auth_errors_are_bounded_and_stable() {
+        assert!(validate_url("https://example.test/watch?v=1").is_ok());
+        for value in ["file:///tmp/secret","https://user:secret@example.test/video","https://example.test/\nvideo"] {assert_eq!(validate_url(value),Err("INVALID_ARGUMENT"));}
+        assert_eq!(cloud_error(QuarkError::AuthorizationExpired),"AUTH_REQUIRED");
+        assert_eq!(cloud_error(QuarkError::InvalidInput("agent.error.cloudWriteRequired".into())),"CLOUD_WRITE_REQUIRED");
+    }
 }

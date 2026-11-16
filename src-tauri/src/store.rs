@@ -38,6 +38,8 @@ pub enum StoreError {
     InvalidStoredVideoEngine,
     #[error("invalid persisted CLI execution intent")]
     InvalidCliIntent,
+    #[error("unsupported CLI protocol submission options")]
+    UnsupportedCliOptions,
     #[error("cannot transition task from {from:?} to {to:?}")]
     InvalidTransition { from: TaskStatus, to: TaskStatus },
     #[error("value for {field} is outside SQLite's signed 64-bit range")]
@@ -508,6 +510,12 @@ impl TaskStore {
             }
             let id = Uuid::parse_str(&id).map_err(|_| StoreError::InvalidStoredStatus)?;
             return Ok(CliCreateOutcome::Replayed(find_with_connection(&transaction, id)?));
+        }
+        // A replay uses the original persisted options even if desktop proxy
+        // settings changed since acceptance. Validate new FTP submissions only
+        // after the receipt lookup; FTP does not implement HTTP proxy/headers.
+        if new_task.kind == "ftp" && options.is_some_and(|options| options.proxy.is_some() || !options.headers.is_empty()) {
+            return Err(StoreError::UnsupportedCliOptions);
         }
         let duplicate: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM tasks WHERE source = ?1 AND kind = ?2 AND status != 'recycled')",

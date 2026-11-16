@@ -167,16 +167,22 @@ pub(crate) async fn prepare_agent_cloud_directory(
     expected: Option<(String, String)>,
 ) -> Result<(String, CloudDirectory), QuarkError> {
     run_session_work(app, provider, SessionWorkKind::Read, move |state, http| {
-        let account = restore_account(provider, &state.store, http)?;
-        if let Some((owner, _)) = &expected {
-            validate_download_account(Some(&account.id), owner)?;
-        }
+        let (account,directory)=read_agent_cloud_directory(provider,&state.store,http,expected.as_ref())?;
         record_restored_account(state, provider, &account)?;
-        let parent = expected.as_ref().map(|(_, id)| id.as_str())
-            .unwrap_or(ProviderRegistry::global().get(provider).root_directory_id);
-        let directory = list_cloud_directory(provider, &state.store, http, parent)?;
         Ok((account.id, directory))
     }).await
+}
+
+fn read_agent_cloud_directory(
+    provider:CloudProvider,
+    credentials:&impl CredentialStore,
+    http:&impl CloudHttpTransport,
+    expected:Option<&(String,String)>,
+)->Result<(CloudAccount,CloudDirectory),QuarkError> {
+    let account=restore_account(provider,credentials,http)?;
+    if let Some((owner,_))=expected {validate_download_account(Some(&account.id),owner)?;}
+    let parent=expected.map(|(_,id)|id.as_str()).unwrap_or(ProviderRegistry::global().get(provider).root_directory_id);
+    Ok((account,list_cloud_directory(provider,credentials,http,parent)?))
 }
 
 fn validate_share_options(
@@ -435,6 +441,32 @@ pub async fn cloud_restore(
 mod tests {
     use super::*;
     use crate::cloud::{auth_supervisor::AuthHealth, CloudAuthMethod, CredentialStore};
+
+    #[test]
+    fn agent_resource_cloud_prepare_is_read_only_and_keeps_owner_bound() {
+        use std::collections::VecDeque;
+        struct MetadataHttp {requests:Mutex<Vec<CloudHttpRequest>>,replies:Mutex<VecDeque<&'static str>>}
+        impl CloudHttpTransport for MetadataHttp {
+            fn send(&self,request:CloudHttpRequest)->Result<CloudHttpResponse,QuarkError> {
+                assert_eq!(request.method,"GET");self.requests.lock().unwrap().push(request);
+                Ok(CloudHttpResponse{status:200,body:self.replies.lock().unwrap().pop_front().expect("unexpected provider request").into(),..Default::default()})
+            }
+        }
+        let credentials=crate::cloud::MemoryCredentialStore::default();
+        let http=MetadataHttp{requests:Mutex::new(vec![]),replies:Mutex::new(VecDeque::from([
+            r#"{"status":200,"data":{"uid":"owner-1","nickname":"fixture"}}"#,
+            r#"{"status":200,"data":{"list":[{"fid":"file-1","file_name":"one.txt","file":true,"size":7}]}}"#,
+            r#"{"status":200,"data":{"uid":"other-owner","nickname":"fixture"}}"#,
+        ]))};
+        assert!(matches!(read_agent_cloud_directory(CloudProvider::Quark,&credentials,&http,None),Err(QuarkError::NotAuthorized)));
+        assert!(http.requests.lock().unwrap().is_empty());
+        credentials.save("quark",b"cookie=fixture").unwrap();
+        let expected=("owner-1".into(),"folder-1".into());
+        let(account,listing)=read_agent_cloud_directory(CloudProvider::Quark,&credentials,&http,Some(&expected)).unwrap();
+        assert_eq!(account.id,"owner-1");assert_eq!(listing.items[0].name,"one.txt");
+        assert!(matches!(read_agent_cloud_directory(CloudProvider::Quark,&credentials,&http,Some(&expected)),Err(QuarkError::AccountMismatch)));
+        let requests=http.requests.lock().unwrap();assert_eq!(requests.len(),3);assert!(requests[1].url.contains("pdir_fid=folder-1"));
+    }
 
     fn options(pass_code: String) -> CloudShareOptions {
         CloudShareOptions {

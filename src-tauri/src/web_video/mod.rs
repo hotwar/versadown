@@ -341,12 +341,16 @@ pub(crate) async fn prepare_agent_video(
 ) -> Result<Vec<AgentPreparedVideo>, String> {
     let page = routing::resolve(input, true).await?.ok_or("video.error.unsupported")?;
     let (proxy, _) = network_options(state)?;
-    let preview = state.web_video.prepare(page, proxy.as_deref()).await?;
+    let preview = extractor::inspect(page, proxy.as_deref()).await?;
+    Ok(agent_video_formats(preview))
+}
+
+fn agent_video_formats(preview:VideoPreview)->Vec<AgentPreparedVideo> {
     let title: String = preview.title.chars().scan(0, |bytes, c| {
         *bytes += c.len_utf8();
         (*bytes <= 160).then_some(c)
     }).collect();
-    Ok(preview.formats.into_iter().map(|format| {
+    preview.formats.into_iter().map(|format| {
         let quality = match (format.width, format.height) {
             (0, 0) => String::new(),
             (0, height) => format!(" [{height}p]"),
@@ -361,7 +365,21 @@ pub(crate) async fn prepare_agent_video(
             detail: format!("{}x{} {}{}", format.width, format.height, format.ext,
                 if format.estimated { " estimated_size" } else { "" }),
         }
-    }).collect())
+    }).collect()
+}
+
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
+    #[test]
+    fn agent_resource_video_metadata_preserves_the_exact_format_without_creating_tasks() {
+        let preview=VideoPreview{preview_id:Uuid::new_v4(),media_id:"media-1".into(),page_url:"https://example.test/watch".into(),site:"fixture".into(),title:"Example / clip".into(),thumbnail:Some("https://signed.example/secret".into()),duration:Some(60.0),
+            formats:vec![extractor::VideoFormat{id:"137+140".into(),width:1920,height:1080,ext:"mp4".into(),bytes:Some(99),estimated:false}]};
+        let formats=agent_video_formats(preview);assert_eq!(formats.len(),1);
+        assert_eq!(formats[0].selector,"137+140");assert_eq!(formats[0].media_id,"media-1");
+        assert_eq!(formats[0].size_bytes,Some(99));assert!(!formats[0].name.contains('/'));
+        assert!(!formats[0].detail.contains("secret"));assert!(formats[0].name.ends_with(" [1920x1080].mp4"));
+    }
 }
 
 #[tauri::command]

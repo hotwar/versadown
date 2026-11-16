@@ -37,7 +37,8 @@ async fn bundle_report(executable: &Path) -> Value {
         && cli_protocol::build_commit().is_none_or(|commit| commit == manifest.source_commit);
     for file in manifest.files {
         let sidecar = file.name.strip_prefix("binaries/").is_some_and(|name| !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) && name != "." && name != "..");
-        if (!wanted.contains(&file.name) && !sidecar) || !seen.insert(file.name.clone())
+        let video_tool = ["binaries/video-windows/yt-dlp.exe", "binaries/video-windows/ffmpeg.exe", "binaries/video-windows/node.exe", "binaries/video-windows/qjs.exe"].contains(&file.name.as_str());
+        if (!wanted.contains(&file.name) && !sidecar && !video_tool) || !seen.insert(file.name.clone())
             || file.sha256.len() != 64 || !file.sha256.bytes().all(|b| b.is_ascii_hexdigit()) { return json!({"state":"invalid"}); }
         let path = base.join(&file.name);
         let inside = match (tokio::fs::canonicalize(base).await, tokio::fs::canonicalize(&path).await) {

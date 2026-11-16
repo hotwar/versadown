@@ -216,6 +216,7 @@ pub struct TaskResultDto {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct CapabilitiesDto {
     pub new_download_protocols: Vec<String>,
+    pub prepared_resource_kinds: Option<Vec<String>>,
     pub task_types: Vec<String>,
     pub operations: Vec<String>,
     pub private_tasks: bool,

@@ -289,7 +289,11 @@ fn create_direct_intent(store: &TaskStore, source: &str, directory: &str, id: &s
         .and_then(|url| url.path_segments()?.next_back().map(str::to_owned))
         .filter(|name| !name.is_empty()).unwrap_or_else(|| "download".into());
     match store.create_cli_task_with_intent(id, &fingerprint(source, directory), new_task, options)
-        .map_err(|error| match error { crate::store::StoreError::NotFound(_) => "NOT_FOUND", _ => "INTERNAL_ERROR" })?
+        .map_err(|error| match error {
+            crate::store::StoreError::NotFound(_) => "NOT_FOUND",
+            crate::store::StoreError::UnsupportedCliOptions => "UNSUPPORTED",
+            _ => "INTERNAL_ERROR",
+        })?
     {
         CliCreateOutcome::Conflict => Err("REQUEST_CONFLICT"),
         CliCreateOutcome::Duplicate => Err("DUPLICATE"),
@@ -309,10 +313,6 @@ async fn add_one(app: &AppHandle, input: BatchItemInput) -> ApiResult<TaskDto> {
     let directory = authorized_directory.to_str().ok_or("INVALID_ARGUMENT")?;
     let options = commands::download_submission_options_for_directory(&state, Some(directory))
         .map_err(|_| "INVALID_ARGUMENT")?;
-    if url::Url::parse(&source).is_ok_and(|url| url.scheme() == "ftp")
-        && (!options.headers.is_empty() || options.proxy.is_some()) {
-        return Err("UNSUPPORTED");
-    }
     let directory = options.directory.as_deref().and_then(Path::to_str).ok_or("INVALID_ARGUMENT")?;
     crate::agent_access::authorize_directory(&state, Path::new(directory))?;
     let task = create_direct_intent(&state.store, &source, directory, &input.request_id, &options)?;
@@ -377,6 +377,7 @@ async fn execute_inner(app: &AppHandle, request: &Request) -> ApiResult<Value> {
             build_commit: crate::cli_protocol::build_commit(), build_dirty: crate::cli_protocol::build_dirty(),
             instance_id: crate::cli_host::instance_id(app), engine_available: state.runtime.status().available,
             capabilities: CapabilitiesDto { new_download_protocols: vec!["http".into(), "https".into(), "ftp".into()],
+                prepared_resource_kinds: Some(["video", "cloud", "share", "torrent"].map(str::to_owned).to_vec()),
                 task_types: ["file", "cloud", "web_video", "directory", "magnet", "ftp"].map(str::to_owned).to_vec(),
                 operations: ["health", "add", "batch_add", "prepare", "confirm", "list", "status", "pause", "resume", "cancel", "result"].map(str::to_owned).to_vec(),
                 private_tasks: false },
@@ -564,6 +565,11 @@ mod tests {
         assert_eq!(retry.items[0].data.as_ref().unwrap().id, original_id);
         assert_eq!(retry.items[1].data.as_ref().unwrap().kind, "ftp");
         assert_eq!(store.list().unwrap().len(), 3);
+        let changed_options = crate::UriSubmissionOptions { directory: Some(directory.path().into()),
+            proxy: Some("http://proxy.example.test:8080".into()), ..Default::default() };
+        let ftp_replay = create_direct_intent(&store, &items[1].url, &destination, "two", &changed_options).unwrap();
+        assert_eq!(ftp_replay.id.to_string(), retry.items[1].data.as_ref().unwrap().id);
+        assert_eq!(create_direct_intent(&store, "ftp://example.test/new.bin", &destination, "new", &changed_options).unwrap_err(), "UNSUPPORTED");
         items[0].url = "https://example.test/different.bin".into();
         let conflict = batch_add_with(&items, "en", |item| std::future::ready(accept_batch_fixture(&store, item))).await.unwrap();
         assert_eq!(conflict.items[0].error.as_ref().unwrap().code, "REQUEST_CONFLICT");

@@ -122,11 +122,21 @@ impl DownloadService {
         self.store.set_file_selection(task_id, indices)?;
         self.store.confirm_selection(task_id)?;
         self.api().save_session().await?;
+        let latest = self.store.find(task_id)?;
+        if latest.is_private || !authorized()
+            || matches!(latest.status, TaskStatus::Paused | TaskStatus::Cancelled | TaskStatus::Recycled) {
+            let _ = self.api().force_pause(&gid).await;
+            return if authorized() { Ok(latest) } else { Err(DownloadServiceError::InvalidUriOption("authorization")) };
+        }
         if paused { self.unpause_gid(&gid).await?; }
         self.api().save_session().await?;
         // Keep the durable queued intent if tellStatus is uncertain. The
         // journal retries the same GID and observes the accepted unpause.
         let final_status = self.tell_status_for_task(task_id, &gid).await?;
+        if !authorized() {
+            let _ = self.api().force_pause(&gid).await;
+            return Err(DownloadServiceError::InvalidUriOption("authorization"));
+        }
         if !torrent_files_match(&final_status, metadata, &output) {
             let _ = self.api().force_pause(&gid).await;
             return Err(DownloadServiceError::InvalidNativeCheckpoint);

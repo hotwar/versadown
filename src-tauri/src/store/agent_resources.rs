@@ -225,10 +225,14 @@ impl TaskStore {
 
     pub(crate) fn agent_resource_pending(&self) -> ResultCode<Vec<(Uuid,PathBuf,ResourceTarget)>> {
         let connection = storage(self.connection.lock())?;
-        let mut query = storage(connection.prepare("SELECT d.task_id,d.directory,d.payload_json FROM agent_resource_dispatch d
-            JOIN tasks t ON t.id=d.task_id WHERE d.phase=0 AND t.status IN('parsing','queued') AND t.is_private=0 ORDER BY t.created_at LIMIT 100"))?;
-        let rows = storage(query.query_map([], |r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?))))?;
-        rows.map(|row| {let(id,dir,payload)=storage(row)?;Ok((storage(Uuid::parse_str(&id))?,PathBuf::from(dir),storage(serde_json::from_str(&payload))?))}).collect()
+        let mut query = storage(connection.prepare("SELECT d.task_id,d.directory,d.payload_json,t.status FROM agent_resource_dispatch d
+            JOIN tasks t ON t.id=d.task_id WHERE d.phase=0 AND t.status IN('parsing','queued','paused','cancelled') AND t.is_private=0 ORDER BY t.created_at LIMIT 1000"))?;
+        let rows = storage(query.query_map([], |r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?))))?;
+        let mut pending=Vec::new();
+        for row in rows {let(id,dir,payload,status)=storage(row)?;let target:ResourceTarget=storage(serde_json::from_str(&payload))?;
+            if matches!(status.as_str(),"paused"|"cancelled")&&!matches!(target,ResourceTarget::Bt{..}){continue;}
+            pending.push((storage(Uuid::parse_str(&id))?,PathBuf::from(dir),target));}
+        Ok(pending)
     }
 
     pub(crate) fn claim_agent_resource(&self, id: Uuid) -> ResultCode<bool> {
@@ -240,6 +244,25 @@ impl TaskStore {
     pub(crate) fn retry_agent_resource_dispatch(&self,id:Uuid)->ResultCode<()> {
         let connection=storage(self.connection.lock())?;
         storage(connection.execute("UPDATE agent_resource_dispatch SET phase=0 WHERE task_id=?1",[id.to_string()]))?;
+        Ok(())
+    }
+
+    pub(crate) fn claim_agent_resource_stop(&self,id:Uuid)->ResultCode<bool> {
+        let connection=storage(self.connection.lock())?;
+        let payload:Option<String>=storage(connection.query_row("SELECT payload_json FROM agent_resource_dispatch WHERE task_id=?1 AND phase=0",[id.to_string()],|r|r.get(0)).optional())?;
+        if !payload.is_some_and(|payload|matches!(serde_json::from_str::<ResourceTarget>(&payload),Ok(ResourceTarget::Bt{..}))){return Ok(false)}
+        Ok(storage(connection.execute("UPDATE agent_resource_dispatch SET phase=1 WHERE task_id=?1 AND phase=0 AND EXISTS(SELECT 1 FROM tasks WHERE id=?1 AND status IN('paused','cancelled') AND is_private=0)",[id.to_string()]))?==1)
+    }
+
+    pub(crate) fn mark_agent_resource_stopped(&self,id:Uuid)->ResultCode<()> {
+        let connection=storage(self.connection.lock())?;
+        storage(connection.execute("UPDATE agent_resource_dispatch SET phase=3 WHERE task_id=?1",[id.to_string()]))?;
+        Ok(())
+    }
+
+    pub(crate) fn block_agent_resource_authorization(&self,id:Uuid,code:&str)->ResultCode<()> {
+        let connection=storage(self.connection.lock())?;
+        storage(connection.execute("UPDATE tasks SET status='paused',failure_code=?2,error=?3,download_speed=0 WHERE id=?1",params![id.to_string(),code,crate::cli_protocol::message(code,"en")]))?;
         Ok(())
     }
 
@@ -262,7 +285,7 @@ impl TaskStore {
 
     pub(crate) fn agent_resource_dispatch_pending(&self,id:Uuid)->Result<bool,StoreError> {
         let connection=self.connection.lock().map_err(|_|StoreError::Poisoned)?;
-        Ok(connection.query_row("SELECT EXISTS(SELECT 1 FROM agent_resource_dispatch WHERE task_id=?1 AND phase<2)",[id.to_string()],|r|r.get(0))?)
+        Ok(connection.query_row("SELECT EXISTS(SELECT 1 FROM agent_resource_dispatch WHERE task_id=?1 AND phase!=2)",[id.to_string()],|r|r.get(0))?)
     }
 
     pub(crate) fn settle_agent_resource_dispatches(&self)->Result<(),StoreError> {
@@ -283,7 +306,7 @@ impl TaskStore {
         // BT has a durable, caller-chosen aria2 GID. Replaying that exact intent
         // is safe even when the process died between submission and its reply.
         let retryable={
-            let mut query=connection.prepare("SELECT d.task_id,d.payload_json FROM agent_resource_dispatch d JOIN tasks t ON t.id=d.task_id WHERE d.phase=1 AND t.status NOT IN('completed','cancelled','recycled')")?;
+            let mut query=connection.prepare("SELECT d.task_id,d.payload_json FROM agent_resource_dispatch d JOIN tasks t ON t.id=d.task_id WHERE d.phase=1 AND t.status NOT IN('completed','recycled')")?;
             let rows=query.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))?;
             let mut ids=Vec::new();
             for row in rows {let(id,json)=row?;if matches!(serde_json::from_str::<ResourceTarget>(&json),Ok(ResourceTarget::Bt{..})){ids.push(id)}}
@@ -291,7 +314,7 @@ impl TaskStore {
         };
         for id in retryable {
             connection.execute("UPDATE agent_resource_dispatch SET phase=0 WHERE task_id=?1",[&id])?;
-            connection.execute("UPDATE tasks SET status='parsing' WHERE id=?1 AND status!='paused'",[&id])?;
+            connection.execute("UPDATE tasks SET status='parsing' WHERE id=?1 AND status NOT IN('paused','cancelled')",[&id])?;
         }
         connection.execute("UPDATE tasks SET status='failed',failure_code='CLI_RECOVERY_REQUIRED',
             error=?1,download_speed=0 WHERE id IN(SELECT task_id FROM agent_resource_dispatch WHERE phase=1)
@@ -309,7 +332,10 @@ impl TaskStore {
         let Some(phase)=phase else{return Ok(None)};
         let task=storage(find_with_connection(&connection,id))?;
         if task.failure_code.as_deref()==Some("CLI_RECOVERY_REQUIRED") && action=="resume" {return Err("CLI_RECOVERY_REQUIRED")}
-        if phase!=0 {return Ok(None)}
+        if phase!=0&&phase!=3 {
+            let payload:String=storage(connection.query_row("SELECT payload_json FROM agent_resource_dispatch WHERE task_id=?1",[id.to_string()],|r|r.get(0)))?;
+            if action!="resume"||!matches!(serde_json::from_str::<ResourceTarget>(&payload),Ok(ResourceTarget::Bt{..})){return Ok(None)}
+        }
         let next=match (task.status,action) {
             (TaskStatus::Parsing|TaskStatus::Queued,"pause")=>Some("paused"),
             (TaskStatus::Paused|TaskStatus::Failed|TaskStatus::Cancelled,"resume")=>Some("parsing"),
@@ -317,7 +343,10 @@ impl TaskStore {
             (_,"pause"|"resume"|"cancel")=>None,
             _=>return Err("INVALID_ARGUMENT"),
         };
-        if let Some(next)=next {storage(connection.execute("UPDATE tasks SET status=?2,updated_at=?3,failure_code=NULL,error=NULL WHERE id=?1",params![id.to_string(),next,current_timestamp()]))?;}
+        if let Some(next)=next {
+            storage(connection.execute("UPDATE tasks SET status=?2,updated_at=?3,failure_code=NULL,error=NULL WHERE id=?1",params![id.to_string(),next,current_timestamp()]))?;
+            if action=="resume"||phase==3&&action=="cancel" {storage(connection.execute("UPDATE agent_resource_dispatch SET phase=0 WHERE task_id=?1",[id.to_string()]))?;}
+        }
         Ok(Some(storage(find_with_connection(&connection,id))?))
     }
 }
