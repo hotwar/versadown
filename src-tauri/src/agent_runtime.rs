@@ -67,6 +67,10 @@ impl StartupOptions {
         !self.background_ui_test || self.test_single_instance
     }
 
+    pub fn desktop_integration_enabled(&self) -> bool {
+        !self.background_ui_test || self.test_single_instance
+    }
+
     pub fn single_instance_identifier(&self, production_identifier: &str) -> String {
         if self.background_ui_test && self.test_single_instance {
             let digest = Sha256::digest(self.data_dir.as_os_str().as_encoded_bytes());
@@ -283,7 +287,7 @@ fn ensure_desktop_ui_on(app: &AppHandle, thread: UiInitializationThread) -> Resu
     if let Some(main) = app.get_webview_window("main") {
         crate::webview_memory::configure_webview(&main);
         #[cfg(windows)]
-        if !runtime.options.background_ui_test {
+        if runtime.options.desktop_integration_enabled() {
             if thread == UiInitializationThread::Setup {
                 crate::window_interaction::install(&main)?;
             } else {
@@ -291,7 +295,7 @@ fn ensure_desktop_ui_on(app: &AppHandle, thread: UiInitializationThread) -> Resu
                 on_main_thread(app, move || crate::window_interaction::install(&main_copy))?;
             }
         }
-        if !runtime.options.background_ui_test {
+        if runtime.options.desktop_integration_enabled() {
             main.set_min_size(Some(tauri::LogicalSize::new(960.0, 640.0)))
                 .map_err(|error| error.to_string())?;
             main.show().map_err(|error| error.to_string())?;
@@ -305,7 +309,7 @@ fn ensure_desktop_ui_on(app: &AppHandle, thread: UiInitializationThread) -> Resu
             .map_err(|error| error.to_string())?)
             .map_err(|error| error.to_string())?;
     }
-    if !runtime.options.background_ui_test {
+    if runtime.options.desktop_integration_enabled() {
         if app.tray_by_id(crate::launcher::TRAY_ID).is_none() {
             crate::launcher::setup_manager_tray(app)?;
         }
@@ -315,6 +319,10 @@ fn ensure_desktop_ui_on(app: &AppHandle, thread: UiInitializationThread) -> Resu
                     .map_err(|error| error.to_string())?;
             }
         }
+    }
+    // Even the native single-instance fixture must not modify OS link
+    // associations. Its desktop integration opt-in does not widen this gate.
+    if !runtime.options.background_ui_test {
         let enabled = app.state::<crate::commands::AppState>().settings.lock()
             .map_err(|_| "settings lock unavailable".to_owned())?.associate_download_links;
         let data_dir = runtime.options.data_dir.clone();
@@ -480,5 +488,24 @@ mod tests {
         let file = profile.path().join("not-a-directory");
         std::fs::write(&file, "test").unwrap();
         assert!(StartupOptions::from_inputs(false, true, true, Some(file), None).is_err());
+    }
+
+    #[test]
+    fn agent_runtime_native_desktop_integration_requires_production_or_explicit_fixture() {
+        let profile = tempfile::tempdir().unwrap();
+        for (background_test, single_instance, expected) in [
+            (false, false, true),
+            (true, false, false),
+            (true, true, true),
+        ] {
+            let options = StartupOptions::from_inputs(
+                false, background_test, single_instance, Some(profile.path().to_owned()),
+                Some(profile.path().join("cli/connection.json")),
+            ).unwrap();
+            assert_eq!(options.desktop_integration_enabled(), expected);
+            // Native integration must not promote a fixture to production;
+            // link-association sync remains gated on this independent flag.
+            assert_eq!(options.background_ui_test, background_test);
+        }
     }
 }
