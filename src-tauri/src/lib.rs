@@ -323,7 +323,18 @@ pub fn run() -> i32 {
             let data_dir = startup_options.data_dir.clone();
             // This lease, unlike desktop activation IPC, also protects isolated
             // profiles and concurrent launches before the IPC endpoint exists.
-            app.manage(agent_runtime::ProfileLease::acquire(&data_dir)?);
+            let lease = match agent_runtime::ProfileLease::acquire(&data_dir) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    // A concurrent desktop may own the profile before its
+                    // activation IPC/API is ready. Let the client wait for it.
+                    if startup_options.agent_host && error.kind() == std::io::ErrorKind::WouldBlock {
+                        setup_exit.store(0, std::sync::atomic::Ordering::Release);
+                    }
+                    return Err(error.into());
+                }
+            };
+            app.manage(lease);
             let settings_path = data_dir.join("settings.json");
             let mut settings = agent_runtime::load_settings(&data_dir);
             // Authorization may have changed after preflight while another
@@ -600,7 +611,7 @@ pub fn run() -> i32 {
                 if let Some(lifecycle) = app.try_state::<std::sync::Arc<ApplicationLifecycle>>() {
                     lifecycle.begin_exit();
                 }
-                app.exit(setup_exit.load(std::sync::atomic::Ordering::Acquire));
+                app.handle().exit(setup_exit.load(std::sync::atomic::Ordering::Acquire));
             }
             Ok(())
         })

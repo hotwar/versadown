@@ -96,7 +96,10 @@ impl ProfileLease {
             .read(true)
             .write(true)
             .open(data_dir.join("agent-host.lock"))?;
-        file.try_lock().map_err(std::io::Error::other)?;
+        file.try_lock().map_err(|error| match error {
+            std::fs::TryLockError::WouldBlock => std::io::ErrorKind::WouldBlock.into(),
+            std::fs::TryLockError::Error(error) => error,
+        })?;
         Ok(Self { _file: file })
     }
 }
@@ -228,7 +231,7 @@ mod tests {
         let profile = tempfile::tempdir().unwrap();
         let other = tempfile::tempdir().unwrap();
         let first = ProfileLease::acquire(profile.path()).unwrap();
-        assert!(ProfileLease::acquire(profile.path()).is_err());
+        assert_eq!(ProfileLease::acquire(profile.path()).err().unwrap().kind(), std::io::ErrorKind::WouldBlock);
         assert!(ProfileLease::acquire(other.path()).is_ok());
         drop(first);
         assert!(ProfileLease::acquire(profile.path()).is_ok());

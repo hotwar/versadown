@@ -72,6 +72,8 @@ Windows 默认发现文件是 `%APPDATA%\com.versadown.desktop\cli\connection.js
 
 默认模式先以 `health` 探测宿主，确认不可达后按需启动。启动等待上限为 20 秒，CLI 的整体 `--timeout` 可以更早结束等待；启动超时不会取消已经受理的下载。缺少配套宿主或启动失败返回 `HOST_UNAVAILABLE`；宿主明确拒绝未启用的授权时返回 `HOST_DISABLED`；超时返回 `TIMEOUT`。客户端不会读取桌面配置或替用户授权。
 
+`health.ok` 表示本机 API 可用，下载引擎可能仍在初始化，应同时检查 `data.engine_available`。自动启动不会把引擎状态改写为成功；任务提交成功仍仅表示已受理。
+
 多个 CLI / MCP 客户端共用启动锁，宿主在打开任务库和引擎前取得同一 profile 的独占锁。CLI 结束、MCP 正常断开或进程退出不会请求停止宿主；用户在桌面明确退出 VD 则停止宿主，下一次允许自动启动的调用会重新启动它。操作系统或第三方客户端强制结束整个进程树属于外部终止，不承诺下载继续。
 
 接口协议版本为 1：客户端对 `http://127.0.0.1:PORT/v1/call` 发出 JSON POST 并使用 Bearer 鉴权。客户端禁用代理和重定向。主程序仅监听回环地址，并拒绝浏览器来源的调用。CLI 不支持远端宿主。
@@ -119,6 +121,8 @@ Enable Agent access once in VD's desktop settings and authorize output directori
 Every CLI command emits one JSON envelope to stdout. `--json` is optional; `--lang en` selects English messages. Use `help` for the command grammar. Both adapters share the same host authorization and download engine. `--no-start`, `--discovery PATH`, or `VD_CLI_DISCOVERY` selects connect-only behavior. Help/version and MCP initialization/tool listing never start the host. Startup waits up to 20 seconds, bounded further by the CLI operation timeout. The client probes health before startup and never replays an already-sent business operation after a transport failure.
 
 A profile startup lock coordinates clients; a separate lifetime lock gives one host ownership of its task database and engine. Normal client exit or MCP disconnect leaves the host running. Explicitly quitting VD stops it; a later automatic-start call can start it again. External termination of an entire process tree is outside this guarantee.
+
+Health success means the local API is ready. The engine may still be initializing; inspect `data.engine_available` separately. Successful submission means acceptance, not completion.
 
 `add URL --directory ABSOLUTE_PATH --request-id ID` submits an HTTP/HTTPS single-file download. Retry with the same request ID and arguments. Reusing an ID for different arguments yields `REQUEST_CONFLICT`; a different ID for an existing download source yields `DUPLICATE`. Private tasks are always excluded, regardless of the desktop privacy unlock state.
 
