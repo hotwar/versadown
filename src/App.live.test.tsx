@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
 import { beforeEach, expect, it, vi } from 'vitest';
-import type { QueueTask, QueueTaskInput } from './lib/types';
+import type { AppUpdate, QueueTask, QueueTaskInput } from './lib/types';
 import { getThemeMode, setThemeMode } from './lib/theme';
 import { cloudCatalog } from './test/cloudCatalog';
 import { scanDownloadInputs } from './lib/api';
@@ -240,23 +240,97 @@ it('anchors About at the bottom of the sidebar without the Beta footer', async (
 
 it('highlights a newer release and opens its official download page from About', async () => {
   const update = {
-    version: '0.2.0',
+    version: '0.3.1',
     notes: '新增版本更新提示，并优化隐私任务操作体验。',
-    downloadUrl: 'https://versadown.aigutta.com/download.html'
+    downloadUrl: 'https://versadown.aigutta.com/#download'
   };
   state.updateCheck.mockResolvedValue(update);
   const user = userEvent.setup();
   await act(async () => { render(<App />); });
 
   const navigation = screen.getByRole('navigation', { name: '主导航' });
-  await user.click(await within(navigation).findByRole('button', { name: '有新版本' }));
+  const about = within(navigation).getByRole('button', { name: '关于 有更新' });
+  expect(within(about).getByText('关于')).toBeVisible();
+  expect(within(about).getByText('有更新')).toBeVisible();
+  await user.click(about);
 
-  const updateLink = await screen.findByRole('button', { name: '下载新版本 0.2.0' });
-  expect(updateLink).toHaveTextContent('新版本发布：0.2.0');
-  expect(updateLink).toHaveTextContent(update.notes);
+  const updateLink = screen.getByRole('button', { name: '去官网下载' });
+  expect(screen.getByText('新版本发布：0.3.1')).toBeVisible();
+  expect(screen.getByText(update.notes)).toBeVisible();
   await user.click(updateLink);
 
   expect(state.openExternalUrl).toHaveBeenCalledWith(update.downloadUrl);
+  expect(within(about).getByText('有更新')).toBeVisible();
+  expect(state.updateCheck).toHaveBeenCalledOnce();
+});
+
+it('checks at startup without blocking tasks and allows a fresh manual check', async () => {
+  const startup = deferred<AppUpdate | null>();
+  const manual = deferred<AppUpdate | null>();
+  state.updateCheck.mockReturnValueOnce(startup.promise).mockReturnValueOnce(manual.promise);
+  state.list.mockResolvedValue([oldTask]);
+  const user = userEvent.setup();
+  render(<App />);
+  expect(await screen.findByText('archive.iso')).toBeVisible();
+  expect(state.updateCheck).toHaveBeenCalledOnce();
+  await user.click(screen.getByRole('button', { name: '关于' }));
+  const check = screen.getByRole('button', { name: '检查更新' });
+  expect(check).toBeDisabled();
+  await user.click(check);
+  expect(state.updateCheck).toHaveBeenCalledOnce();
+
+  await act(async () => { startup.resolve(null); });
+  expect(screen.getByText('当前没有可用更新。')).toBeVisible();
+  await user.click(check);
+  expect(state.updateCheck).toHaveBeenCalledTimes(2);
+  expect(check).toBeDisabled();
+  await act(async () => { manual.resolve({ version: '0.3.1', notes: '', downloadUrl: 'https://versadown.aigutta.com/#download' }); });
+  expect(screen.getByText('新版本发布：0.3.1')).toBeVisible();
+  expect(screen.queryByText('当前没有可用更新。')).not.toBeInTheDocument();
+});
+
+it('keeps startup failures quiet and recovers through a manual check', async () => {
+  state.updateCheck.mockRejectedValueOnce(new Error('Offline')).mockResolvedValueOnce(null);
+  const user = userEvent.setup();
+  await act(async () => { render(<App />); });
+  expect(screen.queryByText('暂时无法检查更新，请稍后重试。')).not.toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '关于' }));
+  expect(screen.getByText('暂时无法检查更新，请稍后重试。')).toBeVisible();
+  expect(screen.queryByText('当前没有可用更新。')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '检查更新' }));
+  expect(await screen.findByText('当前没有可用更新。')).toBeVisible();
+});
+
+it('preserves a known update after a failed check and clears it after a successful no-update result', async () => {
+  const update = { version: '0.3.1', notes: 'Update notes', downloadUrl: 'https://versadown.aigutta.com/#download' };
+  state.updateCheck.mockResolvedValueOnce(update).mockRejectedValueOnce(new Error('Offline')).mockResolvedValueOnce(null);
+  const user = userEvent.setup();
+  await act(async () => { render(<App />); });
+  await user.click(screen.getByRole('button', { name: '关于 有更新' }));
+  await user.click(screen.getByRole('button', { name: '检查更新' }));
+  expect(await screen.findByText('暂时无法检查更新，请稍后重试。')).toBeVisible();
+  expect(screen.getByText('新版本发布：0.3.1')).toBeVisible();
+  expect(screen.getByRole('button', { name: '关于 有更新' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '去官网下载' })).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '检查更新' }));
+  expect(await screen.findByText('当前没有可用更新。')).toBeVisible();
+  expect(screen.getByRole('button', { name: '关于' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: '去官网下载' })).not.toBeInTheDocument();
+});
+
+it('reports browser-opening failures and lets the user retry without clearing the update', async () => {
+  state.updateCheck.mockResolvedValue({ version: '0.3.1', notes: '', downloadUrl: 'https://versadown.aigutta.com/#download' });
+  state.openExternalUrl.mockRejectedValueOnce(new Error('Opener unavailable')).mockResolvedValueOnce(undefined);
+  const user = userEvent.setup();
+  await act(async () => { render(<App />); });
+  await user.click(screen.getByRole('button', { name: '关于 有更新' }));
+  await user.click(screen.getByRole('button', { name: '去官网下载' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent(t('about.openUpdateFailed'));
+  expect(screen.getByRole('button', { name: '关于 有更新' })).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '去官网下载' }));
+  await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+  expect(state.openExternalUrl).toHaveBeenCalledTimes(2);
 });
 
 it('selects WebView2 caption regions without also registering Tauri JavaScript drag regions', async () => {

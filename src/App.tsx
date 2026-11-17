@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
@@ -14,7 +14,7 @@ import type { CloudManagerClient } from './components/CloudManager';
 import { CloudWorkspace, type CloudWorkspacePage } from './components/CloudWorkspace';
 import { CloudNavigation } from './components/CloudNavigation';
 import { SettingsPanel } from './components/SettingsPanel';
-import { AboutPanel } from './components/AboutPanel';
+import { AboutPanel, type AppUpdateCheckStatus } from './components/AboutPanel';
 import { BuildIdentityFooter } from './components/BuildIdentityFooter';
 import { EngineStatusToast } from './components/EngineStatusBanner';
 import { StartupNotice } from './components/StartupNotice';
@@ -371,6 +371,9 @@ export function App() {
   const [headerConfirmation, setHeaderConfirmation] = useState<ParseResult | null>(null);
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [appUpdate, setAppUpdate] = useState<AppUpdate | null>(null);
+  const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateCheckStatus>('idle');
+  const [openUpdateFailed, setOpenUpdateFailed] = useState(false);
+  const updateChecksActive = useRef(false);
   const [privacyVisibility, setPrivacyVisibility] = useState<PrivacyTaskVisibility>({ enabled: false, unlocked: false });
   const [privacyTaskFilter, setPrivacyTaskFilter] = useState<PrivacyTaskFilter>('all');
   const [privacyUnlockOpen, setPrivacyUnlockOpen] = useState(false);
@@ -887,11 +890,34 @@ export function App() {
     return () => { active = false; };
   }, []);
 
-  useEffect(() => {
-    let active = true;
-    checkForAppUpdate().then((update) => { if (active) setAppUpdate(update); }).catch(() => undefined);
-    return () => { active = false; };
+  const checkUpdates = useCallback(async () => {
+    setOpenUpdateFailed(false);
+    setAppUpdateStatus('checking');
+    try {
+      const update = await checkForAppUpdate();
+      if (!updateChecksActive.current) return;
+      setAppUpdate(update);
+      setAppUpdateStatus(update ? 'available' : 'upToDate');
+    } catch {
+      // A failed check must not discard a previously discovered update.
+      if (updateChecksActive.current) setAppUpdateStatus('error');
+    }
   }, []);
+
+  useEffect(() => {
+    updateChecksActive.current = true;
+    void checkUpdates();
+    return () => { updateChecksActive.current = false; };
+  }, [checkUpdates]);
+
+  async function openAppUpdate(update: AppUpdate) {
+    setOpenUpdateFailed(false);
+    try {
+      await openExternalUrl(update.downloadUrl);
+    } catch {
+      if (updateChecksActive.current) setOpenUpdateFailed(true);
+    }
+  }
 
   useEffect(() => {
     const wasUnlocked = previousPrivacyUnlocked.current;
@@ -1797,7 +1823,7 @@ export function App() {
         <button className={view === 'downloads' ? 'nav-active' : ''} onClick={() => setView('downloads')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="tasks" /></span><span>{t('navigation.tasks')}</span>{activeTasks.length > 0 && <b>{activeTasks.length}</b>}</button>
         <CloudNavigation providers={authorizedCloudProviders} activePage={view === 'cloud' ? cloudPage : null} icon={<NavigationIcon kind="cloud" />} onSelect={page => { setCloudPage(page); setView('cloud'); }} />
         <button className={view === 'settings' ? 'nav-active' : ''} onClick={() => setView('settings')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="settings" /></span><span>{t('navigation.settings')}</span></button>
-        <button type="button" className={`nav-about${view === 'about' ? ' nav-active' : ''}`} aria-current={view === 'about' ? 'page' : undefined} onClick={() => setView('about')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="about" /></span><span>{appUpdate ? t('navigation.newVersion') : t('navigation.about')}</span></button>
+        <button type="button" className={`nav-about${view === 'about' ? ' nav-active' : ''}`} aria-current={view === 'about' ? 'page' : undefined} onClick={() => setView('about')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="about" /></span><span>{t('navigation.about')}</span>{appUpdate && <span className="nav-update-badge" title={t('navigation.newVersion')}>{t('navigation.updateBadge')}</span>}</button>
       </nav>
         {view === 'downloads' && <section className="downloads-view">
           <header className="download-tabs">
@@ -1834,7 +1860,7 @@ export function App() {
         </section>}
         <section className="view-panel" hidden={view !== 'cloud'}><CloudWorkspace client={cloudClient} activePage={cloudPage} onPageChange={setCloudPage} onProvidersChange={setAuthorizedCloudProviders} onDownloadTask={acceptCloudDownload} privacyDownloadEnabled={settings.privacyDownloadEnabled ?? false} /></section>
         {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} browseVideoCookieFile={browseVideoCookieFile} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} onNotice={setNotice} configurePrivacyDownload={savePrivacyConfiguration} /></section>}
-        {view === 'about' && <section className="view-panel" aria-label={t('about.title')}><AboutPanel icon={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} update={appUpdate} onOpenUpdate={(update) => { void openExternalUrl(update.downloadUrl).catch(() => undefined); }} /></section>}
+        {view === 'about' && <section className="view-panel" aria-label={t('about.title')}><AboutPanel icon={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} update={appUpdate} checkStatus={appUpdateStatus} openUpdateFailed={openUpdateFailed} onCheckUpdate={() => { void checkUpdates(); }} onOpenUpdate={(update) => { void openAppUpdate(update); }} /></section>}
       </div>
       {import.meta.env.DEV && <BuildIdentityFooter />}
       {confirmation && <ParseConfirmDialog result={confirmation} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onConfirm={confirm} onSelectionChange={(selectedIds) => setConfirmation((current) => current ? {

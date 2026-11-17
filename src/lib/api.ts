@@ -2,7 +2,6 @@ import { AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCo
 import { videoConfirmation, videoMessage } from './webVideo';
 import type { ScanDownloadProgress, VideoPreview } from './types';
 import { Channel, invoke } from '@tauri-apps/api/core';
-import { version as appVersion } from '../../src-tauri/tauri.conf.json';
 import type { ThemeId } from './theme';
 import { t, type TranslationKey } from '../i18n';
 import { isXunleiVerificationFailure, isXunleiVerificationReason, xunleiVerificationMessage } from './xunleiVerification';
@@ -357,50 +356,28 @@ export async function lockPrivacyTasks(): Promise<PrivacyTaskVisibility> {
   return isTauriRuntime() ? invoke<PrivacyTaskVisibility>('lock_privacy_tasks') : { enabled: false, unlocked: false };
 }
 
-const appUpdateCacheKey = 'versadown.app-update.v1';
-const appUpdateCacheLifetimeMs = 12 * 60 * 60 * 1000;
-
-function readCachedAppUpdate(): AppUpdate | null | undefined {
-  try {
-    const cached = JSON.parse(window.localStorage.getItem(appUpdateCacheKey) ?? 'null') as { appVersion?: unknown; checkedAt?: unknown; update?: unknown } | null;
-    if (!cached || cached.appVersion !== appVersion || typeof cached.checkedAt !== 'number' || Date.now() - cached.checkedAt >= appUpdateCacheLifetimeMs) return undefined;
-    if (cached.update === null) return null;
-    if (typeof cached.update !== 'object' || cached.update === null) return undefined;
-    const update = cached.update as Partial<AppUpdate>;
-    return typeof update.version === 'string' && typeof update.notes === 'string' && typeof update.downloadUrl === 'string'
-      ? { version: update.version, notes: update.notes, downloadUrl: update.downloadUrl }
-      : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function cacheAppUpdate(update: AppUpdate | null) {
-  try {
-    window.localStorage.setItem(appUpdateCacheKey, JSON.stringify({ appVersion, checkedAt: Date.now(), update }));
-  } catch {
-    // Update checks remain functional when browser storage is unavailable.
-  }
-}
+let pendingAppUpdate: Promise<AppUpdate | null> | undefined;
 
 export async function checkForAppUpdate(): Promise<AppUpdate | null> {
-  if (!isTauriRuntime()) return null;
-  const cached = readCachedAppUpdate();
-  if (cached !== undefined) return cached;
-  const update = await invoke<AppUpdate | null>('check_for_app_update');
-  cacheAppUpdate(update);
-  return update;
+  if (!isTauriRuntime()) throw new Error(t('about.updateDesktopOnly'));
+  // Share only an in-flight request. Every later check must reach the server,
+  // including checks after a previous result said there was no update.
+  if (!pendingAppUpdate) {
+    pendingAppUpdate = invoke<AppUpdate | null>('check_for_app_update').finally(() => {
+      pendingAppUpdate = undefined;
+    });
+  }
+  return pendingAppUpdate;
 }
 
 export async function openExternalUrl(url: string): Promise<void> {
-  const destination = new URL(url);
-  if (destination.protocol !== 'https:' || destination.hostname !== 'versadown.aigutta.com') throw new Error('更新地址无效');
+  if (url !== 'https://versadown.aigutta.com/#download') throw new Error(t('about.openUpdateFailed'));
   if (isTauriRuntime()) {
     const { openUrl } = await import('@tauri-apps/plugin-opener');
-    await openUrl(destination);
+    await openUrl(url);
     return;
   }
-  window.open(destination, '_blank', 'noopener,noreferrer');
+  window.open(url, '_blank', 'noopener,noreferrer');
 }
 
 export async function updateAiSettings(settings: AiSettingsInput): Promise<AiSettings> {
