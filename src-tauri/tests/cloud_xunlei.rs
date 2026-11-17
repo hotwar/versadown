@@ -409,6 +409,38 @@ fn modern_web_19324_signature_matches_official_javascript_vectors() {
     }
 }
 
+// Independent vectors from the unmodified official 1.93.27 exported functions
+// in utils-initial.1004aab905b24bdff710.js, starting at module 19's
+// pubr4t5YvDSgoNextgrrrqGdWSmfiobH7HW; Node crypto supplies the MD5 primitive.
+#[test]
+fn modern_web_19327_signature_matches_official_javascript_vectors() {
+    let mut profile = modern_session().profile;
+    profile.client_version = "1.93.27".into();
+    for (device, timestamp, expected) in [
+        (
+            "synthetic-device",
+            "1794441600000",
+            "1.f20d06caf3a5ba93c8e3a51d9b4299bf",
+        ),
+        (
+            "test-device-2",
+            "1794441600001",
+            "1.54eb5b51701d2865092bdebf45da3674",
+        ),
+        (
+            "00000000000000000000000000000000",
+            "1700000000000",
+            "1.e2ce44f9fdf19e5f5b276af8b15752e2",
+        ),
+    ] {
+        profile.device_id = device.into();
+        assert_eq!(
+            profile.web_captcha_signature(timestamp).as_deref(),
+            Some(expected)
+        );
+    }
+}
+
 // Break caught: a supported profile must replace old captured metadata for a
 // new action, even when the browser token itself still has time remaining.
 #[test]

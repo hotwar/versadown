@@ -2,16 +2,41 @@ import { version } from '../../src-tauri/tauri.conf.json';
 import type { AppUpdate } from '../lib/types';
 import { useTranslation } from '../i18n';
 
-export function AboutPanel({ icon, update, onOpenUpdate }: { icon: string; update?: AppUpdate | null; onOpenUpdate?(update: AppUpdate): void }) {
+export type AppUpdateCheckStatus = 'idle' | 'checking' | 'upToDate' | 'available' | 'error';
+
+export function AboutPanel({ icon, update, checkStatus = 'idle', openUpdateFailed = false, onCheckUpdate, onOpenUpdate }: {
+  icon: string;
+  update?: AppUpdate | null;
+  checkStatus?: AppUpdateCheckStatus;
+  openUpdateFailed?: boolean;
+  onCheckUpdate?(): void;
+  onOpenUpdate?(update: AppUpdate): void;
+}) {
   const { t } = useTranslation();
   return <article className="about-panel">
     <header className="about-heading">
       <img src={icon} width="72" height="72" alt="" draggable={false} />
       <div>
-        <div className="about-title-row"><h2>{t('app.title')}</h2>{update && <button type="button" className="about-update" aria-label={t('about.downloadVersion', { version: update.version })} onClick={() => onOpenUpdate?.(update)}><span>{t('about.newVersion', { version: update.version })}</span><small>{update.notes}</small></button>}</div>
+        <h2>{t('app.title')}</h2>
         <span className="about-version">{t('about.versionLabel', { version })}</span>
       </div>
     </header>
+    <section className="about-updates" aria-label={t('about.updatesTitle')}>
+      <div className="about-update-actions">
+        <button type="button" className="secondary" disabled={checkStatus === 'checking'} onClick={onCheckUpdate}>{t('about.checkUpdates')}</button>
+        {update && <button type="button" className="primary" onClick={() => onOpenUpdate?.(update)}>{t('about.downloadOfficial')}</button>}
+      </div>
+      <div className="about-update-status" role="status">
+        {checkStatus === 'checking' && <p>{t('about.checkingUpdates')}</p>}
+        {checkStatus === 'upToDate' && <p>{t('about.noUpdate')}</p>}
+        {checkStatus === 'error' && <p className="about-update-error">{t('about.checkUpdateFailed')}</p>}
+        {update && <div className="about-update">
+          <strong>{t('about.newVersion', { version: update.version })}</strong>
+          <p>{update.notes || t('about.updateNotesFallback')}</p>
+        </div>}
+      </div>
+      {openUpdateFailed && <p className="about-update-error" role="alert">{t('about.openUpdateFailed')}</p>}
+    </section>
     <p className="about-intro">{t('about.intro')}</p>
     <section className="about-section" aria-labelledby="about-features-title">
       <h3 id="about-features-title">{t('about.features.title')}</h3>

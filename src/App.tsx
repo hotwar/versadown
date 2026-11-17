@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { BatchTaskCommand, displayTaskName, DownloadQueue } from './components/DownloadQueue';
 import { NewDownloadDialog } from './components/NewDownloadDialog';
+import { settingsWithRememberedDirectory } from './lib/downloadDirectory';
 import { selectedResourceIds, type DraftSubmissionFailure, type DownloadDraftItem } from './components/useDownloadDraftBatch';
 import { ParseConfirmDialog } from './components/ParseConfirmDialog';
 import { DuplicateDownloadDialog } from './components/DuplicateDownloadDialog';
@@ -13,7 +14,7 @@ import type { CloudManagerClient } from './components/CloudManager';
 import { CloudWorkspace, type CloudWorkspacePage } from './components/CloudWorkspace';
 import { CloudNavigation } from './components/CloudNavigation';
 import { SettingsPanel } from './components/SettingsPanel';
-import { AboutPanel } from './components/AboutPanel';
+import { AboutPanel, type AppUpdateCheckStatus } from './components/AboutPanel';
 import { BuildIdentityFooter } from './components/BuildIdentityFooter';
 import { EngineStatusToast } from './components/EngineStatusBanner';
 import { StartupNotice } from './components/StartupNotice';
@@ -286,6 +287,22 @@ async function browseDownloadDirectory(currentDirectory: string): Promise<string
   return typeof selected === 'string' ? selected : null;
 }
 
+async function browseVideoCookieFile(currentFile: string): Promise<string | null> {
+  if (!isTauriRuntime()) return null;
+  const { open } = await import('@tauri-apps/plugin-dialog');
+  const selected = await open({
+    directory: false,
+    multiple: false,
+    defaultPath: currentFile || undefined,
+    title: t('settings.videoCookies.choose'),
+    filters: [
+      { name: t('settings.videoCookies.textFiles'), extensions: ['txt'] },
+      { name: t('settings.videoCookies.allFiles'), extensions: ['*'] }
+    ]
+  });
+  return typeof selected === 'string' ? selected : null;
+}
+
 function WindowIcon({ kind }: { kind: 'minimize' | 'maximize' | 'close' }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
     {kind === 'minimize' && <path d="M5 12h14" />}
@@ -356,6 +373,9 @@ export function App() {
   const [headerConfirmation, setHeaderConfirmation] = useState<ParseResult | null>(null);
   const [settings, setSettings] = useState<AppSettings>(defaultSettings);
   const [appUpdate, setAppUpdate] = useState<AppUpdate | null>(null);
+  const [appUpdateStatus, setAppUpdateStatus] = useState<AppUpdateCheckStatus>('idle');
+  const [openUpdateFailed, setOpenUpdateFailed] = useState(false);
+  const updateChecksActive = useRef(false);
   const [privacyVisibility, setPrivacyVisibility] = useState<PrivacyTaskVisibility>({ enabled: false, unlocked: false });
   const [privacyTaskFilter, setPrivacyTaskFilter] = useState<PrivacyTaskFilter>('all');
   const [privacyUnlockOpen, setPrivacyUnlockOpen] = useState(false);
@@ -872,11 +892,34 @@ export function App() {
     return () => { active = false; };
   }, []);
 
-  useEffect(() => {
-    let active = true;
-    checkForAppUpdate().then((update) => { if (active) setAppUpdate(update); }).catch(() => undefined);
-    return () => { active = false; };
+  const checkUpdates = useCallback(async () => {
+    setOpenUpdateFailed(false);
+    setAppUpdateStatus('checking');
+    try {
+      const update = await checkForAppUpdate();
+      if (!updateChecksActive.current) return;
+      setAppUpdate(update);
+      setAppUpdateStatus(update ? 'available' : 'upToDate');
+    } catch {
+      // A failed check must not discard a previously discovered update.
+      if (updateChecksActive.current) setAppUpdateStatus('error');
+    }
   }, []);
+
+  useEffect(() => {
+    updateChecksActive.current = true;
+    void checkUpdates();
+    return () => { updateChecksActive.current = false; };
+  }, [checkUpdates]);
+
+  async function openAppUpdate(update: AppUpdate) {
+    setOpenUpdateFailed(false);
+    try {
+      await openExternalUrl(update.downloadUrl);
+    } catch {
+      if (updateChecksActive.current) setOpenUpdateFailed(true);
+    }
+  }
 
   useEffect(() => {
     const wasUnlocked = previousPrivacyUnlocked.current;
@@ -900,6 +943,17 @@ export function App() {
   useEffect(() => {
     if (privacyUnlockOpen) privacyUnlockPassword.current?.focus();
   }, [privacyUnlockOpen]);
+
+  // A directory chosen while creating a download becomes the default for the
+  // next one. The current download already carries it, so a failed save only
+  // costs the convenience and must not block the task.
+  function rememberDownloadDirectory(usedDirectory?: string) {
+    const next = settingsWithRememberedDirectory(settings, usedDirectory);
+    if (!next) return;
+    void saveSettings(next).catch((error) => {
+      setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+    });
+  }
 
   function saveSettings(next: AppSettings): Promise<void> {
     const previous = settings;
@@ -1107,9 +1161,9 @@ export function App() {
     return () => { disposed = true; unlisten.forEach((stop) => stop()); };
   }, []);
 
-  async function parse(input: string, accessCode?: string, confirmationPlacement: 'modal' | 'header' = 'modal', probeVideo = false) {
-    const result = probeVideo
-      ? await parseDownload(input, accessCode, true, true)
+  async function parse(input: string, accessCode?: string, confirmationPlacement: 'modal' | 'header' = 'modal', probeVideo?: boolean) {
+    const result = probeVideo !== undefined
+      ? await parseDownload(input, accessCode, probeVideo || (settings.privacyDownloadEnabled ?? false), probeVideo)
       : await parseDownload(input, accessCode, settings.privacyDownloadEnabled ?? false);
     if (result.task) { addNewDownloadTask(result.task); setSelectedTaskId(result.task.id); }
     if (result.confirmation) {
@@ -1161,6 +1215,7 @@ export function App() {
   async function confirm(selectedIds: string[], destinationDirectory?: string, privateDownload = false, placement: 'modal' | 'header' = 'modal') {
     const activeConfirmation = placement === 'header' ? headerConfirmation : confirmation;
     if (!activeConfirmation) return;
+    rememberDownloadDirectory(destinationDirectory);
     const activeGeneration = placement === 'header' ? headerConfirmationGeneration : confirmationGeneration;
     const setActiveConfirmation = placement === 'header' ? setHeaderConfirmation : setConfirmation;
     const planKey = `${placement}:${activeGeneration.current}`;
@@ -1580,6 +1635,7 @@ export function App() {
     privateDownload = false,
     postProcessingNote?: string,
   ) {
+    rememberDownloadDirectory(destinationDirectory);
     const includesVideo = items.some(item => item.result?.confirmation?.video);
     const closeDialog = () => {
       setNewDownloadOpen(false);
@@ -1782,7 +1838,7 @@ export function App() {
         <button className={view === 'downloads' ? 'nav-active' : ''} onClick={() => setView('downloads')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="tasks" /></span><span>{t('navigation.tasks')}</span>{activeTasks.length > 0 && <b>{activeTasks.length}</b>}</button>
         <CloudNavigation providers={authorizedCloudProviders} activePage={view === 'cloud' ? cloudPage : null} icon={<NavigationIcon kind="cloud" />} onSelect={page => { setCloudPage(page); setView('cloud'); }} />
         <button className={view === 'settings' ? 'nav-active' : ''} onClick={() => setView('settings')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="settings" /></span><span>{t('navigation.settings')}</span></button>
-        <button type="button" className={`nav-about${view === 'about' ? ' nav-active' : ''}`} aria-current={view === 'about' ? 'page' : undefined} onClick={() => setView('about')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="about" /></span><span>{appUpdate ? t('navigation.newVersion') : t('navigation.about')}</span></button>
+        <button type="button" className={`nav-about${view === 'about' ? ' nav-active' : ''}`} aria-current={view === 'about' ? 'page' : undefined} onClick={() => setView('about')}><span className="nav-icon" aria-hidden="true"><NavigationIcon kind="about" /></span><span>{t('navigation.about')}</span>{appUpdate && <span className="nav-update-badge" title={t('navigation.newVersion')}>{t('navigation.updateBadge')}</span>}</button>
       </nav>
         {view === 'downloads' && <section className="downloads-view">
           <header className="download-tabs">
@@ -1818,8 +1874,8 @@ export function App() {
           </section>
         </section>}
         <section className="view-panel" hidden={view !== 'cloud'}><CloudWorkspace client={cloudClient} activePage={cloudPage} onPageChange={setCloudPage} onProvidersChange={setAuthorizedCloudProviders} onDownloadTask={acceptCloudDownload} privacyDownloadEnabled={settings.privacyDownloadEnabled ?? false} /></section>
-        {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} onNotice={setNotice} configurePrivacyDownload={savePrivacyConfiguration} configureAgentAccess={saveAgentConfiguration} /></section>}
-        {view === 'about' && <section className="view-panel" aria-label={t('about.title')}><AboutPanel icon={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} update={appUpdate} onOpenUpdate={(update) => { void openExternalUrl(update.downloadUrl).catch(() => undefined); }} /></section>}
+        {view === 'settings' && <section className="view-panel"><SettingsPanel initial={settings} onChange={saveSettings} browseDirectory={browseDownloadDirectory} browseVideoCookieFile={browseVideoCookieFile} saveAiSettings={saveAiConfiguration} loadAiModels={listAiModels} onNotice={setNotice} configurePrivacyDownload={savePrivacyConfiguration} configureAgentAccess={saveAgentConfiguration} /></section>}
+        {view === 'about' && <section className="view-panel" aria-label={t('about.title')}><AboutPanel icon={resolvedTheme === 'dark' ? darkMintIcon : mintWhiteIcon} update={appUpdate} checkStatus={appUpdateStatus} openUpdateFailed={openUpdateFailed} onCheckUpdate={() => { void checkUpdates(); }} onOpenUpdate={(update) => { void openAppUpdate(update); }} /></section>}
       </div>
       {import.meta.env.DEV && <BuildIdentityFooter />}
       {confirmation && <ParseConfirmDialog result={confirmation} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onConfirm={confirm} onSelectionChange={(selectedIds) => setConfirmation((current) => current ? {
@@ -1835,7 +1891,7 @@ export function App() {
         onRestartMissing={() => void resolveDuplicate('restart_missing')}
         onClose={() => dismissDuplicate(duplicate.task.id)}
       />}
-      <NewDownloadDialog open={newDownloadOpen} placement="modal" initialInput={newDownloadInput} onScan={scanDownloadInputs} onParse={(input, accessCode, probeVideo) => probeVideo ? parseDownload(input, accessCode, true, true) : parseDownload(input, accessCode, true)} onDiscardPrepared={discardPreparedDownload} onSubmitBatch={submitPreparedBatch} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onClose={() => { setNewDownloadOpen(false); setNewDownloadInput(''); }} />
+      <NewDownloadDialog open={newDownloadOpen} placement="modal" initialInput={newDownloadInput} onScan={scanDownloadInputs} onParse={(input, accessCode, probeVideo) => probeVideo !== undefined ? parseDownload(input, accessCode, true, probeVideo) : parseDownload(input, accessCode, true)} onDiscardPrepared={discardPreparedDownload} onSubmitBatch={submitPreparedBatch} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onClose={() => { setNewDownloadOpen(false); setNewDownloadInput(''); }} />
       {detailsTask && <TaskDetailsDialog task={detailsTask} onClose={() => setDetailsTaskId(null)} />}
       {pendingPurgeTasks.length > 0 && <RemoveTaskDialog taskNames={pendingPurgeTasks.map(displayTaskName)} onConfirm={(deleteFiles) => void confirmTaskRemoval(deleteFiles)} onClose={() => setPendingPurgeTaskIds(null)} />}
       {notice && <div className={`task-toast ${notice.kind}`} role="status">{notice.message}</div>}

@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
 import { beforeEach, expect, it, vi } from 'vitest';
-import type { QueueTask, QueueTaskInput } from './lib/types';
+import type { AppUpdate, QueueTask, QueueTaskInput } from './lib/types';
 import { getThemeMode, setThemeMode } from './lib/theme';
 import { cloudCatalog } from './test/cloudCatalog';
 import { scanDownloadInputs } from './lib/api';
@@ -16,7 +16,7 @@ const state = vi.hoisted(() => ({
   moveToRecycle: vi.fn(), purgeTasks: vi.fn(), deleteTasks: vi.fn(), setTaskPrivacy: vi.fn(), clipboardWrite: vi.fn(), clipboardRead: vi.fn(),
   updateAiSettings: vi.fn(), listAiModels: vi.fn(), startDragging: vi.fn().mockResolvedValue(undefined),
   reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn(), getCompletedCloudAuthorization: vi.fn(),
-  getSettings: vi.fn(), configurePrivacy: vi.fn(), privacyVisibility: vi.fn(), windowSnapshot: vi.fn(),
+  getSettings: vi.fn(), updateSettings: vi.fn(), openNativeFile: vi.fn(), configurePrivacy: vi.fn(), privacyVisibility: vi.fn(), windowSnapshot: vi.fn(),
   updateCheck: vi.fn(), openExternalUrl: vi.fn(), cloudInvoke: vi.fn(),
   dragDropHandler: undefined as undefined | ((event: { payload: unknown }) => void),
   onDragDropEvent: vi.fn(), scaleFactor: vi.fn(), takeExternalLinks: vi.fn()
@@ -32,7 +32,7 @@ vi.mock('./lib/api', () => ({
   checkForAppUpdate: state.updateCheck, openExternalUrl: state.openExternalUrl,
   defaultSettings: { downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false } },
   getSettings: state.getSettings, configurePrivacyDownload: state.configurePrivacy,
-  updateSettings: vi.fn(), updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: state.openDirectory,
+  updateSettings: state.updateSettings, updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: state.openDirectory,
   moveTaskToRecycle: state.moveToRecycle, purgeRecycledTasks: state.purgeTasks, deleteTasks: state.deleteTasks, setTaskPrivacy: state.setTaskPrivacy, resolveDuplicateDownload: state.resolveDuplicate
 }));
 vi.mock('./lib/downloadEvents', async (importOriginal) => {
@@ -58,6 +58,7 @@ vi.mock('@tauri-apps/api/core', async (importOriginal) => ({
     ? state.windowSnapshot() : state.cloudInvoke(command, args),
 }));
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: state.clipboardWrite, readText: state.clipboardRead }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: state.openNativeFile }));
 vi.mock('@tauri-apps/api/window', async (importOriginal) => ({
   ...await importOriginal<typeof import('@tauri-apps/api/window')>(),
   getCurrentWindow: () => ({
@@ -116,6 +117,8 @@ beforeEach(() => {
   state.getCompletedCloudAuthorization.mockReset().mockResolvedValue(null);
   state.completeCloudAuthorization.mockReset();
   state.getSettings.mockReset();
+  state.updateSettings.mockReset().mockImplementation(async settings => settings);
+  state.openNativeFile.mockReset().mockResolvedValue(null);
   state.getSettings.mockResolvedValue({ downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false } });
   state.configurePrivacy.mockReset();
   state.privacyVisibility.mockReset();
@@ -139,6 +142,26 @@ beforeEach(() => {
     state.listeners.set(name, handler);
     return Promise.resolve(() => undefined);
   });
+});
+
+it('selects a video cookie file through the native picker only after a user click', async () => {
+  state.openNativeFile.mockResolvedValue('C:\\Cookies\\session.cookies');
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(within(screen.getByRole('navigation', { name: '主导航' })).getByRole('button', { name: '设置' }));
+  await user.click(screen.getByRole('tab', { name: '网络' }));
+  expect(state.openNativeFile).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('button', { name: '选择 Cookie 文件' }));
+
+  await waitFor(() => expect(state.openNativeFile).toHaveBeenCalledWith({
+    directory: false,
+    multiple: false,
+    defaultPath: undefined,
+    title: '选择 Cookie 文件',
+    filters: [{ name: 'Cookie 文本文件', extensions: ['txt'] }, { name: '所有文件', extensions: ['*'] }]
+  }));
+  await waitFor(() => expect(state.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ videoCookieFile: 'C:\\Cookies\\session.cookies' })));
+  expect(screen.getByRole('textbox', { name: 'Cookie 文件路径' })).toHaveValue('C:\\Cookies\\session.cookies');
 });
 
 it('shows privacy task controls immediately after enabling an existing privacy password', async () => {
@@ -217,23 +240,97 @@ it('anchors About at the bottom of the sidebar without the Beta footer', async (
 
 it('highlights a newer release and opens its official download page from About', async () => {
   const update = {
-    version: '0.2.0',
+    version: '0.3.1',
     notes: '新增版本更新提示，并优化隐私任务操作体验。',
-    downloadUrl: 'https://versadown.aigutta.com/download.html'
+    downloadUrl: 'https://versadown.aigutta.com/#download'
   };
   state.updateCheck.mockResolvedValue(update);
   const user = userEvent.setup();
   await act(async () => { render(<App />); });
 
   const navigation = screen.getByRole('navigation', { name: '主导航' });
-  await user.click(await within(navigation).findByRole('button', { name: '有新版本' }));
+  const about = within(navigation).getByRole('button', { name: '关于 有更新' });
+  expect(within(about).getByText('关于')).toBeVisible();
+  expect(within(about).getByText('有更新')).toBeVisible();
+  await user.click(about);
 
-  const updateLink = await screen.findByRole('button', { name: '下载新版本 0.2.0' });
-  expect(updateLink).toHaveTextContent('新版本发布：0.2.0');
-  expect(updateLink).toHaveTextContent(update.notes);
+  const updateLink = screen.getByRole('button', { name: '去官网下载' });
+  expect(screen.getByText('新版本发布：0.3.1')).toBeVisible();
+  expect(screen.getByText(update.notes)).toBeVisible();
   await user.click(updateLink);
 
   expect(state.openExternalUrl).toHaveBeenCalledWith(update.downloadUrl);
+  expect(within(about).getByText('有更新')).toBeVisible();
+  expect(state.updateCheck).toHaveBeenCalledOnce();
+});
+
+it('checks at startup without blocking tasks and allows a fresh manual check', async () => {
+  const startup = deferred<AppUpdate | null>();
+  const manual = deferred<AppUpdate | null>();
+  state.updateCheck.mockReturnValueOnce(startup.promise).mockReturnValueOnce(manual.promise);
+  state.list.mockResolvedValue([oldTask]);
+  const user = userEvent.setup();
+  render(<App />);
+  expect(await screen.findByText('archive.iso')).toBeVisible();
+  expect(state.updateCheck).toHaveBeenCalledOnce();
+  await user.click(screen.getByRole('button', { name: '关于' }));
+  const check = screen.getByRole('button', { name: '检查更新' });
+  expect(check).toBeDisabled();
+  await user.click(check);
+  expect(state.updateCheck).toHaveBeenCalledOnce();
+
+  await act(async () => { startup.resolve(null); });
+  expect(screen.getByText('当前没有可用更新。')).toBeVisible();
+  await user.click(check);
+  expect(state.updateCheck).toHaveBeenCalledTimes(2);
+  expect(check).toBeDisabled();
+  await act(async () => { manual.resolve({ version: '0.3.1', notes: '', downloadUrl: 'https://versadown.aigutta.com/#download' }); });
+  expect(screen.getByText('新版本发布：0.3.1')).toBeVisible();
+  expect(screen.queryByText('当前没有可用更新。')).not.toBeInTheDocument();
+});
+
+it('keeps startup failures quiet and recovers through a manual check', async () => {
+  state.updateCheck.mockRejectedValueOnce(new Error('Offline')).mockResolvedValueOnce(null);
+  const user = userEvent.setup();
+  await act(async () => { render(<App />); });
+  expect(screen.queryByText('暂时无法检查更新，请稍后重试。')).not.toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '关于' }));
+  expect(screen.getByText('暂时无法检查更新，请稍后重试。')).toBeVisible();
+  expect(screen.queryByText('当前没有可用更新。')).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '检查更新' }));
+  expect(await screen.findByText('当前没有可用更新。')).toBeVisible();
+});
+
+it('preserves a known update after a failed check and clears it after a successful no-update result', async () => {
+  const update = { version: '0.3.1', notes: 'Update notes', downloadUrl: 'https://versadown.aigutta.com/#download' };
+  state.updateCheck.mockResolvedValueOnce(update).mockRejectedValueOnce(new Error('Offline')).mockResolvedValueOnce(null);
+  const user = userEvent.setup();
+  await act(async () => { render(<App />); });
+  await user.click(screen.getByRole('button', { name: '关于 有更新' }));
+  await user.click(screen.getByRole('button', { name: '检查更新' }));
+  expect(await screen.findByText('暂时无法检查更新，请稍后重试。')).toBeVisible();
+  expect(screen.getByText('新版本发布：0.3.1')).toBeVisible();
+  expect(screen.getByRole('button', { name: '关于 有更新' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '去官网下载' })).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '检查更新' }));
+  expect(await screen.findByText('当前没有可用更新。')).toBeVisible();
+  expect(screen.getByRole('button', { name: '关于' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: '去官网下载' })).not.toBeInTheDocument();
+});
+
+it('reports browser-opening failures and lets the user retry without clearing the update', async () => {
+  state.updateCheck.mockResolvedValue({ version: '0.3.1', notes: '', downloadUrl: 'https://versadown.aigutta.com/#download' });
+  state.openExternalUrl.mockRejectedValueOnce(new Error('Opener unavailable')).mockResolvedValueOnce(undefined);
+  const user = userEvent.setup();
+  await act(async () => { render(<App />); });
+  await user.click(screen.getByRole('button', { name: '关于 有更新' }));
+  await user.click(screen.getByRole('button', { name: '去官网下载' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent(t('about.openUpdateFailed'));
+  expect(screen.getByRole('button', { name: '关于 有更新' })).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '去官网下载' }));
+  await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
+  expect(state.openExternalUrl).toHaveBeenCalledTimes(2);
 });
 
 it('selects WebView2 caption regions without also registering Tauri JavaScript drag regions', async () => {
@@ -1821,6 +1918,26 @@ it('opens the normal new-download dialog from the floating-ball menu command', a
   expect(state.clipboardRead).toHaveBeenCalledOnce();
 });
 
+it('passes an explicit ordinary webpage choice from the batch dialog to the API', async () => {
+  const input = 'https://example.test/watch.html';
+  const user = userEvent.setup();
+  state.clipboardRead.mockResolvedValue(input);
+  vi.mocked(scanDownloadInputs).mockResolvedValueOnce([{ input, valid: true, kind: 'direct', canProbeVideo: true }]);
+  state.parse.mockRejectedValueOnce(new Error('没有找到视频')).mockResolvedValueOnce({ confirmation: {
+    taskId: 'ordinary-page', title: 'watch.html', requiresConfirmation: true, resources: [], processing: [],
+  } });
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-command')).toBeDefined());
+  act(() => { state.listeners.get('launcher-command')?.({ payload: 'new-download' }); });
+  const dialog = within(await screen.findByRole('dialog', { name: t('download.new') }));
+  expect(await dialog.findByText('没有找到视频')).toBeVisible();
+  expect(state.parse).toHaveBeenNthCalledWith(1, input, undefined, true, true);
+  await user.click(dialog.getByRole('button', { name: '改为普通下载' }));
+  expect(await dialog.findByText('watch.html')).toBeVisible();
+  expect(state.parse).toHaveBeenNthCalledWith(2, input, undefined, true, false);
+  expect(state.confirm).not.toHaveBeenCalled();
+});
+
 it('parses a clipboard link from the floating-ball menu and waits for task confirmation', async () => {
   const clipboard = '分享地址：https://example.test/archive.zip';
   const link = 'https://example.test/archive.zip';
@@ -1837,7 +1954,7 @@ it('parses a clipboard link from the floating-ball menu and waits for task confi
 
   const dialog = await screen.findByRole('dialog', { name: t('download.new') });
   expect(await within(dialog).findByText('archive.zip')).toBeVisible();
-  expect(scanDownloadInputs).toHaveBeenCalledWith(clipboard);
+  expect(scanDownloadInputs).toHaveBeenCalledWith(clipboard, expect.any(Function));
   expect(state.parse).toHaveBeenCalledWith(link, undefined, true);
   expect(within(dialog).getByRole('button', { name: t('download.newTask') })).toBeVisible();
   expect(state.confirm).not.toHaveBeenCalled();
@@ -1866,7 +1983,7 @@ it('opens the normal new-download dialog with an accepted floating-ball drop', a
   });
 
   expect(screen.getByRole('dialog', { name: t('download.new') })).toBeVisible();
-  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith('magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'));
+  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith('magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567', expect.any(Function)));
 });
 
 it('opens a new task with the links that launched the app from a browser', async () => {
@@ -1875,7 +1992,7 @@ it('opens a new task with the links that launched the app from a browser', async
   render(<App />);
 
   expect(await screen.findByRole('dialog', { name: t('download.new') })).toBeVisible();
-  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith(links.join('\n')));
+  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith(links.join('\n'), expect.any(Function)));
   expect(state.confirm).not.toHaveBeenCalled();
 });
 
@@ -1889,7 +2006,7 @@ it('opens a new task when a browser hands a link to the running app', async () =
   act(() => { state.listeners.get('external-links-available')?.({ payload: null }); });
 
   expect(await screen.findByRole('dialog', { name: t('download.new') })).toBeVisible();
-  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith(link));
+  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith(link, expect.any(Function)));
 });
 
 it('switches the manager to all tasks when the launcher is double-clicked', async () => {

@@ -537,6 +537,56 @@ mod tests {
     }
 
     #[test]
+    fn xunlei_share_19327_inspects_and_resolves_without_changing_personal_session() {
+        for auth_method in [CloudAuthMethod::Web, CloudAuthMethod::Password] {
+            let credentials = credentials();
+            let mut session: XunleiSession =
+                serde_json::from_slice(&credentials.load("xunlei").unwrap().unwrap()).unwrap();
+            session.profile.client_version = "1.93.27".into();
+            session.profile.user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)".into();
+            session.auth_method = auth_method;
+            let original = serde_json::to_vec(&session).unwrap();
+            credentials.save("xunlei", &original).unwrap();
+            let http = Http::new(vec![
+                cap(),
+                pass(),
+                json!({"share_status":"OK","files":[{"id":"f1","kind":"drive#file","name":"file.txt","size":"7"}]}),
+                cap(),
+                json!({"share_status":"OK","file_info":{"id":"f1","kind":"drive#file","web_content_link":"https://cdn.example/original"}}),
+            ]);
+            let adapter = provider_share_adapter(CloudProvider::Xunlei, &credentials, &http).unwrap();
+            let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
+                panic!("the current official web profile must inspect shares")
+            };
+            assert_eq!(plan.entries.len(), 1);
+            assert_eq!(plan.entries[0].name, "file.txt");
+            assert_eq!(credentials.load("xunlei").unwrap().unwrap(), original);
+            let ShareResolution::Direct(direct) = adapter.resolve(&entry(plan)).unwrap() else {
+                panic!("the inspected share must resolve with the current official web profile")
+            };
+            assert_eq!(direct.url, "https://cdn.example/original");
+            assert!(direct.headers.contains(&(
+                "User-Agent".into(),
+                session.profile.user_agent.clone(),
+            )));
+            assert_eq!(credentials.load("xunlei").unwrap().unwrap(), original);
+            let requests = http.requests.lock().unwrap();
+            assert_eq!(requests.len(), 5);
+            for index in [0, 3] {
+                assert!(requests[index].url.ends_with("/v1/shield/captcha/init"));
+                let body: Value =
+                    serde_json::from_str(requests[index].body.as_deref().unwrap()).unwrap();
+                assert_eq!(body["action"], "GET:/drive/v1/share");
+                assert_eq!(body["captcha_token"], "");
+                assert_eq!(body["meta"]["client_version"], "1.93.27");
+                assert_eq!(body["meta"]["package_name"], WEB_PACKAGE);
+                assert_eq!(body["meta"]["user_id"], "user");
+            }
+            assert!(requests[4].url.contains("pass_code_token=fresh-pass"));
+        }
+    }
+
+    #[test]
     fn xunlei_share_direct_reuses_the_inspected_pass_token() {
         let credentials = credentials();
         let before = credentials.load("xunlei").unwrap();
@@ -1876,6 +1926,19 @@ const WEB_SIGNATURE_SALTS_19324: [&str; 12] = [
     "zWH1xTadmtNTwNq",
     "WDZ5DOCCBaLSjhtSniGaaGerOs+xx56d",
 ];
+// Official pan.xunlei.com 1.93.27, verified 2026-11-12 against
+// utils-initial.1004aab905b24bdff710.js, module 19 (code-res),
+// pubr4t5YvDSgoNextgrrrqGdWSmfiobH7HW. These are its eight MD5 rounds.
+const WEB_SIGNATURE_SALTS_19327: [&str; 8] = [
+    "OTd",
+    "dpa5yu9eZozljPAxdoifKTMmIB3B7w4zeeIlOkV7O6nvTqmoUQ",
+    "Zsr/gMYbIXlesd1hgPRse",
+    "fv3z67ucieYJyQ/O1GkUO6/f7Z70F4akQI0/+3NhRJiZ",
+    "9",
+    "Mz40bQQFFdwomZ771jTbjJQRFK2oBYW1l2QG3YBImunEV1w9O3rtzt23wydwlfWSU",
+    "3oneILxV1DnwTfcZ8ADsAznWogxfAMCfr3zZxzf6ydTNDfUH7Nbqt8M",
+    "HYCilAL9kGJN",
+];
 /// Non-secret identity values captured from the official browser/QR flow.
 /// They are retained because Xunlei binds refresh and drive calls to that
 /// profile; callers must never fabricate a replacement profile.
@@ -1961,6 +2024,7 @@ impl XunleiClientProfile {
             self.client_id, self.client_version, WEB_PACKAGE, self.device_id, timestamp
         );
         let salts: &[&str] = match self.client_version.as_str() {
+            "1.93.27" => &WEB_SIGNATURE_SALTS_19327,
             "1.93.24" => &WEB_SIGNATURE_SALTS_19324,
             "1.93.22" => &WEB_SIGNATURE_SALTS_19322,
             "1.93.6" => &WEB_SIGNATURE_SALTS_1936,
@@ -1986,7 +2050,7 @@ impl XunleiClientProfile {
 
     fn supports_web_signature(&self) -> bool {
         self.is_modern_web()
-            && matches!(self.client_version.as_str(), WEB_VERSION_CODE | "1.93.6" | "1.93.22" | "1.93.24")
+            && matches!(self.client_version.as_str(), WEB_VERSION_CODE | "1.93.6" | "1.93.22" | "1.93.24" | "1.93.27")
             && !self.device_id.is_empty()
     }
     /// Headers accepted by the drive APIs.  The official browser does not

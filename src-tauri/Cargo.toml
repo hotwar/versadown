@@ -1,6 +1,6 @@
 [package]
 name = "versadown"
-version = "0.2.13"
+version = "0.3.1"
 description = "Local-first universal download manager"
 authors = ["VersaDown Build"]
 edition = "2021"
@@ -70,6 +70,9 @@ libc = "0.2"
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 gtk = "0.18"
 webkit2gtk = "2.0.2"
+# Already pulled in by keyring's Secret Service store; used directly to ask
+# whether our items are locked without triggering an unlock prompt.
+zbus = "5"
 
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38.2"
