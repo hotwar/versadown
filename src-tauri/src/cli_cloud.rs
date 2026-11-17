@@ -190,12 +190,18 @@ async fn perform(app:&AppHandle,plan:&CloudPlan,dto:&mut CloudOperationDto)->Cod
                     if current.status=="running" {current.completed_bytes=done.saturating_add(event.uploaded_bytes).min(current.total_bytes.unwrap_or(u64::MAX));let _=progress_app.state::<AppState>().store.update_agent_cloud(&current,&["running"]);}
                 }
             });
-            let result=crate::cloud::commands::upload_agent_file(app.clone(),plan.provider,plan.account_id.clone(),chain.to_vec(),parent.into(),file.path.clone(),dto.id.clone(),progress).await;
+            let result=crate::cloud::commands::upload_agent_file(app.clone(),plan.provider,plan.account_id.clone(),chain.to_vec(),parent.into(),file.clone(),dto.id.clone(),progress).await;
             match result {
                 Ok(uploaded)=>{dto.files.push(output_file(app,plan,uploaded).await.map_err(|_|"CLOUD_RESULT_UNCERTAIN")?);dto.completed_bytes=dto.completed_bytes.saturating_add(file.size);},
                 Err(e)=>{
-                    if crate::cloud::is_upload_cancelled(&e){dto.status="cancelled".into();break;}
-                    let code=cloud_code(e);dto.failures.push(CloudItemErrorDto{index,name:file.name.clone(),error:ApiError::new(code,"en")});
+                    use crate::cloud::commands::AgentUploadError;
+                    let code=match e {
+                        AgentUploadError::Provider(error) if crate::cloud::is_upload_cancelled(&error)=>{dto.status="cancelled".into();break;},
+                        AgentUploadError::Provider(error)=>cloud_code(error),
+                        AgentUploadError::ResultUncertain=>"CLOUD_RESULT_UNCERTAIN",
+                        AgentUploadError::SourceChanged=>"SOURCE_CHANGED",
+                    };
+                    dto.failures.push(CloudItemErrorDto{index,name:file.name.clone(),error:ApiError::new(code,"en")});
                     if matches!(code,"CLOUD_RESULT_UNCERTAIN"|"ACTION_FAILED"){dto.status="needs_review".into();break;}
                 }
             }

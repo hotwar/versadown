@@ -534,7 +534,12 @@ impl AuthSupervisor {
         let revision = snapshot.revision;
         check()?;
         let result = work(&snapshot);
-        check()?;
+        if let Err(stopped) = check() {
+            // Once a mutation returns, cancellation cannot undo its provider
+            // result. Keep known success (and the original failure evidence),
+            // but do not persist its private snapshot or enter recovery.
+            return if kind == SessionWorkKind::Mutation { result } else { Err(stopped) };
+        }
         let revision = match self.persist_snapshot(store, provider, revision, &snapshot, &check) {
             Ok(revision) => revision,
             Err(CloudError::Storage) => {
@@ -544,6 +549,10 @@ impl AuthSupervisor {
                 // because saving its rotated credentials failed locally.
                 return result;
             }
+            // Cancellation may arrive while waiting for the provider lock in
+            // persist_snapshot. It still must not erase an already completed
+            // mutation or turn a remote transport failure into plain cancel.
+            Err(_) if kind == SessionWorkKind::Mutation => return result,
             Err(error) => return Err(error),
         };
         if let Some(ticket) = continuation.as_mut() {
@@ -887,3 +896,7 @@ pub fn session_expiry(
         .and_then(|v| v.get("expires_at").and_then(|v| v.as_i64()))
         .filter(|expiry| *expiry > 0))
 }
+
+#[cfg(test)]
+#[path = "auth_supervisor_cancel_tests.rs"]
+mod cancellation_tests;

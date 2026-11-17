@@ -1,5 +1,6 @@
 use super::*;
 use crate::cloud::upload::{report_upload_progress, UploadProgressTracker};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::ipc::Channel;
 
 async fn run_upload_session<F, Fut>(
@@ -98,6 +99,66 @@ fn ensure_agent_upload_name_available(listing: &CloudDirectory, path: &Path) -> 
     Ok(())
 }
 
+#[derive(Debug)]
+pub(crate) enum AgentUploadError {
+    Provider(QuarkError),
+    ResultUncertain,
+    SourceChanged,
+}
+
+impl From<QuarkError> for AgentUploadError {
+    fn from(error: QuarkError) -> Self {
+        if matches!(&error, QuarkError::InvalidInput(reason) if reason == "agent.error.sourceChanged") {
+            Self::SourceChanged
+        } else {
+            Self::Provider(error)
+        }
+    }
+}
+
+fn dispatch_agent_upload(
+    expected: &crate::cli_cloud::FileSnapshot,
+    approved: &Path,
+    entered_mutation: &AtomicBool,
+    upload: impl FnOnce() -> Result<CloudFile, QuarkError>,
+) -> Result<CloudFile, QuarkError> {
+    let changed = || QuarkError::InvalidInput("agent.error.sourceChanged".into());
+    let metadata = std::fs::symlink_metadata(approved).map_err(|_| changed())?;
+    let modified = metadata.modified().map_err(|_| changed())?
+        .duration_since(std::time::UNIX_EPOCH).map_err(|_| changed())?.as_nanos();
+    if approved != expected.path || !metadata.is_file() || metadata.file_type().is_symlink()
+        || metadata.len() != expected.size || modified != expected.modified
+    {
+        return Err(changed());
+    }
+    // From here cancellation cannot prove that the provider created no file.
+    // The provider's UploadFileSnapshot guards hashing and transfer itself.
+    entered_mutation.store(true, Ordering::Release);
+    upload()
+}
+
+fn agent_upload_result(
+    result: Result<CloudUploadOutcome, QuarkError>,
+    entered_mutation: bool,
+) -> Result<CloudFile, AgentUploadError> {
+    let outcome = match result {
+        Err(error) if entered_mutation && crate::cloud::is_upload_cancelled(&error) => {
+            return Err(AgentUploadError::ResultUncertain);
+        }
+        Err(error) => return Err(error.into()),
+        Ok(outcome) => outcome,
+    };
+    if let Some(file) = outcome.uploaded.into_iter().next() {
+        // A late cancellation does not undo an authoritative provider result.
+        Ok(file)
+    } else if outcome.cancelled {
+        if entered_mutation { Err(AgentUploadError::ResultUncertain) }
+        else { Err(AgentUploadError::Provider(crate::cloud::upload_cancelled())) }
+    } else {
+        Err(AgentUploadError::Provider(QuarkError::InvalidResponse))
+    }
+}
+
 /// Single-file Agent uploads share progress/control, bandwidth and provider
 /// implementations with the desktop. Account validation and mutation use one
 /// credential snapshot, so an account change cannot redirect the write.
@@ -107,13 +168,15 @@ pub(crate) async fn upload_agent_file(
     account_id: String,
     directory_chain: Vec<String>,
     parent_id: String,
-    path: PathBuf,
+    expected_source: crate::cli_cloud::FileSnapshot,
     upload_id: String,
     on_progress: Arc<dyn Fn(CloudUploadProgress) + Send + Sync>,
-) -> Result<CloudFile, QuarkError> {
-    let source = agent_upload_access(&app, provider, &account_id, &directory_chain, &path)?;
+) -> Result<CloudFile, AgentUploadError> {
+    let source = agent_upload_access(&app, provider, &account_id, &directory_chain, &expected_source.path)?;
     let capacity_app = app.clone();
-    let outcome = run_upload_session_with_sink(provider, upload_id, move |event| on_progress(event),
+    let entered_mutation = Arc::new(AtomicBool::new(false));
+    let worker_entered_mutation = Arc::clone(&entered_mutation);
+    let result = run_upload_session_with_sink(provider, upload_id, move |event| on_progress(event),
         |tracker, control| async move {
             let runtime = app.state::<AppState>().runtime.clone();
             let lease = runtime.begin_cloud_upload().await;
@@ -127,28 +190,28 @@ pub(crate) async fn upload_agent_file(
                 let prepared = prepare_upload_input(provider, &approved, &upload_control, &tracker, 0)?;
                 let PreparedUpload::File(path) = prepared else { return Err(QuarkError::ProviderUnsupported); };
                 tracker.start_uploading();
-                let file = upload_file_with_progress(&upload_control, &path, || {
+                upload_control.wait_ready_blocking()?;
+                upload_control.start_file(&path);
+                let file = {
                     // All destination checks occur after any pause, within the
                     // same snapshot used for the subsequent provider mutation.
                     validate_agent_cloud_path(provider, &state.store, &http, &account_id, &directory_chain, &parent_id, true)?;
                     let listing = list_cloud_directory(provider, &state.store, &http, &parent_id)?;
                     ensure_agent_upload_name_available(&listing, &path)?;
-                    agent_upload_access(&access_app, provider, &account_id, &directory_chain, &path)?;
-                    ProviderRegistry::global().driver(provider, &state.store, &http).upload_no_replace(&http, &parent_id, &path)
-                })?;
+                    let approved = agent_upload_access(&access_app, provider, &account_id, &directory_chain, &path)?;
+                    dispatch_agent_upload(&expected_source, &approved, &worker_entered_mutation, || {
+                        ProviderRegistry::global().driver(provider, &state.store, &http).upload_no_replace(&http, &parent_id, &approved)
+                    })?
+                };
+                upload_control.complete_file(&path);
                 Ok(CloudUploadOutcome { uploaded: vec![file], failures: Vec::new(), cancelled: false })
             }, move || check_control.check()).await;
             lease.release().await;
             result
-        }).await?;
-    if let Some(file) = outcome.uploaded.into_iter().next() {
-        schedule_cloud_capacity_invalidation(capacity_app, provider, CloudCapacityChangeReason::Upload);
-        Ok(file)
-    } else if outcome.cancelled {
-        Err(crate::cloud::upload_cancelled())
-    } else {
-        Err(QuarkError::InvalidResponse)
-    }
+        }).await;
+    let file = agent_upload_result(result, entered_mutation.load(Ordering::Acquire))?;
+    schedule_cloud_capacity_invalidation(capacity_app, provider, CloudCapacityChangeReason::Upload);
+    Ok(file)
 }
 
 enum PreparedUpload {
@@ -912,6 +975,93 @@ impl CloudState {
 #[cfg(test)]
 mod directory_tests {
     use super::*;
+
+    fn agent_source(path: &Path) -> crate::cli_cloud::FileSnapshot {
+        let metadata = std::fs::metadata(path).unwrap();
+        crate::cli_cloud::FileSnapshot {
+            path: path.into(),
+            name: path.file_name().unwrap().to_string_lossy().into_owned(),
+            size: metadata.len(),
+            modified: metadata.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos(),
+        }
+    }
+
+    #[test]
+    fn agent_upload_late_cancel_preserves_a_known_remote_file() {
+        let uploaded = file("remote-created", "parent", "report.txt", CloudFileKind::File);
+        let result = agent_upload_result(Ok(CloudUploadOutcome {
+            uploaded: vec![uploaded], failures: Vec::new(), cancelled: true,
+        }), true).unwrap();
+        assert_eq!(result.id, "remote-created");
+    }
+
+    #[test]
+    fn agent_upload_cancel_after_mutation_is_uncertain_but_before_mutation_is_plain_cancel() {
+        let cancelled = || CloudUploadOutcome {
+            uploaded: Vec::new(), failures: Vec::new(), cancelled: true,
+        };
+        assert!(matches!(agent_upload_result(Ok(cancelled()), true), Err(AgentUploadError::ResultUncertain)));
+        assert!(matches!(agent_upload_result(Err(crate::cloud::upload_cancelled()), true), Err(AgentUploadError::ResultUncertain)));
+        assert!(matches!(agent_upload_result(Ok(cancelled()), false), Err(AgentUploadError::Provider(error)) if crate::cloud::is_upload_cancelled(&error)));
+    }
+
+    #[test]
+    fn agent_upload_does_not_mask_lost_commit_responses_as_cancellation() {
+        let result = agent_upload_result(Err(QuarkError::Transport("commit response lost".into())), true);
+        assert!(matches!(result, Err(AgentUploadError::Provider(QuarkError::Transport(message))) if message == "commit response lost"));
+    }
+
+    #[test]
+    fn agent_upload_rechecks_the_original_source_after_preparing_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("report.txt");
+        std::fs::write(&path, b"approved contents").unwrap();
+        let expected = agent_source(&path);
+        let control = UploadControl::default();
+        let tracker = UploadProgressTracker::new(CloudProvider::Quark);
+        let prepared = prepare_upload_input(CloudProvider::Quark, &path, &control, &tracker, 0).unwrap();
+        let PreparedUpload::File(approved) = prepared else { panic!("expected a file"); };
+        // Simulate a local edit while awaiting provider metadata/authentication.
+        std::fs::write(&path, b"contents changed during the wait").unwrap();
+        let entered = AtomicBool::new(false);
+        let result = dispatch_agent_upload(&expected, &approved, &entered, || {
+            panic!("changed source must never enter provider mutation")
+        });
+        assert!(matches!(result.map_err(AgentUploadError::from), Err(AgentUploadError::SourceChanged)));
+        assert!(!entered.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn agent_upload_rechecks_canonical_identity_and_modified_time_even_when_length_matches() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("report.txt");
+        let other = directory.path().join("replacement.txt");
+        std::fs::write(&path, b"same length").unwrap();
+        std::fs::write(&other, b"same length").unwrap();
+        let expected = agent_source(&path);
+        let entered = AtomicBool::new(false);
+        let result = dispatch_agent_upload(&expected, &other, &entered, || panic!("wrong canonical path"));
+        assert!(matches!(result.map_err(AgentUploadError::from), Err(AgentUploadError::SourceChanged)));
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap() + std::time::Duration::from_secs(2);
+        std::fs::File::options().write(true).open(&path).unwrap().set_modified(modified).unwrap();
+        let result = dispatch_agent_upload(&expected, &path, &entered, || panic!("modified source"));
+        assert!(matches!(result.map_err(AgentUploadError::from), Err(AgentUploadError::SourceChanged)));
+        assert!(!entered.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn agent_upload_unchanged_source_enters_provider_once_and_preserves_its_result() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("report.txt");
+        std::fs::write(&path, b"approved").unwrap();
+        let expected = agent_source(&path);
+        let entered = AtomicBool::new(false);
+        let result = dispatch_agent_upload(&expected, &path, &entered, || {
+            assert!(entered.load(Ordering::Acquire));
+            Ok(file("remote-created", "parent", "report.txt", CloudFileKind::File))
+        }).unwrap();
+        assert_eq!(result.id, "remote-created");
+    }
 
     #[tokio::test]
     async fn agent_upload_sink_uses_the_shared_control_registration_and_terminal_progress() {
