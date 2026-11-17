@@ -577,7 +577,16 @@ fn upload_does_not_lock_account(block_init: bool) {
         };
         upload_state.upload_pikpak_file(&http, "0", &upload_path)
     });
-    started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    match started_rx.recv_timeout(Duration::from_secs(3)) {
+        Ok(()) => (),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let result = upload.join().expect("upload thread panicked before initialization");
+            panic!("upload returned before signaling initialization: {result:?}");
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("upload did not signal initialization within three seconds");
+        }
+    }
     let (done_tx, done_rx) = mpsc::channel();
     let manage_state = state.clone();
     let manage = std::thread::spawn(move || {
