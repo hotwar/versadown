@@ -9,6 +9,9 @@ pub mod cloud;
 mod cloud_directory_events;
 mod commands;
 mod cli_protocol;
+mod cli_cloud_protocol;
+mod cli_cloud;
+mod cli_cloud_auth;
 mod cli_service;
 mod cli_host;
 mod cli_dispatch;
@@ -368,6 +371,7 @@ pub fn run() -> i32 {
                 commands::purge_tianyi_local_state(&store, &cloud).map_err(std::io::Error::other)?;
             }
             store.recover_agent_resource_intents()?;
+            store.recover_agent_cloud().map_err(std::io::Error::other)?;
             store.recover_video_downloads()?;
             store.recover_interrupted_cloud_directories()?;
             // aria2 persists the short-lived direct URL it received from a
@@ -519,6 +523,8 @@ pub fn run() -> i32 {
             );
             app.manage(cli_dispatcher);
             cli_resources::start(app.handle().clone());
+            cli_cloud_auth::register(app.handle());
+            cli_cloud::start(app.handle().clone());
             if let Err(error) = cli_host::start(app.handle(), &data_dir) {
                 if startup_options.agent_host {
                     return Err(error.into());

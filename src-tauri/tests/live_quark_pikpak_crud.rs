@@ -169,9 +169,7 @@ fn upload(
     parent: &str,
     path: &Path,
 ) -> LiveResult<CloudFile> {
-    let mut driver = ProviderRegistry::global().driver(provider, &state.store, http);
-    driver
-        .upload(state, http, parent, path)
+    state.upload_file(provider, http, parent, path)
         .map_err(|error| failure(format!("{} upload: {}", provider.key(), error_kind(&error))))
 }
 

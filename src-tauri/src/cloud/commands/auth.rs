@@ -387,6 +387,7 @@ pub async fn cloud_begin_authorization(
         .await?;
     let label = format!("cloud-auth-{}", provider.key());
     if let Some(window) = app.get_webview_window(&label) {
+        crate::cli_cloud_auth::authorization_window_opened(&app, provider, false);
         window
             .show()
             .map_err(|_| QuarkError::WebAuthorizationRequired)?;
@@ -441,9 +442,18 @@ pub async fn cloud_begin_authorization(
         {
             builder = builder.initialization_script(script);
         }
-        builder
+        let window = builder
             .build()
             .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+        let generation = crate::cli_cloud_auth::authorization_window_opened(&app, provider, true);
+        if let Some(generation) = generation.clone() {
+            let close_app = app.clone();
+            window.on_window_event(move |event| {
+                if matches!(event, tauri::WindowEvent::Destroyed) {
+                    crate::cli_cloud_auth::authorization_window_closed(&close_app, provider, &generation);
+                }
+            });
+        }
         // Xunlei's current SSO can establish a logged-in SPA state without a
         // top-level navigation after this first load. A page-load-only attempt
         // then misses the new credentials and leaves an already logged-in
@@ -452,14 +462,20 @@ pub async fn cloud_begin_authorization(
         // root-directory validation before the window is closed.
         let completion_app = app.clone();
         tauri::async_runtime::spawn(async move {
-            for _ in 0..180 {
+            for _ in 0..300 {
                 if completion_app
                     .get_webview_window(&format!("cloud-auth-{}", provider.key()))
                     .is_none()
                 {
                     return;
                 }
-                if cloud_complete_authorization(completion_app.clone(), provider)
+                if generation.as_deref().is_some_and(|expected| {
+                    crate::cli_cloud_auth::authorization_window_generation(&completion_app, provider)
+                        .as_deref() != Some(expected)
+                }) {
+                    return;
+                }
+                if complete_authorization_for_window(completion_app.clone(), provider, generation.clone())
                     .await
                     .is_ok()
                 {
@@ -859,6 +875,14 @@ pub async fn cloud_complete_authorization(
     app: AppHandle,
     provider: CloudProvider,
 ) -> Result<CloudAccount, QuarkError> {
+    complete_authorization_for_window(app, provider, None).await
+}
+
+async fn complete_authorization_for_window(
+    app: AppHandle,
+    provider: CloudProvider,
+    expected_generation: Option<String>,
+) -> Result<CloudAccount, QuarkError> {
     require_connected_provider(provider)?;
     let cloud = app
         .try_state::<Arc<CloudState>>()
@@ -867,6 +891,10 @@ pub async fn cloud_complete_authorization(
         .authorization_completion
         .acquire(provider.key())
         .await?;
+    let generation = crate::cli_cloud_auth::authorization_window_generation(&app, provider);
+    if expected_generation.as_ref().is_some_and(|expected| generation.as_ref() != Some(expected)) {
+        return Err(QuarkError::AuthorizationPending);
+    }
     if let Some(account) = cloud.completed_authorization(provider)? {
         return Ok(account);
     }
@@ -920,6 +948,9 @@ pub async fn cloud_complete_authorization(
             set_baidu_browser_profile_username(&state.store, profile_username.as_deref())?;
             set_browser_password_login_preferred(&state.store, provider, true)?;
         }
+        if let Some(generation) = &generation {
+            crate::cli_cloud_auth::authorization_window_completed(&publish_app, &account, generation);
+        }
         publish_authorization_completion(&publish_app, state, &account)?;
         Ok(account)
     })
@@ -928,6 +959,25 @@ pub async fn cloud_complete_authorization(
     // access the provider. Every queued failed task therefore resolves with
     // the new shared credentials, not a stale per-task snapshot.
     Ok(account)
+}
+
+/// Cancelling Agent authorization closes only that window generation. Existing
+/// credentials and unrelated/newly attached authorization requests are retained.
+pub(crate) async fn cloud_cancel_agent_authorization(
+    app: AppHandle,
+    provider: CloudProvider,
+    generation: &str,
+) -> Result<(), QuarkError> {
+    let cloud = app.try_state::<Arc<CloudState>>().ok_or(QuarkError::Storage)?;
+    let _completion = cloud.authorization_completion.acquire(provider.key()).await?;
+    if crate::cli_cloud_auth::authorization_window_can_close(&app, provider, generation) {
+        if let Some(window) = app.get_webview_window(&format!("cloud-auth-{}", provider.key())) {
+            window.close().map_err(|_| QuarkError::WebAuthorizationRequired)?;
+        } else {
+            crate::cli_cloud_auth::authorization_window_closed(&app, provider, generation);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn refresh_baidu_operation_verification_session(

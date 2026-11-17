@@ -328,6 +328,7 @@ fn validate_request(request: &Request) -> ApiResult<()> {
         || (request.command == "batch_add") != request.items.is_some()
         || (request.command == "prepare") != request.prepare.is_some()
         || (request.command == "confirm") != request.confirm.is_some()
+        || (request.command == "cloud") != request.cloud.is_some()
         || (request.command != "list" && (request.status.is_some() || request.query.is_some()
             || request.parent_id.is_some() || request.cursor.is_some() || request.limit.is_some()))
     {
@@ -350,6 +351,9 @@ fn validate_request(request: &Request) -> ApiResult<()> {
 
 pub(crate) async fn execute(app: AppHandle, request: Request) -> Response {
     let lang = request.lang.as_deref().unwrap_or("en");
+    if let Err(code)=validate_request(&request){return Response::failure(code,lang)}
+    if !crate::agent_access::is_enabled(&app.state::<AppState>()){return Response::failure("HOST_DISABLED",lang)}
+    if let Some(cloud)=&request.cloud{return crate::cli_cloud::execute(app.clone(),cloud,lang).await}
     match execute_inner(&app, &request).await {
         Ok(value) => Response::success(value),
         Err(code) => {
@@ -379,7 +383,7 @@ async fn execute_inner(app: &AppHandle, request: &Request) -> ApiResult<Value> {
             capabilities: CapabilitiesDto { new_download_protocols: vec!["http".into(), "https".into(), "ftp".into()],
                 prepared_resource_kinds: Some(["video", "cloud", "share", "torrent"].map(str::to_owned).to_vec()),
                 task_types: ["file", "cloud", "web_video", "directory", "magnet", "torrent", "ftp"].map(str::to_owned).to_vec(),
-                operations: ["health", "add", "batch_add", "prepare", "confirm", "list", "status", "pause", "resume", "cancel", "result"].map(str::to_owned).to_vec(),
+                operations: ["health", "add", "batch_add", "prepare", "confirm", "list", "status", "pause", "resume", "cancel", "result", "cloud"].map(str::to_owned).to_vec(),
                 private_tasks: false },
             limits: LimitsDto { list_default_limit: 50, list_max_limit: 100, poll_interval_ms: 1000,
                 max_response_bytes: 8 * 1024 * 1024, max_pending_tasks: 1000 },
@@ -450,14 +454,14 @@ mod tests {
         let mut files = Vec::new();
         visit_files(&root, &mut files);
         assert_eq!(files.len(), 1, "the second file has not been dispatched yet");
-        let child_policy = AgentAccessSettings { enabled: true, allowed_directories: vec![allowed_child.to_string_lossy().into_owned()] }.validated().unwrap();
+        let child_policy = AgentAccessSettings { enabled: true, allowed_directories: vec![allowed_child.to_string_lossy().into_owned()], ..Default::default() }.validated().unwrap();
         assert!(child_policy.authorize_file(Path::new(&files[0].path)).is_ok());
         let check = |policy: &AgentAccessSettings| authorized_outputs_with(&store, &root, |path, directory| {
             if directory { policy.authorize_directory(path).map(|_| ()) }
             else { policy.authorize_file(path).map(|_| ()) }
         });
         assert_eq!(check(&child_policy), Err("FORBIDDEN"));
-        let root_policy = AgentAccessSettings { enabled: true, allowed_directories: vec![directory.path().to_string_lossy().into_owned()] }.validated().unwrap();
+        let root_policy = AgentAccessSettings { enabled: true, allowed_directories: vec![directory.path().to_string_lossy().into_owned()], ..Default::default() }.validated().unwrap();
         assert_eq!(check(&root_policy), Ok(()));
     }
 

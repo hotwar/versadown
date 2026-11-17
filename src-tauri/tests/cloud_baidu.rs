@@ -1407,6 +1407,42 @@ fn baidu_uploads_a_local_file_then_commits_without_retaining_the_transfer_url() 
 }
 
 #[test]
+fn baidu_agent_upload_refuses_replacement_in_both_precreate_and_commit() {
+    let mut input = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+    input.write_all(b"agent file").unwrap();
+    let hash = format!("{:x}", md5::compute(b"agent file"));
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"result":{"bdstoken":"fresh-token"}}"#,
+        r#"{"errno":0,"return_type":1,"uploadid":"upload-1","block_list":[0]}"#,
+        r#"{"errno":0,"fs_id":7,"path":"/new.txt"}"#,
+    ]);
+    let upload = UploadRecordingHttp::sequence(&[&format!(r#"{{"md5":"{hash}"}}"#)]);
+    BaiduClient::new(BaiduSession::cookie("BDUSS=local"), &http)
+        .upload_file_no_replace("/", input.path(), &upload).unwrap();
+    let requests = http.requests();
+    for request in requests.iter().filter(|request| request.url.contains("/api/precreate") || request.url.contains("/api/create")) {
+        let body = request.body.as_deref().unwrap();
+        assert!(url::form_urlencoded::parse(body.as_bytes()).any(|(key, value)| key == "rtype" && value == "0"));
+    }
+    assert_eq!(requests.iter().filter(|request| request.url.contains("/api/precreate") || request.url.contains("/api/create")).count(), 2);
+}
+
+#[test]
+fn baidu_agent_upload_conflict_does_not_fall_back_to_overwrite_or_send_file_bytes() {
+    let mut input = tempfile::NamedTempFile::new().unwrap();
+    input.write_all(b"agent file").unwrap();
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"result":{"bdstoken":"fresh-token"}}"#,
+        r#"{"errno":-8,"errmsg":"file exists"}"#,
+    ]);
+    let upload = UploadRecordingHttp::sequence(&[]);
+    assert!(BaiduClient::new(BaiduSession::cookie("BDUSS=local"), &http)
+        .upload_file_no_replace("/", input.path(), &upload).is_err());
+    assert!(upload.requests().is_empty());
+    assert_eq!(http.requests().len(), 2);
+}
+
+#[test]
 fn baidu_upload_rejects_a_non_regular_file_before_starting_a_transfer() {
     let directory = tempfile::tempdir().unwrap();
     let http = RecordingHttp::sequence(&[]);

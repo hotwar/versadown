@@ -412,6 +412,21 @@ it('replaces file details with a sharing dialog that submits the selected files 
   expect(screen.queryByRole('menuitem', { name: '文件详情' })).not.toBeInTheDocument();
 });
 
+it('submits the explicit provider-generated pass-code policy shown for Xunlei', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake();
+  render(<CloudManager provider="xunlei" client={client} initialAccount={{ id: 'xl', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} />);
+  fireEvent.contextMenu(await screen.findByText('报告.pdf'));
+  await user.click(screen.getByRole('menuitem', { name: '分享' }));
+  const dialog = await screen.findByRole('dialog', { name: '创建分享链接' });
+  expect(within(dialog).queryByRole('textbox', { name: '提取码' })).not.toBeInTheDocument();
+  await user.selectOptions(within(dialog).getByRole('combobox', { name: '有效期' }), '7');
+  await user.click(within(dialog).getByRole('button', { name: '创建分享链接' }));
+  expect(client.createCloudShare).toHaveBeenCalledWith('xunlei', ['file-1'], {
+    name: '报告.pdf', generatePassCode: true, expiresInDays: 7,
+  });
+});
+
 it('uses a share-specific vertical dialog layout', async () => {
   const user = userEvent.setup();
   const client = createCloudFake();

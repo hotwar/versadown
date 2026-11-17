@@ -72,7 +72,7 @@ async fn call(State(host): State<Arc<Host>>, headers: HeaderMap, body: axum::bod
         let _permit = permit;
         let started = Instant::now();
         let command = match request.command.as_str() {
-            "health" | "add" | "batch_add" | "prepare" | "confirm" | "list" | "status" | "result" | "pause" | "resume" | "cancel" => request.command.clone(),
+            "health" | "add" | "batch_add" | "prepare" | "confirm" | "list" | "status" | "result" | "pause" | "resume" | "cancel" | "cloud" => request.command.clone(),
             _ => "invalid".into(),
         };
         let request_id = audit_request_id(request.request_id.as_deref()).map(str::to_owned);

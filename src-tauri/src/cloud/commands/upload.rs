@@ -12,6 +12,19 @@ where
     F: FnOnce(UploadProgressTracker, UploadControl) -> Fut,
     Fut: std::future::Future<Output = Result<CloudUploadOutcome, QuarkError>>,
 {
+    run_upload_session_with_sink(provider, upload_id, move |event| { let _ = on_progress.send(event); }, operation).await
+}
+
+async fn run_upload_session_with_sink<F, Fut>(
+    provider: CloudProvider,
+    upload_id: String,
+    on_progress: impl Fn(CloudUploadProgress),
+    operation: F,
+) -> Result<CloudUploadOutcome, QuarkError>
+where
+    F: FnOnce(UploadProgressTracker, UploadControl) -> Fut,
+    Fut: std::future::Future<Output = Result<CloudUploadOutcome, QuarkError>>,
+{
     let control = UploadControl::default();
     let _registration =
         crate::cloud::upload_registry().register(provider, &upload_id, control.clone())?;
@@ -19,9 +32,7 @@ where
     tracker.bind_session(upload_id, control.clone());
     report_upload_progress(
         tracker.clone(),
-        move |event| {
-            let _ = on_progress.send(event);
-        },
+        on_progress,
         async {
             let result = operation(tracker.clone(), control.clone()).await;
             let result = match result {
@@ -62,6 +73,82 @@ pub fn cloud_control_upload(
     action: String,
 ) -> Result<(), QuarkError> {
     crate::cloud::upload_registry().apply(provider, &upload_id, &action)
+}
+
+fn agent_upload_access(
+    app: &AppHandle, provider: CloudProvider, account_id: &str, chain: &[String], path: &Path,
+) -> Result<PathBuf, QuarkError> {
+    let state = app.state::<AppState>();
+    let policy = state.settings.lock().map_err(|_| QuarkError::Storage)?.agent_access.clone();
+    policy.require_cloud_grant(provider.key(), account_id, chain, "upload")
+        .map_err(|_| QuarkError::InvalidInput("agent.error.forbidden".into()))?;
+    let source = policy.authorize_upload_path(path)
+        .map_err(|_| QuarkError::InvalidInput("agent.error.forbidden".into()))?;
+    if source.is_dir() { return Err(QuarkError::ProviderUnsupported); }
+    policy.authorize_upload_file(&source)
+        .map_err(|_| QuarkError::InvalidInput("agent.error.forbidden".into()))
+}
+
+fn ensure_agent_upload_name_available(listing: &CloudDirectory, path: &Path) -> Result<(), QuarkError> {
+    let name = path.file_name().and_then(|name| name.to_str())
+        .ok_or_else(|| QuarkError::InvalidInput("agent.error.invalidArgument".into()))?;
+    if listing.items.iter().any(|file| file.name.eq_ignore_ascii_case(name)) {
+        return Err(QuarkError::InvalidInput("agent.error.fileConflict".into()));
+    }
+    Ok(())
+}
+
+/// Single-file Agent uploads share progress/control, bandwidth and provider
+/// implementations with the desktop. Account validation and mutation use one
+/// credential snapshot, so an account change cannot redirect the write.
+pub(crate) async fn upload_agent_file(
+    app: AppHandle,
+    provider: CloudProvider,
+    account_id: String,
+    directory_chain: Vec<String>,
+    parent_id: String,
+    path: PathBuf,
+    upload_id: String,
+    on_progress: Arc<dyn Fn(CloudUploadProgress) + Send + Sync>,
+) -> Result<CloudFile, QuarkError> {
+    let source = agent_upload_access(&app, provider, &account_id, &directory_chain, &path)?;
+    let capacity_app = app.clone();
+    let outcome = run_upload_session_with_sink(provider, upload_id, move |event| on_progress(event),
+        |tracker, control| async move {
+            let runtime = app.state::<AppState>().runtime.clone();
+            let lease = runtime.begin_cloud_upload().await;
+            let upload_control = control.with_progress(tracker.clone(), 0).with_rate_limiter(lease.limiter());
+            let check_control = upload_control.clone();
+            let access_app = app.clone();
+            let result = run_session_work_checked(app, provider, SessionWorkKind::Mutation, move |state, transport| {
+                upload_control.wait_ready_blocking()?;
+                let http = crate::cloud::http::ControlledUploadHttp { inner: transport, control: upload_control.clone() };
+                let approved = agent_upload_access(&access_app, provider, &account_id, &directory_chain, &source)?;
+                let prepared = prepare_upload_input(provider, &approved, &upload_control, &tracker, 0)?;
+                let PreparedUpload::File(path) = prepared else { return Err(QuarkError::ProviderUnsupported); };
+                tracker.start_uploading();
+                let file = upload_file_with_progress(&upload_control, &path, || {
+                    // All destination checks occur after any pause, within the
+                    // same snapshot used for the subsequent provider mutation.
+                    validate_agent_cloud_path(provider, &state.store, &http, &account_id, &directory_chain, &parent_id, true)?;
+                    let listing = list_cloud_directory(provider, &state.store, &http, &parent_id)?;
+                    ensure_agent_upload_name_available(&listing, &path)?;
+                    agent_upload_access(&access_app, provider, &account_id, &directory_chain, &path)?;
+                    ProviderRegistry::global().driver(provider, &state.store, &http).upload_no_replace(&http, &parent_id, &path)
+                })?;
+                Ok(CloudUploadOutcome { uploaded: vec![file], failures: Vec::new(), cancelled: false })
+            }, move || check_control.check()).await;
+            lease.release().await;
+            result
+        }).await?;
+    if let Some(file) = outcome.uploaded.into_iter().next() {
+        schedule_cloud_capacity_invalidation(capacity_app, provider, CloudCapacityChangeReason::Upload);
+        Ok(file)
+    } else if outcome.cancelled {
+        Err(crate::cloud::upload_cancelled())
+    } else {
+        Err(QuarkError::InvalidResponse)
+    }
 }
 
 enum PreparedUpload {
@@ -399,9 +486,7 @@ fn upload_directory_tree(
         create_directory,
         |remote_parent, source| {
             upload_file_with_progress(control, source, || {
-                ProviderRegistry::global()
-                    .driver(provider, &state.store, http)
-                    .upload(state, http, remote_parent, source)
+                state.upload_file(provider, http, remote_parent, source)
             })
         },
         |root_id| {
@@ -488,9 +573,7 @@ fn upload_selected_path(
             upload_directory_tree(state, &http, provider, parent_id, plan, &control)
         }
         PreparedUpload::File(path) => Ok(vec![upload_file_with_progress(&control, &path, || {
-            ProviderRegistry::global()
-                .driver(provider, &state.store, &http)
-                .upload(state, &http, parent_id, &path)
+            state.upload_file(provider, &http, parent_id, &path)
         })?]),
     }
 }
@@ -775,6 +858,19 @@ pub async fn cloud_upload_directory(
 }
 
 impl CloudState {
+    /// Own the mutation session once, then bind the driver to its snapshot.
+    pub fn upload_file(
+        &self,
+        provider: CloudProvider,
+        http: &(impl CloudHttpTransport + CloudUploadTransport),
+        parent: &str,
+        path: &Path,
+    ) -> Result<CloudFile, QuarkError> {
+        self.with_upload_session(provider, http, |store| {
+            ProviderRegistry::global().driver(provider, store, http).upload(http, parent, path)
+        })
+    }
+
     pub(crate) fn with_upload_session<T>(
         &self,
         provider: CloudProvider,
@@ -809,15 +905,49 @@ impl CloudState {
         parent: &str,
         path: &Path,
     ) -> Result<CloudFile, QuarkError> {
-        self.with_upload_session(CloudProvider::Pikpak, http, |store| {
-            PikPakClient::new(http, store).upload_file(parent, path)
-        })
+        self.upload_file(CloudProvider::Pikpak, http, parent, path)
     }
 }
 
 #[cfg(test)]
 mod directory_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn agent_upload_sink_uses_the_shared_control_registration_and_terminal_progress() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let callback_id = id.clone();
+        let events = Arc::new(Mutex::new(Vec::<CloudUploadProgress>::new()));
+        let received = events.clone();
+        let outcome = run_upload_session_with_sink(CloudProvider::Quark, id.clone(), move |event| {
+            if event.phase == "preparing" {
+                crate::cloud::upload_registry().apply(CloudProvider::Quark, &callback_id, "cancel").unwrap();
+            }
+            received.lock().unwrap().push(event);
+        }, |_, control| async move {
+            control.check()?;
+            panic!("cancelled uploads must not reach a provider mutation");
+        }).await.unwrap();
+        assert!(outcome.cancelled);
+        assert!(outcome.uploaded.is_empty());
+        let events = events.lock().unwrap();
+        assert_eq!(events.last().unwrap().phase, "cancelled");
+        assert!(events.iter().all(|event| event.upload_id == id));
+        assert!(crate::cloud::upload_registry().apply(CloudProvider::Quark, &id, "resume").is_err());
+    }
+
+    #[test]
+    fn agent_upload_rejects_existing_file_or_folder_names_before_mutation() {
+        for kind in [CloudFileKind::File, CloudFileKind::Folder] {
+            let listing = CloudDirectory { id: "approved".into(), items: vec![CloudFile {
+                id: "existing".into(), parent_id: "approved".into(), name: "REPORT.txt".into(),
+                kind, size: None, modified_at: None,
+            }] };
+            assert!(matches!(ensure_agent_upload_name_available(&listing, Path::new("report.txt")),
+                Err(QuarkError::InvalidInput(message)) if message == "agent.error.fileConflict"));
+            assert!(ensure_agent_upload_name_available(&listing, Path::new("new.txt")).is_ok());
+        }
+    }
 
     #[tokio::test]
     async fn upload_control_native_channel_returns_cancelled_with_successes_and_releases_id() {

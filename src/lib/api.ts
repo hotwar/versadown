@@ -313,7 +313,7 @@ export const defaultSettings: AppSettings = {
   deleteTransferredShareFilesAfterDownload: true,
   privacyDownloadEnabled: false,
   privacyPasswordConfigured: false,
-  agentAccess: { enabled: false, allowedDirectories: [] },
+  agentAccess: { enabled: false, allowedDirectories: [], uploadDirectories: [], cloudGrants: [] },
   cloudUploadLimit: 0,
   downloadStatusNotifications: true,
   associateDownloadLinks: true

@@ -134,13 +134,18 @@ impl TaskStore {
 
     /// Folder handles are opaque IDs from an unexpired, host-created preview.
     pub(crate) fn agent_resource_folder(&self, selection_id: &str, now: i64) -> ResultCode<ResourceTarget> {
+        let target=self.agent_resource_selection(selection_id,now)?;
+        if matches!(target,ResourceTarget::Cloud{folder:true,..}) {Ok(target)} else {Err("INVALID_ARGUMENT")}
+    }
+
+    pub(crate) fn agent_resource_selection(&self, selection_id: &str, now: i64) -> ResultCode<ResourceTarget> {
         let connection = storage(self.connection.lock())?;
         let mut query = storage(connection.prepare("SELECT plan_json FROM agent_resource_preparations WHERE expires_at>?1"))?;
         let rows = storage(query.query_map([now], |r| r.get::<_,String>(0)))?;
         for row in rows {
             let plan: ResourcePlan = storage(serde_json::from_str(&storage(row)?))?;
             for choice in plan.choices {
-                if choice.id == selection_id && matches!(&choice.target,ResourceTarget::Cloud { folder:true,.. }) {
+                if choice.id == selection_id {
                     return Ok(choice.target);
                 }
             }

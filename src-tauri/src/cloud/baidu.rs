@@ -2276,6 +2276,25 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         local_path: &Path,
         upload_http: &U,
     ) -> Result<CloudFile, QuarkError> {
+        self.upload_file_inner(parent, local_path, upload_http, false)
+    }
+
+    pub fn upload_file_no_replace<U: CloudUploadTransport>(
+        &self,
+        parent: &str,
+        local_path: &Path,
+        upload_http: &U,
+    ) -> Result<CloudFile, QuarkError> {
+        self.upload_file_inner(parent, local_path, upload_http, true)
+    }
+
+    fn upload_file_inner<U: CloudUploadTransport>(
+        &self,
+        parent: &str,
+        local_path: &Path,
+        upload_http: &U,
+        no_replace: bool,
+    ) -> Result<CloudFile, QuarkError> {
         let snapshot = super::UploadFileSnapshot::capture(local_path)?;
         let parent = parse_parent_reference(parent)?;
         let (name, size) = local_file_metadata(local_path)?;
@@ -2291,7 +2310,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
                 ("size", size.to_string()),
                 ("isdir", "0".into()),
                 ("autoinit", "1".into()),
-                ("rtype", "3".into()),
+                ("rtype", if no_replace { "0" } else { "3" }.into()),
                 ("block_list", json!(blocks).to_string()),
             ]),
         )?;
@@ -2328,16 +2347,20 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             validate_slice_response(&response, &blocks[part])?;
         }
         snapshot.validate()?;
-        let committed = self.web_form(
-            "/api/create",
-            &write_query(&token, "a=commit"),
-            form(&[
+        let mut commit = vec![
                 ("path", path),
                 ("size", size.to_string()),
                 ("isdir", "0".into()),
                 ("uploadid", upload_id),
                 ("block_list", json!(blocks).to_string()),
-            ]),
+        ];
+        // Keep the existing desktop policy, but never fall back to replacement
+        // when an Agent request races with another writer after preflight.
+        if no_replace { commit.push(("rtype", "0".into())); }
+        let committed = self.web_form(
+            "/api/create",
+            &write_query(&token, "a=commit"),
+            form(&commit),
         )?;
         upload_file_result(&committed, &parent, &name, size)
     }

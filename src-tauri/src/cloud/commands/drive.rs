@@ -185,7 +185,7 @@ fn read_agent_cloud_directory(
     Ok((account,list_cloud_directory(provider,credentials,http,parent)?))
 }
 
-fn validate_share_options(
+pub(crate) fn validate_share_options(
     provider: CloudProvider,
     options: &CloudShareOptions,
 ) -> Result<(), QuarkError> {
@@ -224,8 +224,79 @@ fn validate_share_options(
             ));
         }
     }
+    // Reject known provider policy mismatches before accepting an Agent write
+    // or entering a provider session. These reflect the existing drivers;
+    // never silently replace a custom/public policy with a generated code.
+    if !provider.is_enabled() {
+        return Err(QuarkError::ProviderUnsupported);
+    }
+    match provider {
+        CloudProvider::Quark | CloudProvider::Uc | CloudProvider::Aliyun
+            if options.generate_pass_code => return Err(QuarkError::ProviderUnsupported),
+        CloudProvider::Pikpak if options.pass_code.is_some() => return Err(QuarkError::ProviderUnsupported),
+        CloudProvider::Xunlei if options.pass_code.is_some() || !options.generate_pass_code => {
+            return Err(QuarkError::ProviderUnsupported);
+        }
+        _ => {}
+    }
+    if provider == CloudProvider::Uc && !matches!(options.expires_in_days, None | Some(1 | 7 | 30 | 60 | 180)) {
+        return Err(QuarkError::ProviderUnsupported);
+    }
     Ok(())
 }
+
+/// Recheck the host-created ancestry with the provider. A preview cannot grant
+/// access to a file/folder that has since moved outside its authorized root.
+pub(crate) fn validate_agent_cloud_path(
+    provider: CloudProvider, credentials: &impl CredentialStore, http: &impl CloudHttpTransport,
+    account_id: &str, chain: &[String], file_id: &str, folder: bool,
+) -> Result<(), QuarkError> {
+    validate_agent_cloud_chain_shape(chain)?;
+    let account=restore_account(provider,credentials,http)?;
+    validate_download_account(Some(&account.id),account_id)?;
+    validate_agent_cloud_path_with(chain, file_id, folder, |parent| {
+        list_cloud_directory(provider, credentials, http, parent)
+    })
+}
+
+fn validate_agent_cloud_chain_shape(chain: &[String]) -> Result<(), QuarkError> {
+    if chain.is_empty() || chain.len() > 64 {
+        return Err(QuarkError::InvalidInput("agent.error.forbidden".into()));
+    }
+    Ok(())
+}
+
+/// The ancestry is host-created, but must still match current provider listings.
+/// Names are presentation only: stable IDs and file kinds establish membership.
+fn validate_agent_cloud_path_with(
+    chain: &[String],
+    file_id: &str,
+    folder: bool,
+    mut list: impl FnMut(&str) -> Result<CloudDirectory, QuarkError>,
+) -> Result<(), QuarkError> {
+    validate_agent_cloud_chain_shape(chain)?;
+    for pair in chain.windows(2) {
+        let listing = list(&pair[0])?;
+        if !listing.items.iter().any(|file| file.id == pair[1] && file.kind == CloudFileKind::Folder) {
+            return Err(QuarkError::InvalidInput("agent.error.forbidden".into()));
+        }
+    }
+    let parent = chain.last().ok_or(QuarkError::Storage)?;
+    // Listing the root still validates that it is an accessible directory.
+    let listing = list(parent)?;
+    if parent == file_id && folder {
+        return Ok(());
+    }
+    if listing.items.iter().any(|file| file.id == file_id && (file.kind == CloudFileKind::Folder) == folder) {
+        Ok(())
+    } else {
+        Err(QuarkError::SourceFileMissing)
+    }
+}
+
+#[cfg(test)]
+#[path = "agent_path_tests.rs"]
+mod agent_path_tests;
 
 #[tauri::command]
 pub async fn cloud_create_share(
@@ -441,6 +512,50 @@ pub async fn cloud_restore(
 mod tests {
     use super::*;
     use crate::cloud::{auth_supervisor::AuthHealth, CloudAuthMethod, CredentialStore};
+
+    fn share_options(code: Option<&str>, generated: bool, days: Option<u16>) -> CloudShareOptions {
+        CloudShareOptions { name: "fixture-share".into(), pass_code: code.map(str::to_owned),
+            generate_pass_code: generated, expires_in_days: days }
+    }
+
+    #[test]
+    fn agent_share_options_reject_known_unsupported_provider_modes_before_network() {
+        for provider in [CloudProvider::Quark, CloudProvider::Uc, CloudProvider::Aliyun] {
+            assert!(matches!(validate_share_options(provider, &share_options(None, true, Some(7))),
+                Err(QuarkError::ProviderUnsupported)), "{provider:?}");
+            assert!(validate_share_options(provider, &share_options(Some("aB12"), false, Some(7))).is_ok(), "{provider:?}");
+        }
+        assert!(matches!(validate_share_options(CloudProvider::Pikpak, &share_options(Some("aB12"), false, Some(7))),
+            Err(QuarkError::ProviderUnsupported)));
+        for generated in [false, true] {
+            assert!(validate_share_options(CloudProvider::Pikpak, &share_options(None, generated, Some(7))).is_ok());
+        }
+        for options in [share_options(None, false, None), share_options(Some("aB12"), false, Some(7))] {
+            assert!(matches!(validate_share_options(CloudProvider::Xunlei, &options), Err(QuarkError::ProviderUnsupported)));
+        }
+        assert!(validate_share_options(CloudProvider::Xunlei, &share_options(None, true, Some(7))).is_ok());
+        assert!(validate_share_options(CloudProvider::Baidu, &share_options(Some("aB12"), false, Some(7))).is_ok());
+        assert!(validate_share_options(CloudProvider::Baidu, &share_options(None, true, Some(7))).is_ok());
+        assert!(matches!(validate_share_options(CloudProvider::Baidu, &share_options(None, false, None)), Err(QuarkError::InvalidInput(_))));
+    }
+
+    #[test]
+    fn agent_share_options_keep_uc_expiry_choices_and_reject_conflicting_pass_codes() {
+        for days in [None, Some(1), Some(7), Some(30), Some(60), Some(180)] {
+            assert!(validate_share_options(CloudProvider::Uc, &share_options(Some("aB12"), false, days)).is_ok());
+        }
+        for days in [2, 14, 90, 365] {
+            assert!(matches!(validate_share_options(CloudProvider::Uc, &share_options(Some("aB12"), false, Some(days))),
+                Err(QuarkError::ProviderUnsupported)));
+        }
+        assert!(matches!(validate_share_options(CloudProvider::Baidu, &share_options(Some("aB12"), true, Some(7))),
+            Err(QuarkError::InvalidInput(_))));
+        assert!(matches!(validate_share_options(CloudProvider::Quark, &share_options(Some("aB12"), false, Some(0))),
+            Err(QuarkError::InvalidInput(_))));
+        // Quark currently forwards expired_days together with its expiry type;
+        // do not infer a different undocumented provider mapping here.
+        assert!(validate_share_options(CloudProvider::Quark, &share_options(Some("aB12"), false, Some(30))).is_ok());
+    }
 
     #[test]
     fn agent_resource_cloud_prepare_is_read_only_and_keeps_owner_bound() {

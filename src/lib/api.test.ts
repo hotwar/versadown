@@ -26,7 +26,7 @@ it('translates resource recovery errors without exposing unknown backend details
 
 it('uses the dedicated Agent authorization command and translates safe backend errors', async () => {
   const { configureAgentAccess, defaultSettings } = await import('./api');
-  const settings = { enabled: true, allowedDirectories: ['C:\\Downloads'] };
+  const settings = { enabled: true, allowedDirectories: ['C:\\Downloads'], uploadDirectories: [], cloudGrants: [] };
   native.invoke.mockResolvedValueOnce({ ...defaultSettings, agentAccess: settings });
   await expect(configureAgentAccess(settings)).resolves.toMatchObject({ agentAccess: settings });
   expect(native.invoke).toHaveBeenCalledWith('configure_agent_access', { settings });
@@ -37,7 +37,7 @@ it('uses the dedicated Agent authorization command and translates safe backend e
 it('does not simulate a successful Agent grant in browser previews', async () => {
   const { configureAgentAccess } = await import('./api');
   Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
-  await expect(configureAgentAccess({ enabled: true, allowedDirectories: ['C:\\Downloads'] })).rejects.toThrow('桌面程序');
+  await expect(configureAgentAccess({ enabled: true, allowedDirectories: ['C:\\Downloads'], uploadDirectories: [], cloudGrants: [] })).rejects.toThrow('桌面程序');
   expect(native.invoke).not.toHaveBeenCalled();
 });
 

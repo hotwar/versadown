@@ -219,12 +219,11 @@ impl ProviderAuth for PikpakDriver<'_> {
 impl UploadOps for PikpakDriver<'_> {
     fn upload(
         &mut self,
-        s: &CloudState,
         upload_http: &dyn UploadHttp,
         parent_id: &str,
         path: &Path,
     ) -> Result<CloudFile, CloudError> {
         let h = UploadHttpRef(upload_http);
-        s.upload_pikpak_file(&h, &parent_id, &path)
+        PikPakClient::new(&h, &self.store).upload_file(parent_id, path)
     }
 }

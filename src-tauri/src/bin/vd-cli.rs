@@ -1,6 +1,8 @@
 //! Standalone console client: no database access and no download engine.
 #[path = "../cli_protocol.rs"]
 mod cli_protocol;
+#[path = "../cli_cloud_protocol.rs"]
+mod cli_cloud_protocol;
 #[path = "../cli_client.rs"]
 mod cli_client;
 #[path = "../cli_setup.rs"]
@@ -8,6 +10,7 @@ mod cli_setup;
 
 use cli_protocol::{BatchItemInput, Request, ResourceConfirmInput, ResourcePrepareInput, Response, PROTOCOL_VERSION};
 use cli_client::LocalClient;
+use cli_cloud_protocol::CloudRequest;
 use serde_json::json;
 use std::{path::PathBuf, process::ExitCode, time::Duration};
 
@@ -18,6 +21,7 @@ struct Options {
     lang: String,
     no_start: bool,
     input_file: Option<PathBuf>,
+    cloud_file_action: Option<String>,
 }
 
 fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, ()> {
@@ -28,6 +32,8 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, ()> {
     let mut timeout = None;
     let mut no_start = false;
     let mut input_file = None;
+    let mut cloud_file_action = None;
+    let mut provider = None;
     let mut lang = if std::env::var("LANG").unwrap_or_default().starts_with("zh") {
         "zh-CN".to_string()
     } else { "en".to_string() };
@@ -39,6 +45,12 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, ()> {
                 let value = words.next().ok_or(())?;
                 if value.is_empty() { return Err(()); }
                 input_file = Some(PathBuf::from(value));
+                continue;
+            }
+            "--provider" if provider.is_none() => {
+                let value = words.next().ok_or(())?;
+                if !bounded(&value, 32) { return Err(()); }
+                provider = Some(value);
                 continue;
             }
             "--help" | "-h" => { positional.push("help".into()); continue; }
@@ -83,6 +95,31 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, ()> {
     }
     let command = positional.first().map(String::as_str).unwrap_or("help");
     match command {
+        "cloud" => {
+            let action = positional.get(1).map(String::as_str).ok_or(())?;
+            let input = match action {
+                "accounts" if positional.len() == 2 && input_file.is_none() => {
+                    json!({"action":"accounts", "provider":provider})
+                }
+                "auth-begin" | "prepare" | "confirm" if positional.len() == 2 && input_file.is_some() => {
+                    cloud_file_action = Some(action.replace('-', "_"));
+                    serde_json::Value::Null
+                }
+                "auth-status" | "auth-cancel" if positional.len() == 3 && input_file.is_none() && bounded(&positional[2], 128) => {
+                    json!({"action":action.replace('-', "_"), "authorization_id":positional[2]})
+                }
+                "status" | "cancel" if positional.len() == 3 && input_file.is_none() && bounded(&positional[2], 128) => {
+                    json!({"action":action, "operation_id":positional[2]})
+                }
+                _ => return Err(()),
+            };
+            if action != "accounts" && provider.is_some() { return Err(()); }
+            if !input.is_null() {
+                let cloud: CloudRequest = serde_json::from_value(input).map_err(|_| ())?;
+                if !cli_cloud_protocol::valid_request(&cloud) { return Err(()); }
+                request.cloud = Some(cloud);
+            }
+        }
         "help" | "version" | "health" | "list" | "doctor" | "mcp-config" if positional.len() <= 1 => {}
         "batch-add" | "prepare" | "confirm" if positional.len() == 1 && input_file.is_some() => {}
         "status" | "pause" | "resume" | "cancel" | "wait" | "result" if positional.len() == 2 => {
@@ -99,7 +136,8 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, ()> {
         }
         _ => return Err(()),
     }
-    if !matches!(command, "batch-add" | "prepare" | "confirm") && input_file.is_some() { return Err(()); }
+    if !matches!(command, "batch-add" | "prepare" | "confirm" | "cloud") && input_file.is_some() { return Err(()); }
+    if command != "cloud" && provider.is_some() { return Err(()); }
     if command != "add" && (request.directory.is_some() || request.request_id.is_some()) { return Err(()); }
     if command != "list" && (request.status.is_some() || request.query.is_some() || request.parent_id.is_some() || request.cursor.is_some() || request.limit.is_some()) { return Err(()); }
     if let Some(status) = &request.status {
@@ -107,13 +145,13 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, ()> {
     }
     request.command = if command == "batch-add" { "batch_add" } else { command }.to_string();
     request.lang = Some(lang.clone());
-    Ok(Options { request, discovery, timeout: timeout.unwrap_or(Duration::from_secs(if command == "wait" {300} else {30})), lang, no_start, input_file })
+    Ok(Options { request, discovery, timeout: timeout.unwrap_or(Duration::from_secs(if command == "wait" {300} else {30})), lang, no_start, input_file, cloud_file_action })
 }
 
 fn help(lang: &str) -> Response {
     Response::success(json!({
         "description": cli_protocol::message("HELP", lang),
-        "commands": ["help", "version", "doctor", "mcp-config", "health", "add URL --directory PATH --request-id ID", "batch-add --file JSON_FILE", "prepare --file JSON_FILE", "confirm --file JSON_FILE", "list [--status STATUS] [--query TEXT] [--parent-id ID] [--cursor CURSOR] [--limit 1..100]", "status ID", "pause ID", "resume ID", "cancel ID", "wait ID [--timeout SECONDS]", "result ID"],
+        "commands": ["help", "version", "doctor", "mcp-config", "health", "add URL --directory PATH --request-id ID", "batch-add --file JSON_FILE", "prepare --file JSON_FILE", "confirm --file JSON_FILE", "list [--status STATUS] [--query TEXT] [--parent-id ID] [--cursor CURSOR] [--limit 1..100]", "status ID", "pause ID", "resume ID", "cancel ID", "wait ID [--timeout SECONDS]", "result ID", "cloud accounts [--provider PROVIDER]", "cloud auth-begin --file JSON_FILE", "cloud auth-status AUTHORIZATION_ID", "cloud auth-cancel AUTHORIZATION_ID", "cloud prepare --file JSON_FILE", "cloud confirm --file JSON_FILE", "cloud status OPERATION_ID", "cloud cancel OPERATION_ID"],
         "options": ["--json", "--lang en|zh-CN", "--discovery PATH", "--no-start", "--timeout SECONDS"],
         "protocol_version": PROTOCOL_VERSION,
         "agent_guide": cli_setup::agent_guide(lang)
@@ -147,7 +185,10 @@ async fn execute(options: &Options) -> Response {
     }
     let mut request = options.request.clone();
     if let Some(file) = &options.input_file {
-        if load_request_file(&mut request, file).await.is_err() {
+        let loaded = if let Some(action) = &options.cloud_file_action {
+            load_cloud_request_file(&mut request, action, file).await
+        } else { load_request_file(&mut request, file).await };
+        if loaded.is_err() {
             return Response::failure("INVALID_ARGUMENT", &options.lang);
         }
     }
@@ -224,6 +265,20 @@ async fn load_request_file(request: &mut Request, path: &std::path::Path) -> Res
         }
         _ => return Err(()),
     }
+    Ok(())
+}
+
+async fn load_cloud_request_file(request: &mut Request, action: &str, path: &std::path::Path) -> Result<(), ()> {
+    let bytes = read_input_file(path).await?;
+    let mut value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| ())?;
+    let object = value.as_object_mut().ok_or(())?;
+    // The selected command owns the action. A file cannot silently turn a
+    // preview or authorization request into a different operation.
+    if object.contains_key("action") { return Err(()); }
+    object.insert("action".into(), json!(action));
+    let cloud: CloudRequest = serde_json::from_value(value).map_err(|_| ())?;
+    if !cli_cloud_protocol::valid_request(&cloud) { return Err(()); }
+    request.cloud = Some(cloud);
     Ok(())
 }
 
@@ -318,6 +373,51 @@ mod tests {
         for url in ["ftp://name:secret@example.test/a", "https://example.test/a#fragment"] {
             assert!(options(&["add", url, "--directory", directory.to_str().unwrap(), "--request-id", "x"]).is_err());
         }
+    }
+
+    #[test]
+    fn cloud_parser_separates_authorization_queries_and_cloud_writes() {
+        let request = options(&["cloud", "accounts", "--provider", "quark"]).unwrap().request;
+        assert_eq!(request.command, "cloud");
+        assert!(matches!(request.cloud, Some(CloudRequest::Accounts { provider: Some(ref name) }) if name == "quark"));
+        for command in ["auth-begin", "prepare", "confirm"] {
+            let parsed = options(&["cloud", command, "--file", "请求.json"]).unwrap();
+            assert_eq!(parsed.cloud_file_action.as_deref(), Some(command.replace('-', "_").as_str()));
+        }
+        assert!(matches!(options(&["cloud", "auth-cancel", "auth-id"]).unwrap().request.cloud,
+            Some(CloudRequest::AuthCancel { authorization_id }) if authorization_id == "auth-id"));
+        assert!(matches!(options(&["cloud", "status", "operation-id"]).unwrap().request.cloud,
+            Some(CloudRequest::Status { operation_id }) if operation_id == "operation-id"));
+        for args in [
+            vec!["cloud"], vec!["cloud", "auth-status"], vec!["cloud", "accounts", "--file", "x.json"],
+            vec!["cloud", "prepare"], vec!["cloud", "cancel", "id", "extra"],
+            vec!["cloud", "auth-status", "id", "--provider", "quark"], vec!["health", "--provider", "quark"],
+        ] { assert!(options(&args).is_err(), "{args:?}"); }
+    }
+
+    #[tokio::test]
+    async fn cloud_files_cannot_change_action_or_supply_login_secrets() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("cloud.json");
+        let mut request = Request { command: "cloud".into(), ..Request::default() };
+        std::fs::write(&file, r#"{"provider":"quark"}"#).unwrap();
+        load_cloud_request_file(&mut request, "auth_begin", &file).await.unwrap();
+        assert!(matches!(request.cloud, Some(CloudRequest::AuthBegin { .. })));
+        for value in [
+            json!({"provider":"quark","password":"never-forward"}),
+            json!({"provider":"quark","cookie":"never-forward"}),
+            json!({"action":"confirm","provider":"quark"}), json!([]),
+        ] {
+            std::fs::write(&file, value.to_string()).unwrap();
+            assert!(load_cloud_request_file(&mut request, "auth_begin", &file).await.is_err());
+        }
+        std::fs::write(&file, json!({"input":{"operation":"create_share","selection_ids":["cloud-file"],
+            "name":"课程","expires_in_days":7,"generate_pass_code":true}}).to_string()).unwrap();
+        load_cloud_request_file(&mut request, "prepare", &file).await.unwrap();
+        assert!(matches!(request.cloud, Some(CloudRequest::Prepare { .. })));
+        std::fs::write(&file, json!({"input":{"operation":"create_share","selection_ids":["cloud-file"],
+            "name":"课程","expires_in_days":366,"generate_pass_code":true}}).to_string()).unwrap();
+        assert!(load_cloud_request_file(&mut request, "prepare", &file).await.is_err());
     }
 
     #[tokio::test]

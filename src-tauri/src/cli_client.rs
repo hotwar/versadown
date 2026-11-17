@@ -1,5 +1,6 @@
 //! Shared local transport for CLI and MCP. Never opens the task database.
 use crate::cli_protocol::{self, ApiError, BatchAddDto, Discovery, HealthDto, PreparedResourceDto, ResourceConfirmDto, Request, Response, TaskDto, TaskListDto, TaskResultDto, PROTOCOL_VERSION};
+use crate::cli_cloud_protocol::{CloudRequest, CloudAccountsDto, CloudAuthorizationDto, CloudPreparedDto, CloudOperationDto};
 use std::{path::PathBuf, time::Duration};
 #[path = "cli_bootstrap.rs"]
 mod bootstrap;
@@ -130,10 +131,7 @@ pub(crate) async fn call(client: &reqwest::Client, discovery: &Discovery, reques
             return Response::failure("PROTOCOL_ERROR", lang);
         }
         let mut safe = Response::failure(&error.code, lang);
-        // Only bounded, typed metadata can be preserved from the host.
-        if let (Some(original), Some(projected)) = (&result.error, &mut safe.error) {
-            projected.retry_after_ms = original.retry_after_ms.map(|ms| ms.min(86_400_000));
-        }
+        safe.error = Some(sanitize_error(error, lang));
         safe.data = result.data.take();
         result = safe;
     }
@@ -145,6 +143,7 @@ pub(crate) async fn call(client: &reqwest::Client, discovery: &Discovery, reques
             "batch_add" => project_batch(data, lang),
             "prepare" => project::<PreparedResourceDto>(data),
             "confirm" => project::<ResourceConfirmDto>(data),
+            "cloud" => project_cloud(data, request.cloud.as_ref().ok_or(()), lang),
             "add" | "status" | "pause" | "resume" | "cancel" => project_task(data, lang),
             _ => Err(()),
         };
@@ -162,17 +161,92 @@ fn project<T: serde::de::DeserializeOwned + serde::Serialize>(data: serde_json::
 }
 
 fn known_error(code: &str) -> bool {
-    matches!(code, "INVALID_ARGUMENT" | "HOST_UNAVAILABLE" | "UNAUTHORIZED" | "NOT_FOUND" | "REQUEST_CONFLICT" | "DUPLICATE" | "INTERNAL_ERROR" | "TASK_FAILED" | "TASK_CANCELLED" | "TIMEOUT" | "INTERRUPTED" | "PROTOCOL_ERROR" | "UNSUPPORTED" | "ENGINE_UNAVAILABLE" | "ACTION_FAILED" | "FORBIDDEN" | "HOST_DISABLED" | "TASK_NOT_READY" | "BUSY" | "AUTH_REQUIRED" | "CLI_RECOVERY_REQUIRED" | "PREPARATION_EXPIRED" | "CLOUD_WRITE_REQUIRED" | "METADATA_UNAVAILABLE" | "RESOURCE_LIMIT" | "ACCESS_CODE_REQUIRED")
+    matches!(code, "INVALID_ARGUMENT" | "HOST_UNAVAILABLE" | "UNAUTHORIZED" | "NOT_FOUND" | "REQUEST_CONFLICT" | "DUPLICATE" | "INTERNAL_ERROR" | "TASK_FAILED" | "TASK_CANCELLED" | "TIMEOUT" | "INTERRUPTED" | "PROTOCOL_ERROR" | "UNSUPPORTED" | "ENGINE_UNAVAILABLE" | "ACTION_FAILED" | "FORBIDDEN" | "HOST_DISABLED" | "TASK_NOT_READY" | "BUSY" | "AUTH_REQUIRED" | "CLI_RECOVERY_REQUIRED" | "PREPARATION_EXPIRED" | "CLOUD_WRITE_REQUIRED" | "METADATA_UNAVAILABLE" | "RESOURCE_LIMIT" | "ACCESS_CODE_REQUIRED"
+        | "CLOUD_PERMISSION_REQUIRED" | "ACCOUNT_MISMATCH" | "CLOUD_RESULT_UNCERTAIN" | "FILE_CONFLICT" | "SOURCE_CHANGED")
+}
+
+fn known_provider(value: &str) -> bool { matches!(value, "quark" | "pikpak" | "baidu" | "aliyun" | "xunlei" | "uc") }
+
+fn cloud_text(value: &str, max: usize) -> bool { !value.is_empty() && value.len() <= max && !value.chars().any(char::is_control) }
+
+fn sanitize_error(error: &ApiError, lang: &str) -> ApiError {
+    let mut safe = ApiError::new(if known_error(&error.code) { &error.code } else { "ACTION_FAILED" }, lang);
+    safe.retry_after_ms = error.retry_after_ms.map(|ms| ms.min(86_400_000));
+    safe.provider = error.provider.as_ref().filter(|value| known_provider(value)).cloned();
+    safe.reason = error.reason.as_ref().filter(|value| matches!(value.as_str(),
+        "not_authorized" | "expired" | "verification_required" | "cancelled" | "window_closed"
+        | "session_expired" | "window_unavailable" | "unavailable" | "account_changed")).cloned();
+    safe
+}
+
+fn project_cloud(data: serde_json::Value, request: Result<&CloudRequest, ()>, lang: &str) -> Result<serde_json::Value, ()> {
+    match request? {
+        CloudRequest::Accounts { .. } => {
+            let mut data: CloudAccountsDto = serde_json::from_value(data).map_err(|_| ())?;
+            if data.accounts.len() > 6 || data.accounts.iter().any(|account| !known_provider(&account.provider)) { return Err(()); }
+            for account in &mut data.accounts {
+                if !matches!(account.authorization_state.as_str(), "ready" | "disconnected" | "expired" | "verification_required" | "account_mismatch" | "interactive_required" | "unavailable") { return Err(()); }
+                if account.account_ref.as_deref().is_some_and(|value| !cloud_text(value, 256))
+                    || account.display_name.as_deref().is_some_and(|value| value.len() > 1024) { return Err(()); }
+                account.capabilities.retain(|capability| matches!(capability.as_str(), "list" | "download" | "upload" | "create_share" | "inspect_share" | "transfer_share"));
+                account.permitted_operations.retain(|operation| matches!(operation.as_str(), "browse" | "download" | "upload" | "create_share" | "transfer"));
+                account.error = account.error.as_ref().map(|error| sanitize_error(error, lang));
+            }
+            serde_json::to_value(data).map_err(|_| ())
+        }
+        CloudRequest::AuthBegin { .. } | CloudRequest::AuthStatus { .. } | CloudRequest::AuthCancel { .. } => {
+            let mut data: CloudAuthorizationDto = serde_json::from_value(data).map_err(|_| ())?;
+            if !known_provider(&data.provider) || !matches!(data.status.as_str(), "pending" | "succeeded" | "account_mismatch" | "cancelled" | "closed" | "expired" | "failed") { return Err(()); }
+            if !cloud_text(&data.authorization_id, 128) || data.account_ref.as_deref().is_some_and(|value| !cloud_text(value, 256)) { return Err(()); }
+            data.error = data.error.as_ref().map(|error| sanitize_error(error, lang));
+            data.poll_interval_ms = if data.status == "pending" { data.poll_interval_ms.clamp(1000, 30_000) } else { 0 };
+            if data.next_action.as_deref().is_some_and(|action| !matches!(action,
+                "complete_desktop_authorization" | "query_cloud_authorization" | "begin_cloud_authorization"
+                | "prepare_again" | "review_account" | "inspect_desktop" | "continue_request" | "await_user_request")) {
+                data.next_action = Some("inspect_desktop".into());
+            }
+            serde_json::to_value(data).map_err(|_| ())
+        }
+        CloudRequest::Prepare { .. } => {
+            let data: CloudPreparedDto = serde_json::from_value(data).map_err(|_| ())?;
+            if !known_provider(&data.provider) || !matches!(data.operation.as_str(), "upload" | "create_share")
+                || !cloud_text(&data.preparation_id, 128) || !cloud_text(&data.account_ref, 256)
+                || !(1..=100).contains(&data.items.len()) || data.items.iter().any(|item| !cloud_text(&item.name, 1024))
+                || data.effects.len() > 8 || data.effects.iter().any(|effect| !cloud_text(effect, 128)) { return Err(()); }
+            serde_json::to_value(data).map_err(|_| ())
+        }
+        CloudRequest::Confirm { .. } | CloudRequest::Status { .. } | CloudRequest::Cancel { .. } => {
+            let mut data: CloudOperationDto = serde_json::from_value(data).map_err(|_| ())?;
+            if !known_provider(&data.provider) || data.failures.len() > 100 || data.files.len() > 100 { return Err(()); }
+            if !cloud_text(&data.id, 128) || !cloud_text(&data.request_id, 128) || !cloud_text(&data.account_ref, 256)
+                || !matches!(data.operation.as_str(), "upload" | "create_share")
+                || !matches!(data.status.as_str(), "queued" | "running" | "cancelling" | "succeeded" | "partial" | "failed" | "cancelled" | "needs_review")
+                || data.files.iter().any(|file| !cloud_text(&file.selection_id, 256) || !cloud_text(&file.name, 1024) || !matches!(file.kind.as_str(), "file" | "folder"))
+                || data.failures.iter().any(|failure| !cloud_text(&failure.name, 1024)) { return Err(()); }
+            if let Some(share) = &data.share {
+                if !cloud_text(&share.url, 8192) || share.pass_code.as_ref().is_some_and(|code| code.len() > 128)
+                    || share.expires_at.as_deref().is_some_and(|value| !cloud_text(value, 256)) { return Err(()); }
+                let url = url::Url::parse(&share.url).map_err(|_| ())?;
+                if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none()
+                    || !url.username().is_empty() || url.password().is_some() { return Err(()); }
+            }
+            data.error = data.error.as_ref().map(|error| sanitize_error(error, lang));
+            for failure in &mut data.failures { failure.error = sanitize_error(&failure.error, lang); }
+            data.supported_actions.retain(|action| matches!(action.as_str(), "cancel" | "pause" | "resume"));
+            serde_json::to_value(data).map_err(|_| ())
+        }
+    }
 }
 
 fn sanitize_task(mut task: TaskDto, lang: &str) -> TaskDto {
     if let Some(failure) = task.failure.take() {
-        task.failure = Some(ApiError::new(if known_error(&failure.code) { &failure.code } else { "TASK_FAILED" }, lang));
+        task.failure = Some(sanitize_error(&failure, lang));
     }
     // This field is a finite action identifier, never arbitrary host text.
     if task.required_action.as_deref().is_some_and(|action| !matches!(action,
         "start_desktop" | "enable_desktop_agent" | "review_directory_permissions" | "open_desktop_login"
-        | "refresh_discovery" | "query_task" | "retry_same_request" | "inspect_desktop" | "resume_task" | "prepare_again" | "open_desktop_share" | "reduce_selection" | "provide_access_code")) {
+        | "refresh_discovery" | "query_task" | "retry_same_request" | "inspect_desktop" | "resume_task" | "prepare_again" | "open_desktop_share" | "reduce_selection" | "provide_access_code"
+        | "begin_cloud_authorization" | "review_cloud_permissions" | "review_account" | "inspect_cloud_result")) {
         task.required_action = Some("inspect_desktop".into());
     }
     task
@@ -214,6 +288,43 @@ fn project_batch(data: serde_json::Value, lang: &str) -> Result<serde_json::Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cloud_projection_keeps_safe_authorization_guidance_and_strips_credentials() {
+        let request = CloudRequest::AuthStatus { authorization_id: "auth-id".into() };
+        let result = project_cloud(serde_json::json!({
+            "authorization_id":"auth-id","provider":"quark","status":"failed","account_ref":null,
+            "expires_at":300,"next_action":"inspect_desktop","poll_interval_ms":0,"cookie":"secret",
+            "error":{"code":"AUTH_REQUIRED","message":"secret","retryable":true,"next_action":"secret",
+                "provider":"quark","reason":"verification_required","token":"secret"}
+        }), Ok(&request), "en").unwrap();
+        assert_eq!(result["error"]["provider"], "quark");
+        assert_eq!(result["error"]["reason"], "verification_required");
+        assert_eq!(result["error"]["next_action"], "begin_cloud_authorization");
+        assert_eq!(result["poll_interval_ms"], 0);
+        assert!(!result.to_string().contains("secret"));
+        let malicious: ApiError = serde_json::from_value(serde_json::json!({"code":"ACCOUNT_MISMATCH",
+            "message":"secret","provider":"secret","reason":"secret","next_action":"secret"})).unwrap();
+        let error = sanitize_error(&malicious, "en");
+        assert_eq!(error.code, "ACCOUNT_MISMATCH");
+        assert!(error.provider.is_none() && error.reason.is_none());
+    }
+
+    #[test]
+    fn cloud_operation_projection_keeps_business_results_but_cleans_nested_errors() {
+        let request = CloudRequest::Status { operation_id: "operation-id".into() };
+        let result = project_cloud(serde_json::json!({
+            "id":"operation-id","request_id":"request-id","operation":"create_share","provider":"quark",
+            "account_ref":"opaque","status":"succeeded","completed_bytes":0,"total_bytes":null,
+            "supported_actions":["cancel","secret"],"files":[],"failures":[],"error":null,
+            "share":{"url":"https://example.test/share/demo","pass_code":"demo","expires_at":"2026-11-24T12:00:00Z","token":"secret"},
+            "credentials":"secret"
+        }), Ok(&request), "en").unwrap();
+        assert_eq!(result["share"]["pass_code"], "demo", "explicit share result is business data");
+        assert_eq!(result["share"]["expires_at"], "2026-11-24T12:00:00Z", "preserve the provider's expiry representation");
+        assert_eq!(result["supported_actions"], serde_json::json!(["cancel"]));
+        assert!(!result.to_string().contains("secret"));
+    }
     use serde_json::json;
 
     #[test]

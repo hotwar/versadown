@@ -243,9 +243,7 @@ fn upload(
             path.file_name().unwrap_or_default().to_string_lossy()
         ),
         || {
-            ProviderRegistry::global()
-                .driver(CloudProvider::Xunlei, &state.store, http)
-                .upload(state, http, parent, path)
+            state.upload_file(CloudProvider::Xunlei, http, parent, path)
         },
     )
 }

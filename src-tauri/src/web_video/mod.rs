@@ -89,8 +89,7 @@ impl VideoDownloads {
         state: &AppState,
         task: DownloadTask,
     ) -> Result<DownloadTask, String> {
-        let (proxy, rate) = network_options(state)?;
-        self.start(task, proxy, rate).await
+        self.start(task, network_options(state)?).await
     }
 
     async fn submit(
@@ -368,8 +367,8 @@ pub(crate) async fn prepare_agent_video(
     input: &str,
 ) -> Result<Vec<AgentPreparedVideo>, String> {
     let page = routing::resolve(input, true).await?.ok_or("video.error.unsupported")?;
-    let (proxy, _) = network_options(state)?;
-    let preview = extractor::inspect(page, proxy.as_deref()).await?;
+    let options = network_options(state)?;
+    let preview = extractor::inspect(page, options.proxy.as_deref(), options.cookie_file.as_deref()).await?;
     Ok(agent_video_formats(preview))
 }
 

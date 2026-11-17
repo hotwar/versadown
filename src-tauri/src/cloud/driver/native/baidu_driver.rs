@@ -281,15 +281,18 @@ impl ProviderAuth for BaiduDriver<'_> {
 impl UploadOps for BaiduDriver<'_> {
     fn upload(
         &mut self,
-        s: &CloudState,
         upload_http: &dyn UploadHttp,
         parent_id: &str,
         path: &Path,
     ) -> Result<CloudFile, CloudError> {
         let h = UploadHttpRef(upload_http);
-        s.with_upload_session(CloudProvider::Baidu, &h, |store| {
-            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, &h)
-                .upload_file(&parent_id, &path, &h)
-        })
+        baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &self.store)?, &h)
+            .upload_file(parent_id, path, &h)
+    }
+
+    fn upload_no_replace(&mut self, upload_http: &dyn UploadHttp, parent_id: &str, path: &Path) -> Result<CloudFile, CloudError> {
+        let h = UploadHttpRef(upload_http);
+        baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &self.store)?, &h)
+            .upload_file_no_replace(parent_id, path, &h)
     }
 }

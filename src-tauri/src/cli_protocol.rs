@@ -18,6 +18,8 @@ pub fn build_dirty() -> Option<bool> {
 pub struct Request {
     pub command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloud: Option<crate::cli_cloud_protocol::CloudRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
@@ -62,6 +64,10 @@ pub struct ApiError {
     pub next_action: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 impl ApiError {
@@ -70,7 +76,11 @@ impl ApiError {
             "HOST_UNAVAILABLE" => (false, Some("inspect_desktop")),
             "HOST_DISABLED" => (false, Some("enable_desktop_agent")),
             "FORBIDDEN" => (false, Some("review_directory_permissions")),
-            "AUTH_REQUIRED" => (false, Some("open_desktop_login")),
+            "AUTH_REQUIRED" => (false, Some("begin_cloud_authorization")),
+            "CLOUD_PERMISSION_REQUIRED" => (false, Some("review_cloud_permissions")),
+            "ACCOUNT_MISMATCH" => (false, Some("prepare_again")),
+            "CLOUD_RESULT_UNCERTAIN" => (false, Some("inspect_desktop")),
+            "FILE_CONFLICT" => (false, Some("choose_another_destination")),
             "CLOUD_WRITE_REQUIRED" => (false, Some("open_desktop_share")),
             "PREPARATION_EXPIRED" => (false, Some("prepare_again")),
             "METADATA_UNAVAILABLE" => (false, Some("prepare_again")),
@@ -85,7 +95,7 @@ impl ApiError {
         };
         Self { code: code.into(), message: message(code, lang).into(), retryable,
             next_action: next_action.map(str::to_owned),
-            retry_after_ms: matches!(code, "BUSY" | "TASK_NOT_READY").then_some(1000) }
+            retry_after_ms: matches!(code, "BUSY" | "TASK_NOT_READY").then_some(1000), provider:None, reason:None }
     }
 }
 
@@ -288,6 +298,20 @@ pub fn message(key: &str, lang: &str) -> &'static str {
         ("FORBIDDEN", true) => "此操作超出了已授权的下载目录范围。",
         ("AUTH_REQUIRED", false) => "Complete account authorization in the VD application.",
         ("AUTH_REQUIRED", true) => "请在 VD 主程序中完成账号授权。",
+        ("CLOUD_PERMISSION_REQUIRED", false) => "Grant access to this cloud account, folder and operation in VD Agent settings.",
+        ("CLOUD_PERMISSION_REQUIRED", true) => "请在 VD 的 Agent 设置中授予此网盘账号、目录和操作权限。",
+        ("ACCOUNT_MISMATCH", false) => "The cloud account changed. Select the account and prepare the operation again.",
+        ("ACCOUNT_MISMATCH", true) => "网盘账号已变化，请选择账号并重新准备操作。",
+        ("CLOUD_RESULT_UNCERTAIN", false) => "The cloud operation outcome needs review. Do not resubmit it as a new request.",
+        ("CLOUD_RESULT_UNCERTAIN", true) => "云端操作结果需要核对，请勿作为新请求重复提交。",
+        ("FILE_CONFLICT", false) => "The destination already contains an item with this name. Select another destination.",
+        ("FILE_CONFLICT", true) => "目标目录已有同名项目，请选择其他目标目录。",
+        ("SOURCE_CHANGED", false) => "An upload source changed after preparation. Prepare it again.",
+        ("SOURCE_CHANGED", true) => "上传源文件在准备后发生变化，请重新准备。",
+        ("AUTH_CANCELLED", false) => "Cloud authorization was cancelled.",
+        ("AUTH_CANCELLED", true) => "网盘授权已取消。",
+        ("AUTH_EXPIRED", false) => "Cloud authorization timed out. Begin a new authorization when ready.",
+        ("AUTH_EXPIRED", true) => "网盘授权已超时，请在准备好后重新发起。",
         ("CLOUD_WRITE_REQUIRED", false) => "This resource requires a cloud save operation. Open VD to review and perform it; Agent download access does not grant cloud write permission.",
         ("CLOUD_WRITE_REQUIRED", true) => "此资源需要云端转存，请打开 VD 审阅并操作；Agent 下载权限不包含云端写入权限。",
         ("PREPARATION_EXPIRED", false) => "The prepared resource is missing or expired. Prepare it again and review the available selections.",
@@ -339,10 +363,10 @@ pub fn exit_code(response: &Response) -> u8 {
         Some("INVALID_ARGUMENT" | "UNSUPPORTED" | "RESOURCE_LIMIT") => 2,
         Some("HOST_UNAVAILABLE") => 3,
         Some("ENGINE_UNAVAILABLE" | "ACTION_FAILED") => 1,
-        Some("UNAUTHORIZED" | "FORBIDDEN" | "HOST_DISABLED" | "AUTH_REQUIRED" | "CLOUD_WRITE_REQUIRED" | "ACCESS_CODE_REQUIRED") => 4,
-        Some("PREPARATION_EXPIRED") => 5,
+        Some("UNAUTHORIZED" | "FORBIDDEN" | "HOST_DISABLED" | "AUTH_REQUIRED" | "CLOUD_WRITE_REQUIRED" | "ACCESS_CODE_REQUIRED" | "CLOUD_PERMISSION_REQUIRED" | "ACCOUNT_MISMATCH") => 4,
+        Some("PREPARATION_EXPIRED" | "SOURCE_CHANGED") => 5,
         Some("NOT_FOUND") => 5,
-        Some("REQUEST_CONFLICT" | "DUPLICATE") => 6,
+        Some("REQUEST_CONFLICT" | "DUPLICATE" | "FILE_CONFLICT") => 6,
         Some("TIMEOUT") => 7,
         Some("TASK_FAILED" | "TASK_CANCELLED") => 8,
         Some("INTERRUPTED") => 130,

@@ -511,11 +511,11 @@ function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstrain
   const serverGeneratedPassCode = provider === 'pikpak';
   const alwaysGeneratedPassCode = provider === 'tianyi' || provider === 'xunlei';
   const expiryOptions = provider === 'tianyi' ? [['', t('cloud.share.permanent')], ['1', t('cloud.share.days', { count: 1 })], ['7', t('cloud.share.days', { count: 7 })]] : [['', t('cloud.share.permanent')], ['1', t('cloud.share.days', { count: 1 })], ['7', t('cloud.share.days', { count: 7 })], ['30', t('cloud.share.days', { count: 30 })]];
-  const passCodeError = generatePassCode ? null : sharePassCodeError(passCode, sharePassCodeConstraint);
+  const passCodeError = generatePassCode || alwaysGeneratedPassCode ? null : sharePassCodeError(passCode, sharePassCodeConstraint);
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (passCodeError) return;
-    onCreate({ name: title, ...(generatePassCode ? { generatePassCode: true } : (passCode.trim() ? { passCode: passCode.trim() } : {})), ...(expiresInDays ? { expiresInDays: Number(expiresInDays) } : {}) });
+    onCreate({ name: title, ...(generatePassCode || alwaysGeneratedPassCode ? { generatePassCode: true } : (passCode.trim() ? { passCode: passCode.trim() } : {})), ...(expiresInDays ? { expiresInDays: Number(expiresInDays) } : {}) });
   };
   return createPortal(<div className="cloud-confirm-backdrop">
     <section ref={dialogRef} className="cloud-share-dialog" role="dialog" aria-modal="true" aria-label={share ? t('cloud.share.created') : t('cloud.share.create')}>

@@ -488,9 +488,7 @@ fn upload_file(
     parent: &str,
     path: &Path,
 ) -> Result<CloudFile, CloudError> {
-    ProviderRegistry::global()
-        .driver(provider, &state.store, http)
-        .upload(state, http, parent, path)
+    state.upload_file(provider, http, parent, path)
 }
 
 fn resolve_download(
