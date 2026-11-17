@@ -4,6 +4,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { BatchTaskCommand, displayTaskName, DownloadQueue } from './components/DownloadQueue';
 import { NewDownloadDialog } from './components/NewDownloadDialog';
+import { settingsWithRememberedDirectory } from './lib/downloadDirectory';
 import { selectedResourceIds, type DraftSubmissionFailure, type DownloadDraftItem } from './components/useDownloadDraftBatch';
 import { ParseConfirmDialog } from './components/ParseConfirmDialog';
 import { DuplicateDownloadDialog } from './components/DuplicateDownloadDialog';
@@ -915,6 +916,17 @@ export function App() {
     if (privacyUnlockOpen) privacyUnlockPassword.current?.focus();
   }, [privacyUnlockOpen]);
 
+  // A directory chosen while creating a download becomes the default for the
+  // next one. The current download already carries it, so a failed save only
+  // costs the convenience and must not block the task.
+  function rememberDownloadDirectory(usedDirectory?: string) {
+    const next = settingsWithRememberedDirectory(settings, usedDirectory);
+    if (!next) return;
+    void saveSettings(next).catch((error) => {
+      setNotice({ kind: 'error', message: error instanceof Error ? error.message : String(error) });
+    });
+  }
+
   function saveSettings(next: AppSettings): Promise<void> {
     const previous = settings;
     setSettings(next);
@@ -1162,6 +1174,7 @@ export function App() {
   async function confirm(selectedIds: string[], destinationDirectory?: string, privateDownload = false, placement: 'modal' | 'header' = 'modal') {
     const activeConfirmation = placement === 'header' ? headerConfirmation : confirmation;
     if (!activeConfirmation) return;
+    rememberDownloadDirectory(destinationDirectory);
     const activeGeneration = placement === 'header' ? headerConfirmationGeneration : confirmationGeneration;
     const setActiveConfirmation = placement === 'header' ? setHeaderConfirmation : setConfirmation;
     const planKey = `${placement}:${activeGeneration.current}`;
@@ -1581,6 +1594,7 @@ export function App() {
     privateDownload = false,
     postProcessingNote?: string,
   ) {
+    rememberDownloadDirectory(destinationDirectory);
     const includesVideo = items.some(item => item.result?.confirmation?.video);
     const closeDialog = () => {
       setNewDownloadOpen(false);
