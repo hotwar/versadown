@@ -137,6 +137,8 @@ pub struct AppSettings {
     pub download_directory: String,
     pub launcher_visibility: LauncherVisibility,
     pub proxy: ProxySettings,
+    /// Optional, explicitly selected Netscape cookie file for webpage videos.
+    pub video_cookie_file: String,
     pub aria2: Aria2Settings,
     pub ai: AiSettings,
     pub magnet_metadata: MagnetMetadataSettings,
@@ -173,6 +175,7 @@ impl Default for AppSettings {
             download_directory: String::new(),
             launcher_visibility: LauncherVisibility::default(),
             proxy: ProxySettings::default(),
+            video_cookie_file: String::new(),
             aria2: Aria2Settings::default(),
             ai: AiSettings::default(),
             magnet_metadata: MagnetMetadataSettings::default(),

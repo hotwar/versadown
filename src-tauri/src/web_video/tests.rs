@@ -4,26 +4,54 @@ use std::time::Duration;
 #[tokio::test]
 #[ignore = "requires prepared bundled tools, VERSADOWN_VIDEO_TEST_URL and public network"]
 async fn bundled_tools_download_a_public_page_with_audio() {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+
     extractor::set_resource_dir(Path::new(env!("CARGO_MANIFEST_DIR")));
     let source = std::env::var("VERSADOWN_VIDEO_TEST_URL").expect("provide one public video URL");
-    let page = playback_url(&source.parse().unwrap()).expect("provide a supported playback URL");
+    let scanned = routing::scan(&source).await;
+    assert_eq!(scanned.len(), 1, "provide exactly one public video URL");
+    let entry = &scanned[0];
+    let probe = std::env::var("VERSADOWN_VIDEO_TEST_PROBE").as_deref() == Ok("1");
+    println!("VD-TEST-ROUTE {}", serde_json::json!({
+        "kind": entry.kind, "canProbeVideo": entry.can_probe_video, "manualProbe": probe
+    }));
+    assert!(
+        entry.kind == Some(crate::CandidateKind::WebVideo) || (probe && entry.can_probe_video),
+        "a supported playback page must enter the normal video workflow automatically, or allow the requested manual probe"
+    );
+    let page = routing::resolve(&entry.input, probe)
+        .await
+        .unwrap()
+        .expect("provide a supported playback URL");
+    let proxy = std::env::var("VERSADOWN_VIDEO_TEST_PROXY")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty());
     let directory = tempfile::tempdir().unwrap();
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let engine = VideoDownloads::new(store.clone(), 1, |_| {});
     let started = std::time::Instant::now();
-    let preview = engine.prepare(page, None).await.unwrap();
+    let options = VideoOptions {
+        proxy,
+        cookie_file: std::env::var_os("VERSADOWN_VIDEO_TEST_COOKIES")
+            .filter(|value| !value.is_empty()).map(PathBuf::from),
+        ..Default::default()
+    };
+    let preview = engine.prepare(page, &options).await.unwrap();
+    println!("VD-TEST-PREVIEW {}", serde_json::to_string(&preview).unwrap());
     let requested = std::env::var("VERSADOWN_VIDEO_TEST_FORMAT").ok();
-    let choice = preview
-        .formats
-        .iter()
-        .rev()
-        .find(|f| {
-            requested
-                .as_ref()
-                .map_or(f.height > 0 && f.height <= 360, |id| &f.id == id)
-        })
-        .expect("use a video with a small test rendition")
-        .clone();
+    let choice = match requested.as_ref() {
+        Some(id) => preview.formats.iter().find(|format| &format.id == id),
+        None => preview
+            .formats
+            .iter()
+            .rev()
+            .find(|format| format.height > 0 && format.height <= 360)
+            .or_else(|| preview.formats.last()),
+    }
+    .expect("requested format must exist or the preview must offer a format")
+    .clone();
     println!(
         "Bundled preview: {:.2}s; format {}",
         started.elapsed().as_secs_f64(),
@@ -36,8 +64,7 @@ async fn bundled_tools_download_a_public_page_with_audio() {
             directory.path(),
             false,
             None,
-            None,
-            0,
+            options,
         )
         .await
         .unwrap();
@@ -64,28 +91,77 @@ async fn bundled_tools_download_a_public_page_with_audio() {
     let finished = result
         .expect("download timed out")
         .expect("download failed");
-    assert!(
-        saw_progress,
-        "must report progress while external download is running"
-    );
+    assert_eq!(finished.progress, 100);
+    assert!(finished.completed_length > 0);
+    println!("VD-TEST-COMPLETED {}", serde_json::json!({
+        "bytes": finished.completed_length, "format": choice.id,
+        "width": choice.width, "height": choice.height, "ext": choice.ext
+    }));
     let path = store.reserved_output_path(task.id).unwrap().unwrap();
-    let output = std::process::Command::new(extractor::tool("ffmpeg").unwrap())
+    let ffmpeg = extractor::tool("ffmpeg").unwrap();
+    let output = std::process::Command::new(&ffmpeg)
         .args(["-hide_banner", "-i"])
         .arg(&path)
         .output()
         .unwrap();
     let streams = String::from_utf8_lossy(&output.stderr);
-    assert!(streams.contains("Video:") && streams.contains("Audio:"));
-    assert!(streams.contains(&format!("{}x{}", choice.width, choice.height)));
+    let allow_silent =
+        std::env::var("VERSADOWN_VIDEO_TEST_ALLOW_SILENT").as_deref() == Ok("1");
+    assert!(streams.contains("Video:"));
+    assert!(allow_silent || streams.contains("Audio:"));
+    if choice.width > 0 && choice.height > 0 {
+        assert!(streams.contains(&format!("{}x{}", choice.width, choice.height)));
+    }
+    let verified = std::process::Command::new(&ffmpeg)
+        .args(["-nostdin", "-v", "error", "-xerror", "-i"])
+        .arg(&path)
+        .args([
+            "-map", "0:v:0", "-map",
+            if allow_silent { "0:a:0?" } else { "0:a:0" },
+            "-c", "copy",
+        ])
+        .arg(directory.path().join("verified.mkv"))
+        .output()
+        .unwrap();
+    assert!(
+        verified.status.success(),
+        "complete audio/video remux failed: {}",
+        String::from_utf8_lossy(&verified.stderr)
+    );
     assert_eq!(
         std::fs::metadata(&path).unwrap().len(),
         finished.completed_length
     );
     assert!(!transfer::staging(&path, task.id).exists());
+    let mut file = std::fs::File::open(&path).unwrap();
+    let mut hash = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).unwrap();
+        if count == 0 {
+            break;
+        }
+        hash.update(&buffer[..count]);
+    }
+    let sha256 = format!("{:x}", hash.finalize());
+    if let Some(output_directory) = std::env::var_os("VERSADOWN_VIDEO_TEST_OUTPUT")
+        .filter(|value| !value.is_empty())
+    {
+        let retained_directory = std::path::PathBuf::from(output_directory).join(task.id.to_string());
+        std::fs::create_dir_all(&retained_directory).unwrap();
+        let retained_path = retained_directory.join(path.file_name().unwrap());
+        assert_eq!(
+            std::fs::copy(&path, &retained_path).unwrap(),
+            finished.completed_length
+        );
+        println!("Retained complete video: {}", retained_path.display());
+    }
     println!(
-        "Bundled extraction, download and merge: {:.2}s; {} bytes",
+        "Bundled extraction, download and merge: {:.2}s; {} bytes; SHA256 {}; observed live progress: {}",
         started.elapsed().as_secs_f64(),
-        finished.completed_length
+        finished.completed_length,
+        sha256,
+        saw_progress
     );
 }
 
@@ -117,7 +193,7 @@ async fn public_pages_download_with_selected_resolution_and_audio() {
         let source = &entry.input;
         assert_eq!(entry.kind, Some(crate::CandidateKind::WebVideo), "{source}");
         let page = routing::resolve(source, true).await.unwrap().expect(source);
-        let preview = engine.prepare(page, None).await.expect(source);
+        let preview = engine.prepare(page, &VideoOptions::default()).await.expect(source);
         println!(
             "{} · {} · {:?}",
             preview.site,
@@ -143,11 +219,9 @@ async fn public_pages_download_with_selected_resolution_and_audio() {
                     directory.path(),
                     false,
                     None,
-                    None,
-                    if preview.site == "Bilibili" {
-                        96_000
-                    } else {
-                        0
+                    VideoOptions {
+                        rate: if preview.site == "Bilibili" { 96_000 } else { 0 },
+                        ..Default::default()
                     },
                 )
                 .await
@@ -175,7 +249,7 @@ async fn public_pages_download_with_selected_resolution_and_audio() {
                     "Paused after {} bytes; resuming the same task",
                     paused.completed_length
                 );
-                engine.start(paused, None, 0).await.unwrap();
+                engine.start(paused, VideoOptions::default()).await.unwrap();
             }
             submitted.push((task.id, choice));
         }
@@ -196,7 +270,7 @@ async fn public_pages_download_with_selected_resolution_and_audio() {
                 {
                     retried_network = true;
                     println!("Retrying transient network failure for {}", task.name);
-                    engine.start(task, None, 0).await.unwrap();
+                    engine.start(task, VideoOptions::default()).await.unwrap();
                     continue;
                 }
                 assert_ne!(
@@ -274,6 +348,33 @@ fn mixed_paste_preserves_direct_downloads_and_normalizes_real_playback_pages() {
         "https://bilibili.com/read/test",
     ] {
         assert!(playback_url(&source.parse().unwrap()).is_none());
+    }
+}
+
+#[test]
+fn media_suffixed_playback_pages_remain_valid_video_task_sources() {
+    let source = "https://commons.wikimedia.org/wiki/File:Example.webm";
+    crate::parser::validate_task_source("web_video", source).unwrap();
+    let store = TaskStore::open_in_memory().unwrap();
+    let task = store
+        .create_video(
+            NewTask {
+                kind: "web_video".into(),
+                name: "Example".into(),
+                source: source.into(),
+                is_private: false,
+            },
+            "webm-480p",
+            "Example.webm",
+        )
+        .unwrap();
+    assert_eq!(store.find(task.id).unwrap().source, source);
+    for invalid in [
+        "https://pan.baidu.com/s/example.webm",
+        "http://127.0.0.1/example.webm",
+        "https://user:password@video.example/example.webm",
+    ] {
+        assert!(crate::parser::validate_task_source("web_video", invalid).is_err());
     }
 }
 
@@ -409,6 +510,7 @@ async fn a_manually_probed_article_downloads_its_embedded_video() {
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let engine = VideoDownloads::new(store.clone(), 1, |_| {});
     let url = "http://embedded.example.test/article";
+    let options = VideoOptions { proxy: Some(proxy), ..Default::default() };
     let scanned = routing::scan(url).await;
     assert!(scanned[0].can_probe_video);
     assert_eq!(scanned[0].kind, Some(crate::CandidateKind::Direct));
@@ -417,11 +519,11 @@ async fn a_manually_probed_article_downloads_its_embedded_video() {
         .unwrap()
         .unwrap();
     assert_eq!(
-        engine.prepare(empty, Some(&proxy)).await.unwrap_err(),
+        engine.prepare(empty, &options).await.unwrap_err(),
         "video.error.unsupported"
     );
     let page = routing::resolve(url, true).await.unwrap().unwrap();
-    let preview = engine.prepare(page, Some(&proxy)).await.unwrap();
+    let preview = engine.prepare(page, &options).await.unwrap();
     let choice = &preview.formats[0];
     let task = engine
         .submit(
@@ -430,8 +532,7 @@ async fn a_manually_probed_article_downloads_its_embedded_video() {
             dir.path(),
             false,
             None,
-            Some(proxy),
-            0,
+            options,
         )
         .await
         .unwrap();

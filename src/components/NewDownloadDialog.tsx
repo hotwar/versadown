@@ -1,7 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { isTauriRuntime, listPersistedTasks } from '../lib/api';
 import { formatBytes } from '../lib/downloadEvents';
-import { ConfirmResource, ParseDownloadResult, ScanDownloadResult } from '../lib/types';
+import { ConfirmResource, ParseDownloadResult, ScanDownloadProgress, ScanDownloadResult } from '../lib/types';
 import { ResourceFileRow } from './ResourceFileRow';
 import { VideoFormatCard } from './VideoFormatCard';
 import { canExpandDownloadDraft, DownloadDraftItem, DraftSubmissionFailure, useDownloadDraftBatch } from './useDownloadDraftBatch';
@@ -13,7 +13,7 @@ export interface NewDownloadDialogProps {
   open: boolean;
   placement?: NewDownloadDialogPlacement;
   onParse(input: string, accessCode?: string, probeVideo?: boolean): void | Promise<ParseDownloadResult | void>;
-  onScan?(input: string): Promise<ScanDownloadResult[]>;
+  onScan?(input: string, onProgress?: (progress: ScanDownloadProgress) => void): Promise<ScanDownloadResult[]>;
   onClose(): void;
   onOpenTaskList?(): void | Promise<void>;
   initialInput?: string;
@@ -289,7 +289,7 @@ function BatchNewDownloadDialog({
   const { t } = useTranslation();
   const batch = useDownloadDraftBatch({
     scan: onScan ?? (async input => [{ input, valid: true, kind: 'direct' }]),
-    prepare: async (input, accessCode, probeVideo) => (await (probeVideo ? onParse(input, accessCode, true) : onParse(input, accessCode))) ?? { confirmation: { taskId: input, title: input, requiresConfirmation: true, resources: [], processing: [] } },
+    prepare: async (input, accessCode, probeVideo) => (await (probeVideo !== undefined ? onParse(input, accessCode, probeVideo) : onParse(input, accessCode))) ?? { confirmation: { taskId: input, title: input, requiresConfirmation: true, resources: [], processing: [] } },
     discard: onDiscardPrepared ?? (async () => {}),
     concurrency: 4,
   });
@@ -313,7 +313,10 @@ function BatchNewDownloadDialog({
   }, [open, placement]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      void batch.discardAll();
+      return;
+    }
     setSubmitting(false);
     setClosing(false);
     setSubmitError(null);
@@ -322,7 +325,9 @@ function BatchNewDownloadDialog({
     setDestination(undefined);
     setManualInput(initialInput);
     setScanning(Boolean(initialInput.trim()));
-    void batch.start(initialInput).finally(() => setScanning(false));
+    let current = true;
+    void batch.start(initialInput).finally(() => { if (current) setScanning(false); });
+    return () => { current = false; };
   }, [open, initialInput]);
 
   useEffect(() => {
@@ -548,10 +553,10 @@ function LegacyNewDownloadDialog({ open, placement = 'launcher', onParse, onScan
     setBatch({ ...currentBatch, index: nextIndex });
   }
 
-  async function parseCandidate(candidate: string, currentBatch?: DownloadBatch, probeVideo = false) {
+  async function parseCandidate(candidate: string, currentBatch?: DownloadBatch, probeVideo?: boolean) {
     try {
       const code = accessCode.trim() || undefined;
-      const result = await (probeVideo ? onParse(candidate, code, true) : onParse(candidate, code));
+      const result = await (probeVideo !== undefined ? onParse(candidate, code, probeVideo) : onParse(candidate, code));
       if (result?.shareAccessCodeRequired) {
         setAccessCodePrompt(result.shareAccessCodeRequired.message);
         setIsSubmitting(false);
@@ -576,7 +581,7 @@ function LegacyNewDownloadDialog({ open, placement = 'launcher', onParse, onScan
     }
     setIsSubmitting(true);
     setError(null);
-    await parseCandidate(entry.input, currentBatch, entry.kind === 'web_video');
+    await parseCandidate(entry.input, currentBatch, entry.kind === 'web_video' || entry.canProbeVideo ? true : undefined);
   }
 
   async function submit(event: FormEvent) {
@@ -654,8 +659,9 @@ function LegacyNewDownloadDialog({ open, placement = 'launcher', onParse, onScan
           {batchEntry?.valid && <span>{t('download.validLinkConfirmation')}</span>}
           {batchEntry?.valid && batchEntry.canProbeVideo && <button type="button" disabled={isSubmitting} onClick={() => {
             setIsSubmitting(true);
-            void parseCandidate(batchEntry.input, batch!, true);
-          }}>{t('video.probe')}</button>}
+            setError(null);
+            void parseCandidate(batchEntry.input, batch!, false);
+          }}>{t('video.useDirect')}</button>}
           {batchEntry && !batchEntry.valid && <span role="alert" className="parse-failure">{batchEntry.message}</span>}
           {error && <span role="alert" className="parse-failure">{error}</span>}
           {accessCodePrompt ? <div className="new-download-tab-access-code">

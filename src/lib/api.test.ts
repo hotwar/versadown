@@ -15,6 +15,26 @@ afterEach(() => {
   Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
 });
 
+it('round-trips an optional video cookie path and sends an explicit clear to settings', async () => {
+  const { defaultSettings, getSettings, updateSettings } = await import('./api');
+  const configured = { ...defaultSettings, videoCookieFile: 'C:\\Cookies\\session.txt' };
+  native.invoke.mockResolvedValueOnce(configured);
+  await expect(getSettings()).resolves.toEqual(configured);
+
+  const cleared = { ...configured, videoCookieFile: '' };
+  native.invoke.mockResolvedValueOnce(cleared);
+  await expect(updateSettings(cleared)).resolves.toEqual(cleared);
+  expect(native.invoke).toHaveBeenLastCalledWith('update_settings', { settings: cleared });
+});
+
+it('localizes cookie validation and access errors from native video commands', async () => {
+  const { defaultSettings, updateSettings, parseDownload } = await import('./api');
+  native.invoke.mockRejectedValueOnce('video.error.cookieFile');
+  await expect(updateSettings({ ...defaultSettings, videoCookieFile: 'missing.txt' })).rejects.toThrow('Cookie 文件无法读取或不是 Netscape cookies.txt 格式');
+  native.invoke.mockRejectedValueOnce('video.error.cookies');
+  await expect(parseDownload('https://example.test/video', undefined, true, true)).rejects.toThrow('网站需要有效的访问 Cookie');
+});
+
 it('classifies ED2K, FTP, HLS and DASH in the browser fallback', async () => {
   const { parseLocally } = await import('./api');
 
@@ -87,6 +107,30 @@ it('keeps an ordinary direct link valid in the browser scan fallback', async () 
   ]);
 });
 
+it('streams initial scan entries through an optional channel before the final result', async () => {
+  const { scanDownloadInputs } = await import('./api');
+  const input = 'https://youtu.be/known https://example.test/pending';
+  const initial = {
+    entries: [
+      { input: 'https://youtu.be/known', valid: true as const, kind: 'web_video' as const },
+      { input: 'https://example.test/pending', valid: true as const, kind: 'direct' as const },
+    ],
+    pending: ['https://example.test/pending'],
+  };
+  let finish!: (entries: typeof initial.entries) => void;
+  const final = new Promise<typeof initial.entries>(resolve => { finish = resolve; });
+  native.invoke.mockImplementationOnce((_command, args) => {
+    args.onProgress.onmessage(initial);
+    return final;
+  });
+  const progress = vi.fn();
+  const scan = scanDownloadInputs(input, progress);
+  expect(progress).toHaveBeenCalledWith(initial);
+  expect(native.invoke).toHaveBeenCalledWith('scan_download_inputs', { input, onProgress: expect.objectContaining({ onmessage: progress }) });
+  finish(initial.entries);
+  await expect(scan).resolves.toEqual(initial.entries);
+});
+
 it('passes a transient access code only to the parse command', async () => {
   native.invoke.mockResolvedValueOnce({
     kind: 'access_code_required',
@@ -98,6 +142,18 @@ it('passes a transient access code only to the parse command', async () => {
   await parseDownload('https://pan.baidu.com/s/id', '1234');
 
   expect(native.invoke).toHaveBeenCalledWith('parse_download', { input: 'https://pan.baidu.com/s/id', accessCode: '1234' });
+});
+
+it('preserves an explicit ordinary-download choice in native IPC', async () => {
+  native.invoke.mockResolvedValueOnce({
+    kind: 'task', task: { id: 'ordinary-page', name: 'watch.html', kind: 'file', status: 'awaiting_user', progress: 0 },
+    requires_confirmation: true, resources: [],
+  });
+  const { parseDownload } = await import('./api');
+  await parseDownload('https://example.test/watch.html', undefined, true, false);
+  expect(native.invoke).toHaveBeenCalledWith('parse_download', {
+    input: 'https://example.test/watch.html', accessCode: undefined, requireConfirmation: true, probeVideo: false,
+  });
 });
 
 it('prepares every candidate without starting it and discards an abandoned native draft', async () => {

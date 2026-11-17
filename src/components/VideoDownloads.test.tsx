@@ -37,7 +37,7 @@ it('selects exact resolutions across pages and submits working pages even when o
   ]);
 });
 
-it('replaces an ordinary draft with a manual video probe and keeps other selections when the probe fails', async () => {
+it('keeps other selections through automatic probe failure, ordinary fallback and another probe', async () => {
   const direct = 'https://example.test/article';
   const other = 'https://vimeo.com/12345';
   const submit = vi.fn().mockResolvedValue(undefined);
@@ -55,6 +55,12 @@ it('replaces an ordinary draft with a manual video probe and keeps other selecti
   const card = within(await screen.findByRole('article', {name:'短片'}));
   await user.click(card.getByRole('checkbox', {name:'默认画质 · 分辨率未知'}));
   expect(card.getByRole('checkbox', {name:'720p'})).toBeChecked();
+  expect(await screen.findByText('没有找到视频')).toBeVisible();
+  expect(prepare).toHaveBeenCalledWith(direct, undefined, true);
+  expect(discard).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('button', {name:'改为普通下载'}));
+  expect(await screen.findByText('文章')).toBeVisible();
+  expect(prepare).toHaveBeenCalledWith(direct, undefined, false);
   await user.click(screen.getByRole('button', {name:'查找网页中的视频'}));
   expect(await screen.findByText('没有找到视频')).toBeVisible();
   expect(prepare).toHaveBeenCalledWith(direct, undefined, true);
@@ -94,7 +100,7 @@ it('keeps only unfinished choices available after partial video submission', asy
   expect(selectedResourceIds(submit.mock.calls[2][0][0])).toEqual(['small-2']);
 });
 
-it('shows a manual embedded-video preview in the same card as dedicated video sites', async () => {
+it('automatically shows an embedded-video preview in the same card as dedicated video sites', async () => {
   const page = 'https://example.test/embedded';
   const submit = vi.fn().mockResolvedValue(undefined);
   const user = userEvent.setup();
@@ -105,8 +111,8 @@ it('shows a manual embedded-video preview in the same card as dedicated video si
       formats:[{id:'width-only',width:960,height:0,ext:'mp4',bytes:null,estimated:false}]})}
     : {confirmation:{taskId:'direct-draft',title:'普通网页',resources:[],processing:[],requiresConfirmation:true}}}
     onDiscardPrepared={async () => {}} onSubmitBatch={submit} onClose={() => {}} />);
-  await user.click(await screen.findByRole('button', {name:'查找网页中的视频'}));
   const card = within(await screen.findByRole('article', {name:'嵌入视频'}));
+  expect(screen.queryByText('普通网页')).not.toBeInTheDocument();
   expect(card.getByRole('checkbox', {name:'宽 960 像素'})).toBeChecked();
   await user.click(screen.getByRole('button',{name:'新建任务'}));
   const [item] = submit.mock.calls[0][0];

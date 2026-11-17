@@ -16,7 +16,7 @@ const state = vi.hoisted(() => ({
   moveToRecycle: vi.fn(), purgeTasks: vi.fn(), deleteTasks: vi.fn(), setTaskPrivacy: vi.fn(), clipboardWrite: vi.fn(), clipboardRead: vi.fn(),
   updateAiSettings: vi.fn(), listAiModels: vi.fn(), startDragging: vi.fn().mockResolvedValue(undefined),
   reauthorizeFailedCloudTask: vi.fn(), completeCloudAuthorization: vi.fn(), getCompletedCloudAuthorization: vi.fn(),
-  getSettings: vi.fn(), configurePrivacy: vi.fn(), privacyVisibility: vi.fn(), windowSnapshot: vi.fn(),
+  getSettings: vi.fn(), updateSettings: vi.fn(), openNativeFile: vi.fn(), configurePrivacy: vi.fn(), privacyVisibility: vi.fn(), windowSnapshot: vi.fn(),
   updateCheck: vi.fn(), openExternalUrl: vi.fn(), cloudInvoke: vi.fn(),
   dragDropHandler: undefined as undefined | ((event: { payload: unknown }) => void),
   onDragDropEvent: vi.fn(), scaleFactor: vi.fn(), takeExternalLinks: vi.fn()
@@ -32,7 +32,7 @@ vi.mock('./lib/api', () => ({
   checkForAppUpdate: state.updateCheck, openExternalUrl: state.openExternalUrl,
   defaultSettings: { downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false } },
   getSettings: state.getSettings, configurePrivacyDownload: state.configurePrivacy,
-  updateSettings: vi.fn(), updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: state.openDirectory,
+  updateSettings: state.updateSettings, updateAiSettings: state.updateAiSettings, listAiModels: state.listAiModels, openTaskDirectory: state.openDirectory,
   moveTaskToRecycle: state.moveToRecycle, purgeRecycledTasks: state.purgeTasks, deleteTasks: state.deleteTasks, setTaskPrivacy: state.setTaskPrivacy, resolveDuplicateDownload: state.resolveDuplicate
 }));
 vi.mock('./lib/downloadEvents', async (importOriginal) => {
@@ -58,6 +58,7 @@ vi.mock('@tauri-apps/api/core', async (importOriginal) => ({
     ? state.windowSnapshot() : state.cloudInvoke(command, args),
 }));
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: state.clipboardWrite, readText: state.clipboardRead }));
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: state.openNativeFile }));
 vi.mock('@tauri-apps/api/window', async (importOriginal) => ({
   ...await importOriginal<typeof import('@tauri-apps/api/window')>(),
   getCurrentWindow: () => ({
@@ -116,6 +117,8 @@ beforeEach(() => {
   state.getCompletedCloudAuthorization.mockReset().mockResolvedValue(null);
   state.completeCloudAuthorization.mockReset();
   state.getSettings.mockReset();
+  state.updateSettings.mockReset().mockImplementation(async settings => settings);
+  state.openNativeFile.mockReset().mockResolvedValue(null);
   state.getSettings.mockResolvedValue({ downloadDirectory: 'C:\\Downloads', launcherVisibility: 'always', proxy: { enabled: false, protocol: 'http', host: '', port: 7890, username: '', password: '' }, magnetMetadata: { enabled: true, baseUrl: 'http://peer.aigutta.com:8080' }, aria2: { rpcPort: 6800, rpcToken: '', maxConcurrentDownloads: 5, maxConnectionsPerServer: 4, btSeedRatio: 1.5, debugLogging: false } });
   state.configurePrivacy.mockReset();
   state.privacyVisibility.mockReset();
@@ -139,6 +142,26 @@ beforeEach(() => {
     state.listeners.set(name, handler);
     return Promise.resolve(() => undefined);
   });
+});
+
+it('selects a video cookie file through the native picker only after a user click', async () => {
+  state.openNativeFile.mockResolvedValue('C:\\Cookies\\session.cookies');
+  const user = userEvent.setup();
+  render(<App />);
+  await user.click(within(screen.getByRole('navigation', { name: '主导航' })).getByRole('button', { name: '设置' }));
+  await user.click(screen.getByRole('tab', { name: '网络' }));
+  expect(state.openNativeFile).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('button', { name: '选择 Cookie 文件' }));
+
+  await waitFor(() => expect(state.openNativeFile).toHaveBeenCalledWith({
+    directory: false,
+    multiple: false,
+    defaultPath: undefined,
+    title: '选择 Cookie 文件',
+    filters: [{ name: 'Cookie 文本文件', extensions: ['txt'] }, { name: '所有文件', extensions: ['*'] }]
+  }));
+  await waitFor(() => expect(state.updateSettings).toHaveBeenCalledWith(expect.objectContaining({ videoCookieFile: 'C:\\Cookies\\session.cookies' })));
+  expect(screen.getByRole('textbox', { name: 'Cookie 文件路径' })).toHaveValue('C:\\Cookies\\session.cookies');
 });
 
 it('shows privacy task controls immediately after enabling an existing privacy password', async () => {
@@ -1821,6 +1844,26 @@ it('opens the normal new-download dialog from the floating-ball menu command', a
   expect(state.clipboardRead).toHaveBeenCalledOnce();
 });
 
+it('passes an explicit ordinary webpage choice from the batch dialog to the API', async () => {
+  const input = 'https://example.test/watch.html';
+  const user = userEvent.setup();
+  state.clipboardRead.mockResolvedValue(input);
+  vi.mocked(scanDownloadInputs).mockResolvedValueOnce([{ input, valid: true, kind: 'direct', canProbeVideo: true }]);
+  state.parse.mockRejectedValueOnce(new Error('没有找到视频')).mockResolvedValueOnce({ confirmation: {
+    taskId: 'ordinary-page', title: 'watch.html', requiresConfirmation: true, resources: [], processing: [],
+  } });
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-command')).toBeDefined());
+  act(() => { state.listeners.get('launcher-command')?.({ payload: 'new-download' }); });
+  const dialog = within(await screen.findByRole('dialog', { name: t('download.new') }));
+  expect(await dialog.findByText('没有找到视频')).toBeVisible();
+  expect(state.parse).toHaveBeenNthCalledWith(1, input, undefined, true, true);
+  await user.click(dialog.getByRole('button', { name: '改为普通下载' }));
+  expect(await dialog.findByText('watch.html')).toBeVisible();
+  expect(state.parse).toHaveBeenNthCalledWith(2, input, undefined, true, false);
+  expect(state.confirm).not.toHaveBeenCalled();
+});
+
 it('parses a clipboard link from the floating-ball menu and waits for task confirmation', async () => {
   const clipboard = '分享地址：https://example.test/archive.zip';
   const link = 'https://example.test/archive.zip';
@@ -1837,7 +1880,7 @@ it('parses a clipboard link from the floating-ball menu and waits for task confi
 
   const dialog = await screen.findByRole('dialog', { name: t('download.new') });
   expect(await within(dialog).findByText('archive.zip')).toBeVisible();
-  expect(scanDownloadInputs).toHaveBeenCalledWith(clipboard);
+  expect(scanDownloadInputs).toHaveBeenCalledWith(clipboard, expect.any(Function));
   expect(state.parse).toHaveBeenCalledWith(link, undefined, true);
   expect(within(dialog).getByRole('button', { name: t('download.newTask') })).toBeVisible();
   expect(state.confirm).not.toHaveBeenCalled();
@@ -1866,7 +1909,7 @@ it('opens the normal new-download dialog with an accepted floating-ball drop', a
   });
 
   expect(screen.getByRole('dialog', { name: t('download.new') })).toBeVisible();
-  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith('magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567'));
+  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith('magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567', expect.any(Function)));
 });
 
 it('opens a new task with the links that launched the app from a browser', async () => {
@@ -1875,7 +1918,7 @@ it('opens a new task with the links that launched the app from a browser', async
   render(<App />);
 
   expect(await screen.findByRole('dialog', { name: t('download.new') })).toBeVisible();
-  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith(links.join('\n')));
+  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith(links.join('\n'), expect.any(Function)));
   expect(state.confirm).not.toHaveBeenCalled();
 });
 
@@ -1889,7 +1932,7 @@ it('opens a new task when a browser hands a link to the running app', async () =
   act(() => { state.listeners.get('external-links-available')?.({ payload: null }); });
 
   expect(await screen.findByRole('dialog', { name: t('download.new') })).toBeVisible();
-  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith(link));
+  await waitFor(() => expect(scanDownloadInputs).toHaveBeenCalledWith(link, expect.any(Function)));
 });
 
 it('switches the manager to all tasks when the launcher is double-clicked', async () => {

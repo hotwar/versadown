@@ -409,7 +409,7 @@ pub fn validate_task_source(kind: &str, source: &str) -> Result<(), InputValidat
         "file" => candidate.kind == CandidateKind::Direct,
         "web_video" => candidate.kind == CandidateKind::WebVideo
             || (candidate.kind == CandidateKind::Direct
-                && Url::parse(source).ok().as_ref().and_then(crate::web_video::manual_page).is_some()),
+                && Url::parse(source).ok().as_ref().and_then(crate::web_video::page_candidate).is_some()),
         "ed2k" => candidate.kind == CandidateKind::Ed2k,
         "ftp" => candidate.kind == CandidateKind::Ftp,
         "hls" => candidate.kind == CandidateKind::Hls,

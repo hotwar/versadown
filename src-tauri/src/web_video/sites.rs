@@ -1,7 +1,7 @@
-//! Recognize first-party short links locally and delegate other site rules to yt-dlp.
+//! Route webpages locally; only media-shaped URLs need offline extractor matching.
 mod matcher;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, future::Future};
 use url::Url;
 
 #[derive(Clone, Debug)]
@@ -52,9 +52,9 @@ pub(crate) fn playback_url(url: &Url) -> Option<PlaybackPage> {
     })
 }
 
-/// URLs that can enter explicit webpage extraction. Protocol handlers, cloud share
-/// hosts, local addresses, and known payloads belong to the regular download path.
-pub(crate) fn manual_page(url: &Url) -> Option<PlaybackPage> {
+/// Candidates for dedicated extractor matching. A playback page may itself end
+/// in a video extension; known non-video payloads still belong to ordinary downloads.
+pub(crate) fn page_candidate(url: &Url) -> Option<PlaybackPage> {
     if !matches!(url.scheme(), "https" | "http")
         || !url.username().is_empty()
         || url.password().is_some()
@@ -83,12 +83,7 @@ pub(crate) fn manual_page(url: &Url) -> Option<PlaybackPage> {
     {
         return None;
     }
-    let filename = url.path_segments()?.next_back().unwrap_or_default();
-    let filename = percent_encoding::percent_decode_str(filename).decode_utf8_lossy();
-    if filename
-        .rsplit_once('.')
-        .is_some_and(|(_, ext)| is_payload_extension(ext))
-    {
+    if payload_extension(url).is_some_and(|ext| !is_video_extension(&ext)) {
         return None;
     }
     Some(PlaybackPage {
@@ -96,6 +91,31 @@ pub(crate) fn manual_page(url: &Url) -> Option<PlaybackPage> {
         url: url.clone(),
         inspect_embeds: true,
     })
+}
+
+/// URLs that can enter generic webpage extraction immediately. Known payloads
+/// remain ordinary downloads unless a dedicated extractor recognizes them.
+pub(crate) fn manual_page(url: &Url) -> Option<PlaybackPage> {
+    let page = page_candidate(url)?;
+    if payload_extension(url).is_some() {
+        return None;
+    }
+    Some(page)
+}
+
+fn payload_extension(url: &Url) -> Option<String> {
+    let filename = url.path_segments()?.next_back().unwrap_or_default();
+    let filename = percent_encoding::percent_decode_str(filename).decode_utf8_lossy();
+    let (_, ext) = filename.rsplit_once('.')?;
+    is_payload_extension(ext).then(|| ext.to_ascii_lowercase())
+}
+
+fn is_video_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        "mp4" | "m4v" | "webm" | "mkv" | "flv" | "mov" | "avi" | "ts" | "m2ts" | "wmv"
+            | "mpeg" | "mpg"
+    )
 }
 
 fn is_payload_extension(ext: &str) -> bool {
@@ -110,41 +130,57 @@ fn is_payload_extension(ext: &str) -> bool {
     EXTENSIONS.contains(&ext.to_ascii_lowercase().as_str())
 }
 
-pub(super) enum PageRoute {
-    Automatic(PlaybackPage),
-    OnRequest(PlaybackPage),
+fn candidate_route(mut page: PlaybackPage, dedicated_site: Option<&str>) -> Option<PlaybackPage> {
+    page.site = dedicated_site?.to_owned();
+    page.inspect_embeds = false;
+    Some(page)
 }
 
-/// URL matching is offline. If the tool is missing, ordinary downloads are
-/// still available and an explicit video probe can report the tool error.
-pub(super) async fn classify(inputs: &[&str]) -> HashMap<String, PageRoute> {
+/// Webpages go straight to extraction. Only media-shaped URLs need a dedicated
+/// extractor match to distinguish playback pages from ordinary media files.
+pub(super) async fn classify(inputs: &[&str]) -> HashMap<String, PlaybackPage> {
+    classify_with_matcher(inputs, |urls| async move {
+        let urls = urls.iter().map(String::as_str).collect::<Vec<_>>();
+        matcher::dedicated_sites(&urls).await
+    })
+    .await
+}
+
+async fn classify_with_matcher<F, Fut>(inputs: &[&str], match_sites: F) -> HashMap<String, PlaybackPage>
+where
+    F: FnOnce(Vec<String>) -> Fut,
+    Fut: Future<Output = Result<HashMap<String, String>, String>>,
+{
     let mut routes = HashMap::new();
     let mut candidates = Vec::new();
     for &input in inputs {
         let Ok(url) = Url::parse(input) else { continue };
-        if let Some(page) = playback_url(&url) {
-            routes.insert(input.to_owned(), PageRoute::Automatic(page));
-        } else if let Some(page) = manual_page(&url) {
+        if let Some(page) = playback_url(&url).or_else(|| manual_page(&url)) {
+            routes.insert(input.to_owned(), page);
+        } else if let Some(page) = page_candidate(&url) {
             candidates.push((input, page));
         }
     }
     if candidates.is_empty() {
         return routes;
     }
-    let urls: Vec<_> = candidates.iter().map(|(_, p)| p.url.as_str()).collect();
-    let matches = matcher::dedicated_sites(&urls).await.unwrap_or_default();
-    for (input, mut page) in candidates {
-        let route = match matches.get(page.url.as_str()) {
-            Some(site) => {
-                page.site.clone_from(site);
-                page.inspect_embeds = false;
-                PageRoute::Automatic(page)
-            }
-            None => PageRoute::OnRequest(page),
-        };
-        routes.insert(input.to_owned(), route);
+    let urls = candidates.iter().map(|(_, p)| p.url.to_string()).collect();
+    let Ok(matches) = match_sites(urls).await else { return routes };
+    for (input, page) in candidates {
+        let dedicated_site = matches.get(page.url.as_str()).map(String::as_str);
+        if let Some(route) = candidate_route(page, dedicated_site) {
+            routes.insert(input.to_owned(), route);
+        }
     }
     routes
+}
+
+#[cfg(test)]
+pub(super) async fn classify_with_matcher_result_for_test(
+    inputs: &[&str],
+    result: Result<HashMap<String, String>, String>,
+) -> HashMap<String, PlaybackPage> {
+    classify_with_matcher(inputs, |_| async move { result }).await
 }
 
 fn youtube(url: &Url) -> Option<Url> {
@@ -206,6 +242,70 @@ fn bilibili(url: &Url) -> Option<Url> {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn matcher_errors_affect_only_media_shaped_candidates() {
+        let urls = [
+            "https://tv.cctv.com/2026/10/01/VIDEgXcuU2L3NYhZgJDaWj8A261001.shtml",
+            "https://v.youku.com/v_show/id_XNDIzNjE2MTc4NA==.html",
+            "https://news.example.org/article",
+            "https://youtu.be/62xlzGs8LXA",
+            "https://www.bilibili.com/video/BV1bK411W797?p=2",
+            "https://cdn.example.org/clip.mp4",
+            "https://cdn.example.org/clip.webm",
+            "https://cdn.example.org/archive.zip",
+            "http://127.0.0.1/download",
+        ];
+        for error in ["video.error.extractor", "video.error.extract"] {
+            let routes = classify_with_matcher_result_for_test(&urls, Err(error.into())).await;
+            for url in &urls[..3] {
+                let Some(page) = routes.get(*url) else {
+                    panic!("matcher failure downgraded {url} to a normal download");
+                };
+                assert!(page.inspect_embeds);
+                assert_eq!(page.url.as_str(), *url);
+            }
+            for url in &urls[3..5] {
+                let Some(page) = routes.get(*url) else {
+                    panic!("lost the local route for {url}");
+                };
+                assert!(!page.inspect_embeds);
+            }
+            for url in &urls[5..] {
+                assert!(!routes.contains_key(*url), "payload/intranet route changed: {url}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_webpages_never_launch_the_offline_matcher() {
+        let urls = [
+            "https://news.example.org/post.shtml",
+            "https://www.acfun.cn/v/ac48980313",
+            "https://v.youku.com/v_show/id_XNTkxMjQzNDQzNg==.html",
+            "https://youtu.be/62xlzGs8LXA",
+        ];
+        let routes = classify_with_matcher(&urls, |_| async {
+            panic!("webpage extraction must not wait for --list-extractors")
+        }).await;
+        assert_eq!(routes.len(), urls.len());
+        assert_eq!(routes[urls[3]].site, "YouTube");
+    }
+
+    #[tokio::test]
+    async fn only_media_shaped_candidates_are_sent_to_the_matcher() {
+        let page = "https://news.example.org/post.shtml";
+        let playback = "https://commons.wikimedia.org/wiki/File:Example.mp4";
+        let payload = "https://cdn.example.org/clip.mp4";
+        let routes = classify_with_matcher(&[page, playback, payload], |urls| async move {
+            assert_eq!(urls, [playback, payload]);
+            Ok(HashMap::from([(playback.to_owned(), "wikimedia.org".to_owned())]))
+        }).await;
+        assert!(routes[page].inspect_embeds);
+        assert_eq!(routes[playback].site, "wikimedia.org");
+        assert!(!routes[playback].inspect_embeds);
+        assert!(!routes.contains_key(payload));
+    }
+
     #[test]
     fn webpage_scan_and_manual_probe_preserve_other_download_handlers() {
         for direct in [
@@ -234,10 +334,55 @@ mod tests {
                 "{direct}"
             );
         }
-        let url = Url::parse("https://news.example.org/post.html?page=2#video").unwrap();
-        let page = manual_page(&url).unwrap();
-        assert_eq!(page.url, url);
-        assert_eq!(page.site, "news.example.org");
+        for suffix in ["html", "shtml"] {
+            let url = Url::parse(&format!("https://news.example.org/post.{suffix}?page=2#video"))
+                .unwrap();
+            let page = manual_page(&url).unwrap();
+            assert_eq!(page.url, url);
+            assert_eq!(page.site, "news.example.org");
+        }
+    }
+
+    #[test]
+    fn dedicated_extractors_take_precedence_over_payload_suffixes() {
+        let page_url = Url::parse("https://commons.wikimedia.org/wiki/File:Die_Temperaturkurve_der_Erde_(ZDF,_Terra_X)_720p_HD_50FPS.webm").unwrap();
+        let candidate = page_candidate(&page_url).unwrap();
+        assert!(manual_page(&page_url).is_none());
+        let Some(page) =
+            candidate_route(candidate, Some("wikimedia.org"))
+        else {
+            panic!("a recognized playback page must not be treated as a media payload");
+        };
+        assert_eq!(page.url, page_url);
+        assert_eq!(page.site, "wikimedia.org");
+        assert!(!page.inspect_embeds);
+
+        for direct in [
+            "https://cdn.example.org/clip.mp4",
+            "https://cdn.example.org/clip.webm",
+        ] {
+            let candidate = page_candidate(&Url::parse(direct).unwrap()).unwrap();
+            assert!(candidate_route(candidate, None).is_none(), "{direct}");
+        }
+
+        // Dedicated extractors may match arbitrary files on their host, so a
+        // match alone must not turn documents, archives, or images into videos.
+        for direct in [
+            "https://example.org/f.zip",
+            "https://example.org/content%2EZIP?name=web",
+            "https://cdn.example.org/live.M3U8?sig=123",
+            "https://cdn.example.org/live.mpd",
+            "https://www.dropbox.com/s/exampleid/report.zip?dl=1",
+            "https://www.dropbox.com/scl/fi/exampleid/report.pdf?dl=1&rlkey=examplekey",
+            "https://commons.wikimedia.org/wiki/File:Example.jpg",
+        ] {
+            assert!(
+                page_candidate(&Url::parse(direct).unwrap()).is_none(),
+                "{direct}"
+            );
+        }
+
+        assert!(manual_page(&Url::parse("https://news.example.org/post.shtml").unwrap()).is_some());
     }
 
     #[tokio::test]
@@ -251,24 +396,40 @@ mod tests {
             "https://www.acfun.cn/v/ac35457073",
             "https://example.org/article/1",
             "https://example.org/f.zip",
+            "https://tv.cctv.com/2026/10/01/VIDEgXcuU2L3NYhZgJDaWj8A261001.shtml",
+            "https://www.bilibili.com/video/BV1ps411o7yC/",
+            "https://www.acfun.cn/v/ac48980313",
+            "https://v.youku.com/v_show/id_XNTkxMjQzNDQzNg==.html",
+            "https://youtu.be/62xlzGs8LXA?si=LHdIh5rMIAdNE3Dz",
+            "https://commons.wikimedia.org/wiki/File:Die_Temperaturkurve_der_Erde_(ZDF,_Terra_X)_720p_HD_50FPS.webm",
+            "https://cdn.example.org/clip.mp4",
+            "https://www.dropbox.com/s/exampleid/report.zip?dl=1",
+            "https://www.dropbox.com/scl/fi/exampleid/report.pdf?dl=1&rlkey=examplekey",
+            "https://commons.wikimedia.org/wiki/File:Example.jpg",
         ];
         let routes = classify(&urls).await;
         for (index, expected) in [
             (0, "YouTube"),
             (1, "Bilibili"),
-            (2, "vimeo"),
-            (3, "dailymotion"),
-            (4, "AcFunVideo"),
+            (2, "vimeo.com"),
+            (3, "dailymotion.com"),
+            (4, "acfun.cn"),
+            (7, "tv.cctv.com"),
+            (8, "Bilibili"),
+            (9, "acfun.cn"),
+            (10, "v.youku.com"),
+            (11, "YouTube"),
+            (12, "wikimedia.org"),
         ] {
-            let PageRoute::Automatic(page) = &routes[urls[index]] else {
-                panic!("missed {expected}")
-            };
+            let page = &routes[urls[index]];
             assert_eq!(page.site, expected);
             if index == 1 {
                 assert_eq!(page.url.query(), Some("p=2"));
             }
         }
-        assert!(matches!(routes.get(urls[5]), Some(PageRoute::OnRequest(_))));
-        assert!(!routes.contains_key(urls[6]));
+        assert_eq!(routes[urls[5]].site, "example.org");
+        for index in [6, 13, 14, 15, 16] {
+            assert!(!routes.contains_key(urls[index]), "{}", urls[index]);
+        }
     }
 }
