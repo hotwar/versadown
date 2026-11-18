@@ -1,179 +1,134 @@
-# VersaDown · Desktop Beta
+# VersaDown（VD）
 
-本地优先的桌面下载客户端。它把标准下载链接、磁力/种子、迅雷链接、网盘分享链接和复杂文本放入统一任务流程，并使用小型悬浮输入窗与下载管理器显示进度。
+**把文件下载、网页视频和网盘文件，放进同一个下载管理器。**
 
-## 当前可运行能力
+VersaDown 是一款本地优先的桌面下载客户端，支持 Windows、macOS 和 Linux。粘贴直链、磁力链接、种子、视频播放页或网盘分享链接，即可识别内容、选择文件并管理下载；也可以从悬浮输入窗快速创建任务。
 
-- Tauri 2 桌面壳：Windows 使用 WebView2，macOS 使用 WKWebView；没有 Electron/Chromium 捆绑包。
-- HTTP/HTTPS、FTP、ED2K、HLS `.m3u8`、MPEG-DASH `.mpd`、magnet、`.torrent`、Thunder 和网盘分享地址的规则分类；直链自动进入下载状态，多文件类型先进入确认窗口。
-- 本地 SQLite 任务状态、恢复时读取的任务列表、暂停/继续/取消状态操作，以及目录父子任务界面。
-- Aria2 Next Windows / macOS sidecar 已随包配置，负责 HTTP、BT、ED2K 以及原生 HLS/DASH 下载；任务状态、续传信息和媒体清单均由 aria2-next 统一持久化。FTP 仍由进程内纯 Rust 引擎下载并支持断点续传。
-- 安全的后处理计划模型：只允许解压、合并、改名、校验；拒绝程序执行和路径穿越。页面中取得的密码仅存为受保护引用，不写入调试对象。
-- 自绘的夸克/PikPak 文件管理界面、连接器能力契约与可测试 mock 连接器。账号登录、文件 API、上传与真实云端目录操作必须经过用户授权并受服务商接口/条款限制。
-- 可选的 Beta 调试报告开关默认关闭；关闭时不应收集详细链路数据。
+[下载安装](https://github.com/liuwenhuan/versadown/releases/latest) · [更新日志](https://github.com/liuwenhuan/versadown/releases) · [问题反馈](https://github.com/liuwenhuan/versadown/issues) · [开发与构建](docs/development.md)
 
-## 界面预览
+[功能特性](#功能特性) · [视频解析与下载](#视频解析与下载) · [自动更新检测](#自动更新检测) · [功能截图](#功能截图)
 
-以下截图采自 macOS 上实际运行的 VersaDown；不同版本和平台的外观可能略有差异。
+## 下载与安装
+
+在 [GitHub Releases](https://github.com/liuwenhuan/versadown/releases/latest) 中选择适合系统和处理器架构的安装包。
+
+| 平台 | 安装包 | 使用说明 |
+| --- | --- | --- |
+| Windows 10 / 11 · x64 | `.exe` 安装程序 | 运行安装程序，需要 WebView2 Runtime |
+| macOS 12+ · Apple Silicon / Intel | 对应架构的 `.dmg` | 将 `VersaDown.app` 拖入 Applications |
+| Linux · x86_64 | `.deb`、`.rpm`、`.AppImage` | 按发行版选择安装包，或运行 AppImage |
+
+首次打开后，可在「设置」中选择下载目录、语言和主题。安装包已包含下载引擎及视频解析、合并组件，无需另装 yt-dlp 或 FFmpeg；源码运行方式见[开发文档](docs/development.md)。
+
+## 功能特性
+
+| 功能 | 可以做什么 |
+| --- | --- |
+| 多协议下载 | 下载 HTTP/HTTPS、FTP、ED2K 文件，以及 HLS（`.m3u8`）、MPEG-DASH（`.mpd`）媒体；识别磁力、`.torrent` 和迅雷链接，支持选择 BT 任务中的文件 |
+| 批量创建任务 | 一次粘贴多条链接或包含链接的文本，逐项查看识别结果、勾选文件并确认下载；遇到重复任务时选择继续下载、打开已有文件位置或重新下载 |
+| 下载队列与续传 | 查看进度、速度和任务状态，暂停、继续、取消、重试及批量操作；支持断点续传、重启后恢复任务列表，以及目录任务分组、搜索和排序 |
+| 网页视频解析 | 解析播放页，预览封面、标题和时长，选择一个或多个分辨率下载；分离提供的画面和声音自动合并 |
+| 多网盘管理 | 接入夸克、PikPak、百度网盘、阿里云盘、迅雷网盘和 UC 网盘；授权后浏览、上传和下载文件，管理目录、回收站与分享链接 |
+| 分享链接下载 | 识别网盘分享链接与提取码，查看分享文件、选择下载内容，并按服务商要求完成授权或转存 |
+| 并发、代理与限速 | 调整最大并发任务数、单任务连接数和 BT 分享率；配置下载代理、整体下载限速，以及 P2P 和网盘上传限速 |
+| 隐私任务 | 使用密码锁定和解锁隐私任务，在本次应用会话中控制其显示；下载文件本身不加密 |
+| 桌面使用体验 | 悬浮快捷入口、下载状态通知、多种明暗主题和中英文等多语言界面；可关联磁力、迅雷和电驴链接 |
+
+断点续传取决于来源服务、链接有效性和本地断点是否完整。网盘操作及下载速度受账号权限、会员权益、服务商接口和网络条件影响，具体可用操作以应用界面为准。
+
+## 视频解析与下载
+
+直接粘贴视频播放页，就能查看可下载的清晰度，无需先寻找媒体直链。
+
+1. **粘贴播放页**：在主输入框粘贴一个或多个视频链接，多条链接可分行输入。YouTube、哔哩哔哩支持短链，哔哩哔哩支持分 P 播放页。
+2. **选择视频和清晰度**：在「新建下载」中查看封面、标题、时长、分辨率、格式和可用的大小估计；可以同时勾选多个视频，也可为同一视频选择多个分辨率。
+3. **加入下载队列**：选择保存位置并创建任务。画面和声音分开提供时，VD 会自动下载并合并；视频任务也可以暂停、继续和重试。
+
+![VD 视频解析下载：预览视频并多选下载分辨率](docs/screenshots/video-download.png)
+
+央视、AcFun、微博、PeerTube、Wikimedia 等点播站点通过本机 yt-dlp 使用同一解析流程。普通网页或未识别的分享短链也会先尝试查找视频；没有找到时，可以选择「改为普通下载」。
+
+需要登录的视频，可在「设置 → 网络 → 视频下载 Cookie」中选择自己有权使用的 Netscape `cookies.txt` 文件，之后的解析、新下载和重试会使用该配置。VD 不会自动读取浏览器 Cookie。
+
+可选分辨率取决于网站向当前用户提供的格式。当前面向单个点播视频，不支持直播录制、整套播放列表下载或 DRM 内容；站点支持情况也会受视频状态、访问权限、地区和网络影响。视频组件随 VD 版本更新，详情见[视频工具与许可证](src-tauri/video-tool-notices/SOURCE.md)。
+
+## 自动更新检测
+
+VD 启动后会在后台检查官网发布的版本信息，也可在「关于」页点击「检查更新」手动检查。
+
+- **发现新版**：侧栏「关于」入口显示「有更新」提示。
+- **查看变化**：在关于页查看新版本号与更新摘要。
+- **前往更新**：点击「去官网下载」，选择适合当前系统的安装包。
+
+当前更新流程为自动检测、提醒，再由用户下载安装。检查失败不会阻止正常下载，也可直接访问 [Releases](https://github.com/liuwenhuan/versadown/releases/latest) 获取安装包。
+
+## 功能截图
+
+以下截图来自 macOS 实际运行界面；不同版本、平台和主题的外观可能略有差异。视频解析截图见[上方章节](#视频解析与下载)。
 
 ### 下载管理
 
-在统一列表中查看任务进度并管理下载。
+统一查看下载进度和速度，按状态筛选任务，并进行暂停、继续等操作。
 
-![VersaDown 下载管理界面](docs/screenshots/downloads.png)
+![VD 下载任务列表](docs/screenshots/downloads.png)
+
+### 网盘文件管理
+
+在同一个窗口中切换已授权网盘，浏览文件，并使用上传、新建目录、回收站和「我的分享」入口。
+
+![VD 网盘文件管理](docs/screenshots/cloud-files.png)
+
+<details>
+<summary>更多操作：新建下载、网盘授权与任务搜索</summary>
 
 ### 新建下载
 
-查看已识别的下载信息，确认后创建单个下载任务。
+查看已识别的文件信息，选择保存位置后创建任务。
 
-![VersaDown 新建下载界面](docs/screenshots/new-download.png)
-
-### 网盘文件
-
-在已授权网盘中浏览文件，并使用上传、新建目录、回收站和「我的分享」入口。
-
-![VersaDown 网盘文件管理界面](docs/screenshots/cloud-files.png)
-
-<details>
-<summary>更多界面：网盘授权与任务搜索</summary>
+![VD 新建下载](docs/screenshots/new-download.png)
 
 ### 网盘授权
 
-集中管理夸克、PikPak、百度网盘、阿里云盘、迅雷网盘和 UC 网盘的授权。
+集中管理六个网盘服务的授权状态。
 
-![VersaDown 网盘授权管理界面](docs/screenshots/cloud-accounts.png)
+![VD 网盘授权管理](docs/screenshots/cloud-accounts.png)
 
 ### 任务搜索
 
-按关键词查找已有下载任务。
+按关键词查找已有任务。
 
-![VersaDown 任务搜索界面](docs/screenshots/task-search.png)
+![VD 任务搜索](docs/screenshots/task-search.png)
 
 </details>
 
 <details>
-<summary>更多界面：网络与隐私设置</summary>
+<summary>更多设置：代理、限速与隐私任务</summary>
 
 ### 网络设置
 
-配置网络代理和下载限速。
+配置代理与下载、上传限速。
 
-![VersaDown 网络代理与下载限速设置界面](docs/screenshots/network-settings.png)
+![VD 网络代理与限速设置](docs/screenshots/network-settings.png)
 
 ### 隐私设置
 
-管理隐私模式等高级设置。隐私任务解锁后才显示，下载文件本身不加密。
+启用隐私下载并设置解锁密码。
 
-![VersaDown 高级与隐私设置界面](docs/screenshots/privacy-settings.png)
+![VD 隐私任务设置](docs/screenshots/privacy-settings.png)
 
 </details>
 
-## 明确的安全边界
+## 本地数据与隐私
 
-- 不共享用户账号、Cookie、token、快速下载链接或下载能力。
-- 不绕过验证码、短信、扫码、DRM、真实支付、未知表单或解压密码。
-- AI 仅在规则无法可靠理解文本/网页时接收当前任务的脱敏可读文本；绝不发送 Cookie、凭据、密码、二维码、短信或本地文件。
-- 任何服务商拒绝嵌入式授权时应转为系统浏览器或服务商允许流程；不得抓取 OAuth token。
+任务记录和设置保存在本机，网盘授权凭据通过系统凭据存储保护。隐私模式控制任务在界面中的可见性，不会加密磁盘上的下载文件。调试日志默认关闭，需要排障时再开启；日志可能包含下载地址。
 
-## 网页视频下载
+可选的 AI 智能分析用于辅助理解复杂文本，启用后会将当前任务的脱敏可读文本发送到用户配置的服务。下载内容应在本人权限范围内使用；VD 不共享账号或下载凭据，也不绕过站点验证、会员限制和 DRM。
 
-在主输入框粘贴一个或多个播放页，进入“新建下载”后分别勾选视频和清晰度。YouTube 和哔哩哔哩支持短链，哔哩哔哩支持分 P。央视、AcFun、微博、PeerTube、Wikimedia 等点播站点使用同一操作流程，由本机 yt-dlp 识别；播放页即使以 `.webm` 等媒体后缀结尾，也优先按站点规则解析。普通网页或未识别的分享短链也会先尝试视频解析；解析失败后，可明确选择“按普通文件下载”。yt-dlp 列出支持的站点不代表每条视频都可下载，实际结果取决于视频是否仍可访问、站点限制及当前网络，应以原生 yt-dlp 在相同条件下的实际下载结果作为对照。
+## 开发与贡献
 
-Windows、Linux 和 macOS 安装包内置 yt-dlp、FFmpeg 和 QuickJS。首次使用即可解析播放页、选择清晰度并下载。高清画面和声音分开提供时，VD 会把它们合并到同一个文件。可选清晰度取决于网站向当前用户提供的格式。组件随 VD 更新，许可证和对应源码见[第三方组件说明](src-tauri/video-tool-notices/SOURCE.md)。
+VD 使用 Tauri 2、React、TypeScript 和 Rust，桌面界面使用系统 WebView。文件与媒体下载由 aria2-next、Rust FTP 引擎及 yt-dlp / FFmpeg 等组件协作完成。
 
-## 开发环境
-
-从源码运行开发版时可使用 `.tools/video` Python 虚拟环境中的 `yt-dlp[default,curl-cffi]`，以及本机的 FFmpeg 和 Node.js 22+。打包脚本直接下载并校验 yt-dlp 的官方可执行文件；Windows 和 Linux 的 QuickJS 也使用官方二进制。精简版 FFmpeg 和兼容 macOS 12 的 QuickJS 会缓存编译结果，macOS 构建机另需 CMake。
-
-### macOS（Apple Silicon / Intel）
-
-需要 macOS 12+、Xcode Command Line Tools、Node 24+、pnpm 10 与 Rust stable。
-两种架构的 aria2-next 3.0.9 引擎随包提供，构建前检查官方 SHA-256；应用使用系统 WKWebView。
-
-迅雷网盘任务可使用本机迅雷 5.80.7（66660）的下载引擎。将官方迅雷安装在 `/Applications` 或 `~/Applications` 即可，下载时不必打开迅雷。VD 不附带迅雷组件。没有匹配的引擎、文件没有加速凭据，或 VD 配置了代理时，新任务仍走 aria2。已有迅雷断点需在直连模式下用匹配的引擎继续。队列在引擎收到加速通道数据后显示“迅雷会员通道”，实际速度取决于资源。
-
-```bash
-pnpm install --frozen-lockfile
-pnpm run build:macos:quick       # 增量调试二进制
-pnpm run build:macos:installer   # 调试 .app / .dmg，供本地验证
-pnpm run build:macos:release     # 正式 Release 编译与打包
-```
-
-安装产物和校验文件在 `artifacts/macos-arm64/` 或 `artifacts/macos-x86_64/`。
-将 DMG 中的 `VersaDown.app` 拖入 Applications；默认下载目录为用户的 Downloads。
-关闭主窗口后下载继续，点击 Dock 图标可重开；菜单栏菜单或 ⌘Q 退出时保存引擎会话。
-系统钥匙串不可用时会显示提示，普通下载仍可用，凭据操作报错且隐私任务保持锁定。
-没有 Developer ID 凭据时只做本地 ad-hoc 签名，产物不代表已通过 Apple 公证。
-
-包级黑盒检查（启动、真实下载校验、凭据不可用和子进程回收）：
-
-```bash
-python3 scripts/smoke-macos.py src-tauri/target/release/bundle/macos/VersaDown.app
-cargo test --manifest-path src-tauri/Cargo.toml --features native-smoke --test macos_native_smoke
-```
-
-`Desktop checks` 工作流在 PR 中检查 Windows、Linux、Apple Silicon 与 Intel Mac。
-推送与应用版本一致的 `v*` 标签后，`Desktop release` 在各平台构建，全部成功后发布同一个 GitHub Release。
-
-### Linux x86_64 调试二进制
-
-安装 Node 24+、Rust stable、GTK/WebKitGTK 开发依赖后，执行以下命令生成嵌入静态前端资源的本机调试二进制。不要直接执行不含 `custom-protocol` 功能的 `cargo build` 产物，它会尝试连接 Vite 开发服务器的 `localhost:1420`。
-
-```bash
-pnpm install --frozen-lockfile
-pnpm run build:linux:quick
-./src-tauri/target/debug/versadown
-```
-
-产物包含 Linux x86_64 的 aria2-next 3.0.9 sidecar。该命令生成调试二进制，不生成 Release 包或安装包。
-
-### Linux x86_64 发布包
-
-在具备上述依赖的 Linux x86_64 系统执行：
-
-```bash
-pnpm install --frozen-lockfile
-pnpm run build:linux:release
-```
-
-脚本使用 Tauri 生成 `.deb`、`.rpm` 和 `.AppImage`，只打包 Linux 版 aria2-next，并把安装包及 `SHA256SUMS` 放在 `artifacts/linux/`。该命令是完整 Release 编译，不是日常调试入口。GitHub Actions 的 `Desktop release` 工作流可手动运行并下载产物；推送与应用版本一致的 `v*` 标签后，各平台构建全部成功才会统一发布 GitHub Release。
-
-### Windows
-
-Windows 10/11、WebView2 runtime、Node 24+、Rust stable MSVC、Visual Studio C++ Build Tools。本地生成 NSIS 安装包时，FFmpeg 使用 MSYS2 UCRT64 的 GCC、binutils 和 MSYS make；可用 `VD_MSYS2_ROOT` 指定 MSYS2 目录。CI 使用 MinGW-w64 交叉编译 FFmpeg，并在 Windows 上运行和验证打包后的工具。
-
-```powershell
-# 验证仓库内置的 Aria2 Next 原生媒体 sidecar
-powershell -ExecutionPolicy Bypass -File scripts/download-sidecars.ps1
-
-# 安装依赖，运行测试与 Web 构建
-npm install
-npm run test:run
-npm run build
-
-# 桌面开发模式
-npm run tauri:dev
-
-# 快速构建：适合日常本机验证；独立目标目录，不覆盖正式发布文件
-pnpm run build:windows:quick
-
-# 正式发布：生产前端构建 + Release + Thin LTO + 符号剥离
-pnpm run build:windows:release
-
-# 正式安装包（MSI / NSIS）
-pnpm run build:windows:installer
-
-# 验证正式发布包已产出
-powershell -ExecutionPolicy Bypass -File scripts/smoke-download.ps1
-```
-
-快速构建输出到 `artifacts/quick/`，用于本机验证；正式主程序输出到
-`artifacts/versadown.exe`，安装包位于
-`.tools/release-target/release/bundle/`。`build:windows` 继续等同于
-`build:windows:release`，以保持旧自动化命令兼容。
-
-默认下载目录为当前 Windows 用户的 `Downloads`。任务数据库位于 Windows 应用数据目录中的 `VersaDown/tasks.sqlite`；不要手动复制其中可能关联授权会话的信息。
-
-## 关于夸克与 PikPak
-
-应用的连接器边界与文件管理界面已经固定为“用户自身授权、凭据本机保护、应用自绘目录”。真实连接器不能依赖未审查的 Cookie 导入或规避服务商限制。下一步集成只能选择许可兼容、经安全审查的开源实现或服务商正式接口，并用用户本人完成的授权会话进行验证。没有真实账户授权时，自动化测试使用 mock 连接器而不是伪造云端成功结果。
+- [开发与构建](docs/development.md)：环境准备、各平台 quick / Release 构建、产物位置和验证命令。
+- [开发与验证约定](AGENTS.md)：修改代码前的协作规则。
+- [第三方组件说明](THIRD_PARTY_NOTICES.md)：依赖、协议参考、许可证与对应源码。
+- [提交问题或建议](https://github.com/liuwenhuan/versadown/issues)：请附应用版本、操作系统和复现步骤，分享日志前移除账号凭据及私密链接。
