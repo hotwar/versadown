@@ -2,14 +2,14 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
 import { beforeEach, expect, it, vi } from 'vitest';
-import type { AppUpdate, QueueTask, QueueTaskInput } from './lib/types';
+import type { AppUpdate, QueueTask, QueueTaskInput, VideoPreview } from './lib/types';
 import { getThemeMode, setThemeMode } from './lib/theme';
 import { cloudCatalog } from './test/cloudCatalog';
 import { scanDownloadInputs } from './lib/api';
 import { t } from './i18n';
 
 const state = vi.hoisted(() => ({
-  list: vi.fn(), parse: vi.fn(), onTask: undefined as undefined | ((task: QueueTaskInput) => void),
+  list: vi.fn(), parse: vi.fn(), submitVideo: vi.fn(), onTask: undefined as undefined | ((task: QueueTaskInput) => void),
   onFocus: undefined as undefined | ((event: { payload: boolean }) => void),
   listeners: new Map<string, (event: { payload: unknown }) => void>(), listen: vi.fn(),
   confirm: vi.fn(), confirmCloud: vi.fn(), discardPrepared: vi.fn(), resolveDuplicate: vi.fn(), openDirectory: vi.fn(), selectFiles: vi.fn(), cancelFile: vi.fn(), getEngineState: vi.fn(), retryEngine: vi.fn(), taskAction: vi.fn(),
@@ -24,6 +24,7 @@ const state = vi.hoisted(() => ({
 
 vi.mock('./lib/api', () => ({
   isTauriRuntime: () => true, listPersistedTasks: state.list, parseDownload: state.parse,
+  submitVideoFormats: state.submitVideo,
   syncMainWindowIcon: vi.fn().mockResolvedValue(undefined), takeExternalLinks: state.takeExternalLinks,
   scanDownloadInputs: vi.fn().mockResolvedValue([]),
   confirmDownload: state.confirm, confirmCloudShareDownload: state.confirmCloud, discardPreparedDownload: state.discardPrepared, runTaskAction: state.taskAction, selectDownloadFiles: state.selectFiles, cancelDownloadFile: state.cancelFile,
@@ -92,6 +93,7 @@ beforeEach(() => {
   state.list.mockReset();
   state.list.mockResolvedValue([]);
   state.parse.mockReset();
+  state.submitVideo.mockReset();
   state.confirm.mockReset();
   state.confirmCloud.mockReset();
   state.discardPrepared.mockReset().mockResolvedValue(undefined);
@@ -1903,6 +1905,34 @@ it('retrieves a compatible service model from its selector and persists the sele
     model: 'gpt-5-mini',
     apiKey: 'sk-local-secret'
   }));
+});
+
+it('shows and submits all videos from a single native page parse', async () => {
+  const input = 'https://x.com/Ekimko/status/2111347724071088497';
+  const videos: VideoPreview[] = [1, 2, 3].map(index => ({
+    mediaId: String(index), previewId: `native-video-${index}`, pageUrl: input, title: `Post video ${index}`,
+    site: 'Twitter', duration: null, thumbnail: null,
+    formats: [{ id: '720', width: 1280, height: 720, ext: 'mp4', bytes: null, estimated: true }],
+  }));
+  state.parse.mockResolvedValueOnce({ videos });
+  state.submitVideo.mockImplementation(async (video: VideoPreview, _ids, _directory, _private, created) => {
+    created({ id: video.previewId, name: video.title, kind: 'web_video', status: 'queued', progress: 0 });
+    return [];
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await waitFor(() => expect(state.listeners.get('launcher-parse')).toBeDefined());
+  act(() => { state.listeners.get('launcher-parse')?.({ payload: input }); });
+  const dialog = within(await screen.findByRole('dialog', { name: t('download.new') }));
+  await dialog.findByRole('article', { name: 'Post video 3' });
+  expect(dialog.getAllByRole('article')).toHaveLength(3);
+  expect(state.parse).toHaveBeenCalledTimes(1);
+  await user.click(dialog.getByRole('button', { name: '新建任务' }));
+  await waitFor(() => expect(state.submitVideo).toHaveBeenCalledTimes(3));
+  expect(state.submitVideo.mock.calls.map(([video, ids]) => [video.previewId, ids])).toEqual([
+    ['native-video-1', ['720']], ['native-video-2', ['720']], ['native-video-3', ['720']],
+  ]);
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: t('download.new') })).not.toBeInTheDocument());
 });
 
 it('opens the normal new-download dialog from the floating-ball menu command', async () => {

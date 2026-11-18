@@ -66,15 +66,17 @@ impl VideoDownloads {
         &self,
         page: PlaybackPage,
         options: &VideoOptions,
-    ) -> Result<VideoPreview, String> {
-        let preview = extractor::inspect(
+    ) -> Result<Vec<VideoPreview>, String> {
+        let previews = extractor::inspect(
             page,
             options.proxy.as_deref(),
             options.cookie_file.as_deref(),
         )
         .await?;
-        self.previews.remember(&preview)?;
-        Ok(preview)
+        for preview in &previews {
+            self.previews.remember(preview)?;
+        }
+        Ok(previews)
     }
 
     async fn submit(

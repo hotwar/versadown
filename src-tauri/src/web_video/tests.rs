@@ -38,7 +38,17 @@ async fn bundled_tools_download_a_public_page_with_audio() {
             .filter(|value| !value.is_empty()).map(PathBuf::from),
         ..Default::default()
     };
-    let preview = engine.prepare(page, &options).await.unwrap();
+    let previews = engine.prepare(page, &options).await.unwrap();
+    println!("VD-TEST-PREVIEWS {}", serde_json::to_string(&previews).unwrap());
+    let requested_media = std::env::var("VERSADOWN_VIDEO_TEST_MEDIA_ID").ok();
+    let preview = match requested_media.as_deref() {
+        Some(id) => previews.iter().find(|preview| preview.media_id == id)
+            .expect("requested media ID must appear in the page preview"),
+        None => {
+            assert_eq!(previews.len(), 1, "select a media ID for a multi-video page");
+            &previews[0]
+        }
+    };
     println!("VD-TEST-PREVIEW {}", serde_json::to_string(&preview).unwrap());
     let requested = std::env::var("VERSADOWN_VIDEO_TEST_FORMAT").ok();
     let choice = match requested.as_ref() {
@@ -193,7 +203,9 @@ async fn public_pages_download_with_selected_resolution_and_audio() {
         let source = &entry.input;
         assert_eq!(entry.kind, Some(crate::CandidateKind::WebVideo), "{source}");
         let page = routing::resolve(source, true).await.unwrap().expect(source);
-        let preview = engine.prepare(page, &VideoOptions::default()).await.expect(source);
+        let previews = engine.prepare(page, &VideoOptions::default()).await.expect(source);
+        assert_eq!(previews.len(), 1);
+        let preview = &previews[0];
         println!(
             "{} · {} · {:?}",
             preview.site,
@@ -523,7 +535,9 @@ async fn a_manually_probed_article_downloads_its_embedded_video() {
         "video.error.unsupported"
     );
     let page = routing::resolve(url, true).await.unwrap().unwrap();
-    let preview = engine.prepare(page, &options).await.unwrap();
+    let previews = engine.prepare(page, &options).await.unwrap();
+    assert_eq!(previews.len(), 1);
+    let preview = &previews[0];
     let choice = &preview.formats[0];
     let task = engine
         .submit(
@@ -913,6 +927,75 @@ async fn installed_extractor_rejects_missing_fragments_without_publishing() {
         );
     }
     server.abort();
+}
+
+#[tokio::test]
+#[ignore = "exercises yt-dlp's real multi-video selection offline"]
+async fn installed_extractor_selects_later_videos_from_the_same_page() {
+    let tmp = tempfile::tempdir().unwrap();
+    let entries: Vec<_> = (1..=3)
+        .map(|index| {
+            let origin = tmp.path().join(format!("clip-{index}.mp4"));
+            std::fs::write(&origin, format!("payload for video {index}")).unwrap();
+            serde_json::json!({
+                "id": format!("clip-{index}"), "title": format!("Video {index}"),
+                "extractor": "Test", "extractor_key": "Test",
+                "webpage_url": "https://example.org/post",
+                "url": url::Url::from_file_path(&origin).unwrap().as_str(),
+                "ext": "mp4", "format_id": "1", "vcodec": "avc1", "acodec": "aac"
+            })
+        })
+        .collect();
+    let metadata = tmp.path().join("post.json");
+    std::fs::write(
+        &metadata,
+        serde_json::json!({
+            "_type": "playlist", "id": "post", "title": "Three videos",
+            "extractor": "Test", "extractor_key": "Test", "entries": entries
+        })
+        .to_string(),
+    )
+    .unwrap();
+    for index in [2, 3, 4] {
+        let mut cmd = transfer::transfer_command(None, 0).unwrap();
+        // Loading a cleaned info file drops entries, which would turn this
+        // offline playlist fixture into an empty collection.
+        cmd.args(["--enable-file-urls", "--no-clean-info-json", "--load-info-json"])
+            .arg(&metadata);
+        let output = tmp.path().join(format!("selected-{index}.mp4"));
+        let id = Uuid::new_v4();
+        let staging = transfer::staging(&output, id);
+        if index == 4 {
+            std::fs::create_dir(&staging).unwrap();
+            std::fs::write(staging.join("payload.mp4"), b"stale payload").unwrap();
+        }
+        let (_hold, stop) = oneshot::channel();
+        let result = transfer::download(
+            cmd,
+            "https://example.org/post",
+            "1",
+            Some(&format!("clip-{index}")),
+            VideoTransferEngine::Native,
+            id,
+            &output,
+            stop,
+            |_| {},
+        )
+        .await;
+        if index == 4 {
+            assert_eq!(result.unwrap_err(), "video.error.identity");
+            assert!(!output.exists());
+            assert_eq!(
+                std::fs::read(staging.join("payload.mp4")).unwrap(),
+                b"stale payload"
+            );
+        } else {
+            let expected = format!("payload for video {index}");
+            assert_eq!(result.unwrap(), Some(expected.len() as u64));
+            assert_eq!(std::fs::read(&output).unwrap(), expected.as_bytes());
+            assert!(!staging.exists());
+        }
+    }
 }
 
 #[tokio::test]

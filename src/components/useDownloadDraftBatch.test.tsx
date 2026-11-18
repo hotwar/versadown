@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { expect, it, vi } from 'vitest';
-import { ParseDownloadResult, ScanDownloadProgress, ScanDownloadResult } from '../lib/types';
+import { ParseDownloadResult, ScanDownloadProgress, ScanDownloadResult, VideoPreview } from '../lib/types';
 import { selectedResourceIds, useDownloadDraftBatch } from './useDownloadDraftBatch';
 import { videoConfirmation } from '../lib/webVideo';
 
@@ -14,6 +14,95 @@ function deferred<T>() {
 function ready(taskId: string): ParseDownloadResult {
   return { confirmation: { taskId, title: taskId, requiresConfirmation: true, resources: [], processing: [] } };
 }
+
+function postVideos(version: number): VideoPreview[] {
+  return [1, 2, 3].map(index => ({
+    mediaId: `media-${index}`, previewId: `preview-${index}-${version}`, pageUrl: 'https://x.com/example/status/123',
+    title: `Video ${index}`, site: 'Twitter', duration: null, thumbnail: null,
+    formats: [
+      { id: `large-${version}`, width: 1280, height: 720, ext: 'mp4', bytes: null, estimated: true },
+      { id: `small-${version}`, width: 640, height: 360, ext: 'mp4', bytes: null, estimated: true },
+    ],
+  }));
+}
+
+it('refreshes the chosen media by ID without duplicating siblings or resetting their choices', async () => {
+  const discard = vi.fn().mockResolvedValue(undefined);
+  let version = 0;
+  const { result } = renderHook(() => useDownloadDraftBatch({
+    scan: async () => [{ input: 'https://x.com/example/status/123', valid: true, kind: 'web_video' }],
+    prepare: async () => ({ videos: ++version === 1 ? postVideos(version) : postVideos(version).reverse() }), discard,
+  }));
+  await act(async () => { await result.current.start('post'); });
+  await waitFor(() => expect(result.current.items).toHaveLength(3));
+  const [first, second, third] = result.current.items;
+  act(() => result.current.toggleResource(second.id, 'small-1'));
+  act(() => result.current.toggleResource(second.id, 'large-1'));
+  act(() => result.current.remove(first.id));
+  act(() => result.current.retry(second.id));
+  await waitFor(() => expect(result.current.items[0].status).toBe('ready'));
+  expect(result.current.items.map(item => item.result?.confirmation?.video?.mediaId)).toEqual(['media-2', 'media-3']);
+  expect(selectedResourceIds(result.current.items[0])).toEqual(['small-2']);
+  expect(result.current.items[1]).toEqual(third);
+  expect(discard).toHaveBeenCalledWith('video-page:preview-1-1');
+  expect(discard).toHaveBeenCalledWith('video-page:preview-2-1');
+  expect(discard).toHaveBeenCalledWith('video-page:preview-1-2');
+  expect(discard).toHaveBeenCalledWith('video-page:preview-3-2');
+  expect(discard).not.toHaveBeenCalledWith('video-page:preview-2-2');
+});
+
+it('discards every preview when a multi-video parse finishes after closing', async () => {
+  const pending = deferred<ParseDownloadResult>();
+  const discard = vi.fn().mockResolvedValue(undefined);
+  const { result } = renderHook(() => useDownloadDraftBatch({
+    scan: async () => [{ input: 'https://x.com/example/status/123', valid: true, kind: 'web_video' }],
+    prepare: () => pending.promise, discard,
+  }));
+  await act(async () => { await result.current.start('post'); });
+  await act(async () => { await result.current.discardAll(); });
+  await act(async () => { pending.resolve({ videos: postVideos(1) }); await pending.promise; });
+  expect(discard.mock.calls.map(([id]) => id).sort()).toEqual([
+    'video-page:preview-1-1', 'video-page:preview-2-1', 'video-page:preview-3-1',
+  ]);
+});
+
+it('does not reuse transferred preview IDs when a prepared session is replayed', async () => {
+  const videos = postVideos(1);
+  const discard = vi.fn().mockResolvedValue(undefined);
+  const prepare = vi.fn().mockResolvedValue({ videos: postVideos(2) });
+  const { result } = renderHook(() => useDownloadDraftBatch({
+    scan: async () => [{ input: videos[0].pageUrl, valid: true, kind: 'web_video' }], prepare, discard,
+  }));
+  await act(async () => {
+    void result.current.start(videos[0].pageUrl, videos);
+    await result.current.start(videos[0].pageUrl, videos);
+  });
+  await waitFor(() => expect(result.current.items).toHaveLength(3));
+  expect(prepare).toHaveBeenCalledTimes(1);
+  expect(result.current.items.map(item => item.result?.confirmation?.video?.previewId)).toEqual([
+    'preview-1-2', 'preview-2-2', 'preview-3-2',
+  ]);
+  expect(discard.mock.calls.map(([id]) => id).sort()).toEqual([
+    'video-page:preview-1-1', 'video-page:preview-2-1', 'video-page:preview-3-1',
+  ]);
+});
+
+it('fails a missing media refresh without substituting a different video', async () => {
+  const discard = vi.fn().mockResolvedValue(undefined);
+  let version = 0;
+  const { result } = renderHook(() => useDownloadDraftBatch({
+    scan: async () => [{ input: 'https://x.com/example/status/123', valid: true, kind: 'web_video' }],
+    prepare: async () => ({ videos: ++version === 1 ? postVideos(version) : postVideos(version).filter(video => video.mediaId !== 'media-2') }), discard,
+  }));
+  await act(async () => { await result.current.start('post'); });
+  await waitFor(() => expect(result.current.items).toHaveLength(3));
+  act(() => result.current.retry(result.current.items[1].id));
+  await waitFor(() => expect(result.current.items[1].status).toBe('failed'));
+  expect(result.current.items[1].selected).toBe(false);
+  expect(result.current.items).toHaveLength(3);
+  expect(discard).toHaveBeenCalledWith('video-page:preview-1-2');
+  expect(discard).toHaveBeenCalledWith('video-page:preview-3-2');
+});
 
 it('probes an unmatched webpage after final scan classification instead of preparing HTML', async () => {
   const input = 'https://example.test/watch.shtml';
@@ -394,7 +483,7 @@ it('keeps a deselected video and its chosen resolution unchanged when reparsing 
     prepare: async () => {
       version += 1;
       return { confirmation: videoConfirmation({
-        previewId: `preview-${version}`, pageUrl: 'https://example.test/video', title: 'Video', site: 'Example', duration: 10, thumbnail: null,
+        mediaId: 'video', previewId: `preview-${version}`, pageUrl: 'https://example.test/video', title: 'Video', site: 'Example', duration: 10, thumbnail: null,
         formats: [
           { id: `large-${version}`, width: 1280, height: 720, ext: 'mp4', bytes: null, estimated: false },
           { id: `small-${version}`, width: 640, height: 360, ext: 'mp4', bytes: null, estimated: false },

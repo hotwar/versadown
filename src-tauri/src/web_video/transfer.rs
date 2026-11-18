@@ -115,12 +115,13 @@ pub(super) async fn download(
         None
     };
     if let Some(expected) = media_id {
-        // A regular match-filter silently returns success after skipping a video.
-        // Require a breaking filter AND a completion marker before publishing.
+        // A single page can contain several videos. Skip the other IDs without
+        // aborting before the selected entry; the completion marker below still
+        // rejects a missing/replaced video even when yt-dlp exits successfully.
         cmd.args([
             "--encoding",
             "utf-8",
-            "--break-match-filters",
+            "--match-filter",
             &identity_filter(expected)?,
             "--print",
             "after_move:VD-DONE\t%(id)s",
@@ -211,9 +212,6 @@ pub(super) async fn download(
         _ = &mut stop => { stop_child(&mut child).await; return Ok(None); }
         status = child.wait() => status.map_err(|_| "video.error.download")?,
     };
-    if media_id.is_some() && status.code() == Some(101) {
-        return Err("video.error.identity".into());
-    }
     if !status.success() {
         return Err(diagnostics.message("video.error.download").into());
     }

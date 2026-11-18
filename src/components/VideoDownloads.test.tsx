@@ -6,10 +6,61 @@ import { selectedResourceIds, type DownloadDraftItem } from './useDownloadDraftB
 import { videoConfirmation } from '../lib/webVideo';
 import type { VideoPreview } from '../lib/types';
 
+it('shows every video from one post and submits each selected preview independently', async () => {
+  const pageUrl = 'https://x.com/Ekimko/status/2111347724071088497';
+  const videos: VideoPreview[] = [1, 2, 3].map(index => ({
+    mediaId: `media-${index}`, previewId: `preview-${index}`, pageUrl, title: `Post video ${index}`,
+    site: 'Twitter', duration: 20, thumbnail: null,
+    formats: [
+      { id: '720', width: 1280, height: 720, ext: 'mp4', bytes: null, estimated: true },
+      { id: '360', width: 640, height: 360, ext: 'mp4', bytes: null, estimated: true },
+    ],
+  }));
+  const submit = vi.fn().mockResolvedValue(undefined);
+  const discard = vi.fn().mockResolvedValue(undefined);
+  const user = userEvent.setup();
+  render(<NewDownloadDialog open placement="modal" initialInput={pageUrl}
+    onScan={async () => [{ input: pageUrl, valid: true, kind: 'web_video' }]}
+    onParse={async () => ({ videos })} onDiscardPrepared={discard} onSubmitBatch={submit} onClose={() => {}} />);
+  const first = within(await screen.findByRole('article', { name: 'Post video 1' }));
+  const second = within(screen.getByRole('article', { name: 'Post video 2' }));
+  const third = within(screen.getByRole('article', { name: 'Post video 3' }));
+  expect(first.getByRole('checkbox', { name: '1280 × 720' })).toBeChecked();
+  await user.click(second.getByRole('checkbox', { name: '640 × 360' }));
+  await user.click(second.getByRole('checkbox', { name: '1280 × 720' }));
+  await user.click(third.getByRole('checkbox', { name: /Post video 3/ }));
+  await user.click(screen.getByRole('button', { name: '新建任务' }));
+  const selected: DownloadDraftItem[] = submit.mock.calls[0][0];
+  expect(selected.map(item => [item.result?.confirmation?.video?.previewId, selectedResourceIds(item)])).toEqual([
+    ['preview-1', ['720']], ['preview-2', ['360']],
+  ]);
+  expect(discard).toHaveBeenCalledWith('video-page:preview-3');
+});
+
+it('opens already parsed header videos without extracting the page again', async () => {
+  const pageUrl = 'https://x.com/example/status/123';
+  const videos: VideoPreview[] = [1, 2, 3].map(index => ({
+    mediaId: String(index), previewId: `header-${index}`, pageUrl, title: `Header video ${index}`,
+    site: 'Twitter', duration: null, thumbnail: null,
+    formats: [{ id: '720', width: 1280, height: 720, ext: 'mp4', bytes: null, estimated: true }],
+  }));
+  const scan = vi.fn();
+  const prepare = vi.fn();
+  const discard = vi.fn().mockResolvedValue(undefined);
+  const user = userEvent.setup();
+  render(<NewDownloadDialog open placement="modal" initialInput={pageUrl} initialVideos={videos}
+    onScan={scan} onParse={prepare} onDiscardPrepared={discard} onSubmitBatch={vi.fn()} onClose={() => {}} />);
+  await screen.findByRole('article', { name: 'Header video 3' });
+  expect(scan).not.toHaveBeenCalled();
+  expect(prepare).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('button', { name: '取消' }));
+  expect(discard.mock.calls.map(([id]) => id).sort()).toEqual(['video-page:header-1', 'video-page:header-2', 'video-page:header-3']);
+});
+
 it('selects exact resolutions across pages and submits working pages even when one link fails', async () => {
   const cases = ['https://youtu.be/jNQXAC9IVRw', 'https://www.bilibili.com/video/BV1bK411W797', 'https://youtu.be/unavailable'];
   const mk = (url: string): VideoPreview => ({
-    previewId: url === cases[0] ? 'preview-1' : 'preview-2', pageUrl: url, site: url === cases[0] ? 'YouTube' : 'Bilibili', title: url === cases[0] ? 'At the zoo' : '合唱',
+    mediaId: url, previewId: url === cases[0] ? 'preview-1' : 'preview-2', pageUrl: url, site: url === cases[0] ? 'YouTube' : 'Bilibili', title: url === cases[0] ? 'At the zoo' : '合唱',
     thumbnail: null, duration: 70, formats: [
       { id: 'v1+a', width: 1920, height: 1080, ext: 'mp4', bytes: null, estimated: true },
       { id: 'v2', width: 640, height: 360, ext: 'mp4', bytes: 2000000, estimated: false },
@@ -45,7 +96,7 @@ it('keeps other selections through automatic probe failure, ordinary fallback an
   const prepare = vi.fn(async (input: string, _code?: string, probe?: boolean) => {
     if (input === direct && probe) throw new Error('没有找到视频');
     if (input === direct) return {confirmation:{taskId:'pending-direct', title:'文章', resources:[], processing:[], requiresConfirmation:true}};
-    return { confirmation:videoConfirmation({ previewId:'video-id', pageUrl:other, title:'短片', site:'Vimeo', thumbnail:null, duration:25,
+    return { confirmation:videoConfirmation({ mediaId:'video', previewId:'video-id', pageUrl:other, title:'短片', site:'Vimeo', thumbnail:null, duration:25,
       formats: [{id:'a',width:0,height:720,ext:'webm',bytes:null,estimated:true},{id:'b',width:0,height:0,ext:'mp4',bytes:null,estimated:true}] }) };
   });
   const user = userEvent.setup();
@@ -76,7 +127,7 @@ it('keeps only unfinished choices available after partial video submission', asy
   let generation = 0;
   const prepare = async () => {
     const version = ++generation;
-    return { confirmation:videoConfirmation({ previewId:'partial-' + version, pageUrl:input, title:'短片', site:'Vimeo', thumbnail:null, duration:25,
+    return { confirmation:videoConfirmation({ mediaId:'partial', previewId:'partial-' + version, pageUrl:input, title:'短片', site:'Vimeo', thumbnail:null, duration:25,
       formats:[{id:'large-'+version,width:1280,height:720,ext:'mp4',bytes:null,estimated:true},{id:'small-'+version,width:640,height:360,ext:'mp4',bytes:null,estimated:true}] }) };
   };
   const submit = vi.fn(async (items:DownloadDraftItem[]) => [{id:items[0].id,resourceIds:['small-'+generation],message:'下载选项已过期'}]);
@@ -107,7 +158,7 @@ it('automatically shows an embedded-video preview in the same card as dedicated 
   render(<NewDownloadDialog open placement="modal" initialInput={page} onScan={async () => [
     {input:page,valid:true,kind:'direct',canProbeVideo:true},
   ]} onParse={async (_input, _code, probe) => probe
-    ? {confirmation:videoConfirmation({previewId:'embedded',pageUrl:page,title:'嵌入视频',site:'example.test',thumbnail:null,duration:null,
+    ? {confirmation:videoConfirmation({mediaId:'embedded',previewId:'embedded',pageUrl:page,title:'嵌入视频',site:'example.test',thumbnail:null,duration:null,
       formats:[{id:'width-only',width:960,height:0,ext:'mp4',bytes:null,estimated:false}]})}
     : {confirmation:{taskId:'direct-draft',title:'普通网页',resources:[],processing:[],requiresConfirmation:true}}}
     onDiscardPrepared={async () => {}} onSubmitBatch={submit} onClose={() => {}} />);
