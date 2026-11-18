@@ -244,7 +244,7 @@ it('highlights a newer release and opens its official download page from About',
   const update = {
     version: '0.3.1',
     notes: '新增版本更新提示，并优化隐私任务操作体验。',
-    downloadUrl: 'https://versadown.aigutta.com/#download'
+    downloadUrl: 'https://www.versadown.com/#gate'
   };
   state.updateCheck.mockResolvedValue(update);
   const user = userEvent.setup();
@@ -286,7 +286,7 @@ it('checks at startup without blocking tasks and allows a fresh manual check', a
   await user.click(check);
   expect(state.updateCheck).toHaveBeenCalledTimes(2);
   expect(check).toBeDisabled();
-  await act(async () => { manual.resolve({ version: '0.3.1', notes: '', downloadUrl: 'https://versadown.aigutta.com/#download' }); });
+  await act(async () => { manual.resolve({ version: '0.3.1', notes: '', downloadUrl: 'https://www.versadown.com/#gate' }); });
   expect(screen.getByText('新版本发布：0.3.1')).toBeVisible();
   expect(screen.queryByText('当前没有可用更新。')).not.toBeInTheDocument();
 });
@@ -305,7 +305,7 @@ it('keeps startup failures quiet and recovers through a manual check', async () 
 });
 
 it('preserves a known update after a failed check and clears it after a successful no-update result', async () => {
-  const update = { version: '0.3.1', notes: 'Update notes', downloadUrl: 'https://versadown.aigutta.com/#download' };
+  const update = { version: '0.3.1', notes: 'Update notes', downloadUrl: 'https://www.versadown.com/#gate' };
   state.updateCheck.mockResolvedValueOnce(update).mockRejectedValueOnce(new Error('Offline')).mockResolvedValueOnce(null);
   const user = userEvent.setup();
   await act(async () => { render(<App />); });
@@ -322,7 +322,7 @@ it('preserves a known update after a failed check and clears it after a successf
 });
 
 it('reports browser-opening failures and lets the user retry without clearing the update', async () => {
-  state.updateCheck.mockResolvedValue({ version: '0.3.1', notes: '', downloadUrl: 'https://versadown.aigutta.com/#download' });
+  state.updateCheck.mockResolvedValue({ version: '0.3.1', notes: '', downloadUrl: 'https://www.versadown.com/#gate' });
   state.openExternalUrl.mockRejectedValueOnce(new Error('Opener unavailable')).mockResolvedValueOnce(undefined);
   const user = userEvent.setup();
   await act(async () => { render(<App />); });

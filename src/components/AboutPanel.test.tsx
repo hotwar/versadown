@@ -39,7 +39,7 @@ it('disables manual checking while checking and distinguishes failure from no up
 });
 
 it('shows release notes as text and a localized fallback when they are empty', () => {
-  const update = { version: '0.3.1', notes: '<b>Release notes</b>', downloadUrl: 'https://versadown.aigutta.com/#download' };
+  const update = { version: '0.3.1', notes: '<b>Release notes</b>', downloadUrl: 'https://www.versadown.com/#gate' };
   const { rerender } = render(<AboutPanel icon="/icon.png" update={update} checkStatus="available" />);
   const notes = screen.getByText('<b>Release notes</b>');
   expect(notes.querySelector('b')).toBeNull();

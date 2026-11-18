@@ -10,7 +10,7 @@ vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: native.openUrl }));
 import { checkForAppUpdate, openExternalUrl } from './api';
 
 const update: AppUpdate = {
-  version: '0.3.1', notes: 'Update notes', downloadUrl: 'https://versadown.aigutta.com/#download'
+  version: '0.3.1', notes: 'Update notes', downloadUrl: 'https://www.versadown.com/#gate'
 };
 
 beforeEach(() => {
@@ -69,10 +69,10 @@ it('opens the official download page with the matching main-window permission', 
 });
 
 it.each([
-  'http://versadown.aigutta.com/#download',
-  'https://versadown.aigutta.com.evil.test/#download',
-  'https://versadown.aigutta.com:8443/#download',
-  'https://user@versadown.aigutta.com/#download',
+  'http://www.versadown.com/#gate',
+  'https://www.versadown.com.evil.test/#gate',
+  'https://www.versadown.com:8443/#gate',
+  'https://user@www.versadown.com/#gate',
   'file:///C:/Windows/notepad.exe'
 ])('rejects an unauthorized destination: %s', async url => {
   await expect(openExternalUrl(url)).rejects.toThrow();

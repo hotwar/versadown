@@ -676,7 +676,7 @@ const messages = {
   'about.checkUpdateFailed': 'Unable to check for updates. Please try again later.',
   'about.downloadOfficial': 'Download from official website',
   'about.updateNotesFallback': 'Visit the official website to read about this update.',
-  'about.openUpdateFailed': 'Unable to open the official website. Try again or visit versadown.aigutta.com in your browser.',
+  'about.openUpdateFailed': 'Unable to open the official website. Try again or visit www.versadown.com in your browser.',
   'about.updateDesktopOnly': 'Check for updates in the desktop app.',
   'about.versionLabel': 'Version {version}',
   'about.intro': 'A versatile downloader for Windows, macOS, and Linux. It supports common download protocols and centralizes cloud-drive file management to make downloading easier.',

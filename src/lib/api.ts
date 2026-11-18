@@ -371,7 +371,7 @@ export async function checkForAppUpdate(): Promise<AppUpdate | null> {
 }
 
 export async function openExternalUrl(url: string): Promise<void> {
-  if (url !== 'https://versadown.aigutta.com/#download') throw new Error(t('about.openUpdateFailed'));
+  if (url !== 'https://www.versadown.com/#gate') throw new Error(t('about.openUpdateFailed'));
   if (isTauriRuntime()) {
     const { openUrl } = await import('@tauri-apps/plugin-opener');
     await openUrl(url);

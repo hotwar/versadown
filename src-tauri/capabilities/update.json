@@ -6,7 +6,7 @@
   "permissions": [
     {
       "identifier": "opener:allow-open-url",
-      "allow": [{ "url": "https://versadown.aigutta.com/#download" }]
+      "allow": [{ "url": "https://www.versadown.com/#gate" }]
     }
   ]
 }
