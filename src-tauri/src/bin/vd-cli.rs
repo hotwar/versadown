@@ -3,6 +3,8 @@
 mod cli_protocol;
 #[path = "../cli_cloud_protocol.rs"]
 mod cli_cloud_protocol;
+#[path = "../agent_interaction_protocol.rs"]
+mod agent_interaction_protocol;
 #[path = "../cli_client.rs"]
 mod cli_client;
 #[path = "../cli_setup.rs"]
@@ -11,6 +13,7 @@ mod cli_setup;
 use cli_protocol::{BatchItemInput, Request, ResourceConfirmInput, ResourcePrepareInput, Response, PROTOCOL_VERSION};
 use cli_client::LocalClient;
 use cli_cloud_protocol::CloudRequest;
+use agent_interaction_protocol::{InteractionRequest, valid_interaction_id};
 use serde_json::json;
 use std::{path::PathBuf, process::ExitCode, time::Duration};
 
@@ -95,6 +98,16 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, ()> {
     }
     let command = positional.first().map(String::as_str).unwrap_or("help");
     match command {
+        "interaction" => {
+            if positional.len() != 3 || !valid_interaction_id(&positional[2]) { return Err(()); }
+            let interaction_id = positional[2].clone();
+            request.interaction = Some(match positional[1].as_str() {
+                "status" => InteractionRequest::Status { interaction_id },
+                "cancel" => InteractionRequest::Cancel { interaction_id },
+                "resume" => InteractionRequest::Resume { interaction_id },
+                _ => return Err(()),
+            });
+        }
         "cloud" => {
             let action = positional.get(1).map(String::as_str).ok_or(())?;
             let input = match action {
@@ -128,11 +141,12 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, ()> {
         }
         "add" if positional.len() == 2 => {
             if !valid_direct_url(&positional[1]) { return Err(()); }
-            if !request.directory.as_ref().is_some_and(|d| std::path::Path::new(d).is_absolute())
+            if request.directory.as_ref().is_some_and(|d| !std::path::Path::new(d).is_absolute())
                 || !request.request_id.as_ref().is_some_and(|id| valid_request_id(id)) {
                 return Err(());
             }
             request.url = Some(positional[1].clone());
+            request.directory.get_or_insert_with(String::new);
         }
         _ => return Err(()),
     }
@@ -151,7 +165,7 @@ fn parse(args: impl IntoIterator<Item = String>) -> Result<Options, ()> {
 fn help(lang: &str) -> Response {
     Response::success(json!({
         "description": cli_protocol::message("HELP", lang),
-        "commands": ["help", "version", "doctor", "mcp-config", "health", "add URL --directory PATH --request-id ID", "batch-add --file JSON_FILE", "prepare --file JSON_FILE", "confirm --file JSON_FILE", "list [--status STATUS] [--query TEXT] [--parent-id ID] [--cursor CURSOR] [--limit 1..100]", "status ID", "pause ID", "resume ID", "cancel ID", "wait ID [--timeout SECONDS]", "result ID", "cloud accounts [--provider PROVIDER]", "cloud auth-begin --file JSON_FILE", "cloud auth-status AUTHORIZATION_ID", "cloud auth-cancel AUTHORIZATION_ID", "cloud prepare --file JSON_FILE", "cloud confirm --file JSON_FILE", "cloud status OPERATION_ID", "cloud cancel OPERATION_ID"],
+        "commands": ["help", "version", "doctor", "mcp-config", "health", "add URL [--directory PATH] --request-id ID", "batch-add --file JSON_FILE", "prepare --file JSON_FILE", "confirm --file JSON_FILE", "list [--status STATUS] [--query TEXT] [--parent-id ID] [--cursor CURSOR] [--limit 1..100]", "status ID", "pause ID", "resume ID", "cancel ID", "wait ID [--timeout SECONDS]", "result ID", "cloud accounts [--provider PROVIDER]", "cloud auth-begin --file JSON_FILE", "cloud auth-status AUTHORIZATION_ID", "cloud auth-cancel AUTHORIZATION_ID", "cloud prepare --file JSON_FILE", "cloud confirm --file JSON_FILE", "cloud status OPERATION_ID", "cloud cancel OPERATION_ID", "interaction status INTERACTION_ID", "interaction cancel INTERACTION_ID", "interaction resume INTERACTION_ID"],
         "options": ["--json", "--lang en|zh-CN", "--discovery PATH", "--no-start", "--timeout SECONDS"],
         "protocol_version": PROTOCOL_VERSION,
         "agent_guide": cli_setup::agent_guide(lang)
@@ -239,7 +253,7 @@ async fn load_request_file(request: &mut Request, path: &std::path::Path) -> Res
             for item in &items {
                 // Keep per-item URL/directory semantics on the host so CLI and
                 // MCP expose the same partial-success batch contract.
-                if item.url.is_empty() || item.url.len() > 8192 || item.directory.is_empty() || item.directory.len() > 4096
+                if item.url.is_empty() || item.url.len() > 8192 || item.directory.len() > 4096
                     || !valid_request_id(&item.request_id) || !request_ids.insert(item.request_id.clone()) {
                     return Err(());
                 }
@@ -256,8 +270,8 @@ async fn load_request_file(request: &mut Request, path: &std::path::Path) -> Res
         }
         "confirm" => {
             let input: ResourceConfirmInput = serde_json::from_slice(&bytes).map_err(|_| ())?;
-            if !bounded(&input.preparation_id, 128) || !bounded(&input.directory, 4096)
-                || !std::path::Path::new(&input.directory).is_absolute() || !valid_request_id(&input.request_id)
+            if !bounded(&input.preparation_id, 128) || input.directory.len() > 4096
+                || (!input.directory.is_empty() && !std::path::Path::new(&input.directory).is_absolute()) || !valid_request_id(&input.request_id)
                 || input.selection_ids.is_empty() || input.selection_ids.len() > 100
                 || input.selection_ids.iter().any(|value| !bounded(value, 256))
                 || input.selection_ids.iter().collect::<std::collections::HashSet<_>>().len() != input.selection_ids.len() { return Err(()); }
@@ -326,6 +340,44 @@ async fn main() -> ExitCode {
 mod tests {
     use super::*;
     fn options(args: &[&str]) -> Result<Options, ()> { parse(args.iter().map(|s| s.to_string())) }
+
+
+    #[test]
+    fn interaction_parser_exposes_only_status_cancel_and_explicit_resume() {
+        let id = "11111111-1111-4111-8111-111111111111";
+        for action in ["status", "cancel", "resume"] {
+            let parsed = options(&["interaction", action, id]).unwrap();
+            assert_eq!(parsed.request.command, "interaction");
+            assert_eq!(parsed.request.interaction.as_ref().unwrap().id(), id);
+            assert_eq!(serde_json::to_value(parsed.request.interaction.unwrap()).unwrap()["action"], action);
+        }
+        for args in [
+            vec!["interaction"], vec!["interaction", "status"], vec!["interaction", "approve", id],
+            vec!["interaction", "status", id, "extra"], vec!["interaction", "status", "secret"],
+            vec!["interaction", "status", "00000000-0000-0000-0000-000000000000"],
+            vec!["interaction", "resume", id, "--approved", "true"],
+            vec!["interaction", "resume", id, "--file", "approval.json"],
+            vec!["interaction", "status", id, "--provider", "quark"],
+        ] { assert!(options(&args).is_err(), "{args:?}"); }
+    }
+
+    #[tokio::test]
+    async fn download_inputs_allow_vd_to_choose_the_directory() {
+        let parsed = options(&["add","https://example.test/file","--request-id","stable"]).unwrap();
+        assert_eq!(parsed.request.directory.as_deref(), Some(""));
+        assert!(options(&["add","https://example.test/file","--directory","relative","--request-id","stable"]).is_err());
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("request.json");
+        std::fs::write(&file, json!({"preparation_id":"prepared","selection_ids":["choice"],
+            "request_id":"stable"}).to_string()).unwrap();
+        let mut request = Request { command:"confirm".into(), ..Request::default() };
+        load_request_file(&mut request, &file).await.unwrap();
+        assert!(request.confirm.unwrap().directory.is_empty());
+        std::fs::write(&file, json!([{"url":"https://example.test/file","request_id":"stable"}]).to_string()).unwrap();
+        let mut request = Request { command:"batch_add".into(), ..Request::default() };
+        load_request_file(&mut request, &file).await.unwrap();
+        assert!(request.items.unwrap()[0].directory.is_empty());
+    }
 
     #[test]
     fn cli_parser_accepts_unicode_and_spaces_without_rewriting() {

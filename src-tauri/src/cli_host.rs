@@ -15,6 +15,15 @@ pub(crate) fn instance_id(app: &tauri::AppHandle) -> String {
     app.state::<HostController>().instance_id.clone()
 }
 
+fn discovery_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("cli").join("connection.json")
+}
+
+pub(crate) fn current_discovery_path(app: &tauri::AppHandle) -> Option<PathBuf> {
+    app.try_state::<HostController>()
+        .map(|controller| discovery_path(&controller.data_dir))
+}
+
 struct Host {
     app: tauri::AppHandle,
     token: String,
@@ -173,8 +182,8 @@ pub(crate) fn refresh(app: &tauri::AppHandle) -> std::io::Result<()> {
     let mut active = controller.active.lock().map_err(|_| std::io::Error::other("host lock"))?;
     let generation = controller.generation.fetch_add(1, Ordering::SeqCst) + 1;
     if let Some(stop) = active.take() { let _ = stop.send(()); }
+    let discovery_path = discovery_path(&controller.data_dir);
     let directory = controller.data_dir.join("cli");
-    let discovery_path = directory.join("connection.json");
     match std::fs::remove_file(&discovery_path) {
         Ok(()) => (),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),

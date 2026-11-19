@@ -1,6 +1,7 @@
 //! Shared local transport for CLI and MCP. Never opens the task database.
 use crate::cli_protocol::{self, ApiError, BatchAddDto, Discovery, HealthDto, PreparedResourceDto, ResourceConfirmDto, Request, Response, TaskDto, TaskListDto, TaskResultDto, PROTOCOL_VERSION};
 use crate::cli_cloud_protocol::{CloudRequest, CloudAccountsDto, CloudAuthorizationDto, CloudPreparedDto, CloudOperationDto};
+use crate::agent_interaction_protocol::{InteractionDto, valid_interaction_id};
 use std::{path::PathBuf, time::Duration};
 #[path = "cli_bootstrap.rs"]
 mod bootstrap;
@@ -144,6 +145,7 @@ pub(crate) async fn call(client: &reqwest::Client, discovery: &Discovery, reques
             "prepare" => project::<PreparedResourceDto>(data),
             "confirm" => project::<ResourceConfirmDto>(data),
             "cloud" => project_cloud(data, request.cloud.as_ref().ok_or(()), lang),
+            "interaction" => project_interaction(data, request.interaction.as_ref().map(|r|r.id()).ok_or(()), lang),
             "add" | "status" | "pause" | "resume" | "cancel" => project_task(data, lang),
             _ => Err(()),
         };
@@ -162,7 +164,7 @@ fn project<T: serde::de::DeserializeOwned + serde::Serialize>(data: serde_json::
 
 fn known_error(code: &str) -> bool {
     matches!(code, "INVALID_ARGUMENT" | "HOST_UNAVAILABLE" | "UNAUTHORIZED" | "NOT_FOUND" | "REQUEST_CONFLICT" | "DUPLICATE" | "INTERNAL_ERROR" | "TASK_FAILED" | "TASK_CANCELLED" | "TIMEOUT" | "INTERRUPTED" | "PROTOCOL_ERROR" | "UNSUPPORTED" | "ENGINE_UNAVAILABLE" | "ACTION_FAILED" | "FORBIDDEN" | "HOST_DISABLED" | "TASK_NOT_READY" | "BUSY" | "AUTH_REQUIRED" | "CLI_RECOVERY_REQUIRED" | "PREPARATION_EXPIRED" | "CLOUD_WRITE_REQUIRED" | "METADATA_UNAVAILABLE" | "RESOURCE_LIMIT" | "ACCESS_CODE_REQUIRED"
-        | "CLOUD_PERMISSION_REQUIRED" | "ACCOUNT_MISMATCH" | "CLOUD_RESULT_UNCERTAIN" | "FILE_CONFLICT" | "SOURCE_CHANGED")
+        | "CLOUD_PERMISSION_REQUIRED" | "ACCOUNT_MISMATCH" | "CLOUD_RESULT_UNCERTAIN" | "FILE_CONFLICT" | "SOURCE_CHANGED" | "USER_ACTION_REQUIRED")
 }
 
 fn known_provider(value: &str) -> bool { matches!(value, "quark" | "pikpak" | "baidu" | "aliyun" | "xunlei" | "uc") }
@@ -171,6 +173,7 @@ fn cloud_text(value: &str, max: usize) -> bool { !value.is_empty() && value.len(
 
 fn sanitize_error(error: &ApiError, lang: &str) -> ApiError {
     let mut safe = ApiError::new(if known_error(&error.code) { &error.code } else { "ACTION_FAILED" }, lang);
+    safe.interaction_id = error.interaction_id.as_ref().filter(|value| valid_interaction_id(value)).cloned();
     safe.retry_after_ms = error.retry_after_ms.map(|ms| ms.min(86_400_000));
     safe.provider = error.provider.as_ref().filter(|value| known_provider(value)).cloned();
     safe.reason = error.reason.as_ref().filter(|value| matches!(value.as_str(),
@@ -180,8 +183,22 @@ fn sanitize_error(error: &ApiError, lang: &str) -> ApiError {
 }
 
 fn project_cloud(data: serde_json::Value, request: Result<&CloudRequest, ()>, lang: &str) -> Result<serde_json::Value, ()> {
-    match request? {
-        CloudRequest::Accounts { .. } => {
+    let action = match request? {
+        CloudRequest::Accounts { .. } => "accounts",
+        CloudRequest::AuthBegin { .. } => "auth_begin",
+        CloudRequest::AuthStatus { .. } => "auth_status",
+        CloudRequest::AuthCancel { .. } => "auth_cancel",
+        CloudRequest::Prepare { .. } => "prepare",
+        CloudRequest::Confirm { .. } => "confirm",
+        CloudRequest::Status { .. } => "status",
+        CloudRequest::Cancel { .. } => "cancel",
+    };
+    project_cloud_action(data, action, lang)
+}
+
+fn project_cloud_action(data: serde_json::Value, action: &str, lang: &str) -> Result<serde_json::Value, ()> {
+    match action {
+        "accounts" => {
             let mut data: CloudAccountsDto = serde_json::from_value(data).map_err(|_| ())?;
             if data.accounts.len() > 6 || data.accounts.iter().any(|account| !known_provider(&account.provider)) { return Err(()); }
             for account in &mut data.accounts {
@@ -194,7 +211,7 @@ fn project_cloud(data: serde_json::Value, request: Result<&CloudRequest, ()>, la
             }
             serde_json::to_value(data).map_err(|_| ())
         }
-        CloudRequest::AuthBegin { .. } | CloudRequest::AuthStatus { .. } | CloudRequest::AuthCancel { .. } => {
+        "auth_begin" | "auth_status" | "auth_cancel" => {
             let mut data: CloudAuthorizationDto = serde_json::from_value(data).map_err(|_| ())?;
             if !known_provider(&data.provider) || !matches!(data.status.as_str(), "pending" | "succeeded" | "account_mismatch" | "cancelled" | "closed" | "expired" | "failed") { return Err(()); }
             if !cloud_text(&data.authorization_id, 128) || data.account_ref.as_deref().is_some_and(|value| !cloud_text(value, 256)) { return Err(()); }
@@ -207,7 +224,7 @@ fn project_cloud(data: serde_json::Value, request: Result<&CloudRequest, ()>, la
             }
             serde_json::to_value(data).map_err(|_| ())
         }
-        CloudRequest::Prepare { .. } => {
+        "prepare" => {
             let data: CloudPreparedDto = serde_json::from_value(data).map_err(|_| ())?;
             if !known_provider(&data.provider) || !matches!(data.operation.as_str(), "upload" | "create_share")
                 || !cloud_text(&data.preparation_id, 128) || !cloud_text(&data.account_ref, 256)
@@ -215,7 +232,7 @@ fn project_cloud(data: serde_json::Value, request: Result<&CloudRequest, ()>, la
                 || data.effects.len() > 8 || data.effects.iter().any(|effect| !cloud_text(effect, 128)) { return Err(()); }
             serde_json::to_value(data).map_err(|_| ())
         }
-        CloudRequest::Confirm { .. } | CloudRequest::Status { .. } | CloudRequest::Cancel { .. } => {
+        "confirm" | "status" | "cancel" => {
             let mut data: CloudOperationDto = serde_json::from_value(data).map_err(|_| ())?;
             if !known_provider(&data.provider) || data.failures.len() > 100 || data.files.len() > 100 { return Err(()); }
             if !cloud_text(&data.id, 128) || !cloud_text(&data.request_id, 128) || !cloud_text(&data.account_ref, 256)
@@ -235,6 +252,57 @@ fn project_cloud(data: serde_json::Value, request: Result<&CloudRequest, ()>, la
             data.supported_actions.retain(|action| matches!(action.as_str(), "cancel" | "pause" | "resume"));
             serde_json::to_value(data).map_err(|_| ())
         }
+        _ => Err(()),
+    }
+}
+
+fn project_interaction(data: serde_json::Value, expected_id: Result<&str, ()>, lang: &str) -> Result<serde_json::Value, ()> {
+    let mut interaction: InteractionDto = serde_json::from_value(data).map_err(|_| ())?;
+    if !valid_interaction_id(&interaction.id)
+        || uuid::Uuid::parse_str(&interaction.id).ok() != uuid::Uuid::parse_str(expected_id?).ok()
+        || !matches!(interaction.status.as_str(), "awaiting_user" | "awaiting_login" | "resuming" | "succeeded" | "failed" | "cancelled" | "expired" | "interrupted")
+        || !matches!(interaction.kind.as_str(), "local_access" | "cloud_account" | "cloud_login")
+        || interaction.provider.as_deref().is_some_and(|provider| !known_provider(provider))
+        || !matches!(interaction.command.as_str(), "add" | "batch_add" | "prepare" | "confirm" | "cloud")
+        || (interaction.command == "cloud" && !matches!(interaction.cloud_action.as_deref(), Some("prepare" | "confirm")))
+        || (interaction.command != "cloud" && interaction.cloud_action.is_some()) {
+        return Err(());
+    }
+    let pending = matches!(interaction.status.as_str(), "awaiting_user" | "awaiting_login" | "resuming");
+    interaction.poll_interval_ms = if pending { interaction.poll_interval_ms.clamp(1000, 30_000) } else { 0 };
+    if pending && interaction.result.is_some() { return Err(()); }
+    if let Some(mut result) = interaction.result.take() {
+        if result.ok != result.error.is_none() || (result.ok && result.data.is_none())
+            || (result.ok != (interaction.status == "succeeded")) { return Err(()); }
+        if let Some(error) = &result.error {
+            if !known_error(&error.code) || error.code == "USER_ACTION_REQUIRED" || error.interaction_id.is_some() { return Err(()); }
+            result.error = Some(sanitize_error(error, lang));
+        }
+        if let Some(data) = result.data.take() {
+            result.data = Some(match interaction.command.as_str() {
+                "add" => project_task(data, lang),
+                "batch_add" => project_batch(data, lang),
+                "prepare" => project::<PreparedResourceDto>(data),
+                "confirm" => project::<ResourceConfirmDto>(data),
+                "cloud" => project_cloud_action(data, interaction.cloud_action.as_deref().ok_or(())?, lang),
+                _ => Err(()),
+            }?);
+        }
+        // Typed projections remove host-only fields first; no nested result may
+        // start another authorization loop, including batch/task failure DTOs.
+        if contains_interaction_reference(&serde_json::to_value(&result).map_err(|_| ())?) { return Err(()); }
+        interaction.result = Some(result);
+    } else if matches!(interaction.status.as_str(), "succeeded" | "failed") { return Err(()); }
+    serde_json::to_value(interaction).map_err(|_| ())
+}
+
+fn contains_interaction_reference(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(object) => object.get("code").and_then(|v| v.as_str()) == Some("USER_ACTION_REQUIRED")
+            || object.get("interaction_id").is_some_and(|v| !v.is_null())
+            || object.values().any(contains_interaction_reference),
+        serde_json::Value::Array(values) => values.iter().any(contains_interaction_reference),
+        _ => false,
     }
 }
 
@@ -276,9 +344,7 @@ fn project_batch(data: serde_json::Value, lang: &str) -> Result<serde_json::Valu
             if item.data.is_some() { return Err(()); }
             let error = item.error.take().ok_or(())?;
             if !known_error(&error.code) { return Err(()); }
-            let mut safe = ApiError::new(&error.code, lang);
-            safe.retry_after_ms = error.retry_after_ms.map(|ms| ms.min(86_400_000));
-            item.error = Some(safe);
+            item.error = Some(sanitize_error(&error, lang));
         }
     }
     if batch.accepted != accepted || batch.failed != batch.items.len() as u32 - accepted { return Err(()); }
@@ -288,6 +354,116 @@ fn project_batch(data: serde_json::Value, lang: &str) -> Result<serde_json::Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    const INTERACTION_ID: &str = "11111111-1111-4111-8111-111111111111";
+
+    fn completed_interaction() -> serde_json::Value {
+        json!({"id":INTERACTION_ID,"status":"succeeded","kind":"local_access","provider":null,
+            "expires_at":600,"poll_interval_ms":999999,"command":"confirm","cloud_action":null,
+            "result":{"ok":true,"data":{"preparation_id":"prepared","task_ids":["task-id"],
+                "token":"secret"},"cookie":"secret"},"token":"secret"})
+    }
+
+    #[test]
+    fn interaction_projection_keeps_typed_original_result_and_drops_internal_fields() {
+        let result = project_interaction(completed_interaction(), Ok(INTERACTION_ID), "en").unwrap();
+        assert_eq!(result["result"]["data"]["task_ids"], json!(["task-id"]));
+        assert_eq!(result["poll_interval_ms"], 0);
+        assert!(!result.to_string().contains("secret"));
+        let mut data = completed_interaction();
+        data["status"] = json!("awaiting_user"); data["result"] = serde_json::Value::Null;
+        assert_eq!(project_interaction(data.clone(), Ok(INTERACTION_ID), "en").unwrap()["poll_interval_ms"], 30000);
+        data["poll_interval_ms"] = json!(1); data["status"] = json!("awaiting_login");
+        assert_eq!(project_interaction(data.clone(), Ok(INTERACTION_ID), "en").unwrap()["poll_interval_ms"], 1000);
+        data["status"] = json!("expired");
+        assert_eq!(project_interaction(data, Ok(INTERACTION_ID), "en").unwrap()["poll_interval_ms"], 0);
+    }
+
+    #[test]
+    fn interaction_projection_rejects_wrong_identity_action_state_and_untyped_results() {
+        for (key, value) in [
+            ("id", json!("22222222-2222-4222-8222-222222222222")),
+            ("status", json!("approved")),
+            ("status", json!("awaiting_user")),
+            ("status", json!("failed")),
+            ("status", json!("cancelled")),
+            ("kind", json!("unrestricted")),
+            ("provider", json!("secret")),
+            ("command", json!("interaction")),
+            ("command", json!("health")),
+            ("cloud_action", json!("confirm")),
+            ("result", serde_json::Value::Null),
+            ("result", json!({"ok":true,"data":{"secret":"opaque result"}})),
+            ("result", json!({"ok":true,"data":{"preparation_id":"p","task_ids":[]},
+                "error":{"code":"INTERNAL_ERROR","message":"secret"}})),
+        ] {
+            let mut data = completed_interaction(); data[key] = value;
+            assert!(project_interaction(data, Ok(INTERACTION_ID), "en").is_err(), "{key}");
+        }
+        assert!(project_interaction(completed_interaction(), Err(()), "en").is_err());
+    }
+
+    #[test]
+    fn interaction_projection_cleans_failure_and_rejects_recursive_approval() {
+        let mut data = completed_interaction();
+        data["status"] = json!("failed");
+        data["result"] = json!({"ok":false,"error":{"code":"AUTH_REQUIRED","message":"secret",
+            "provider":"quark","reason":"expired","next_action":"secret"}});
+        let result = project_interaction(data.clone(), Ok(INTERACTION_ID), "en").unwrap();
+        assert_eq!(result["result"]["error"]["code"], "AUTH_REQUIRED");
+        assert_eq!(result["result"]["error"]["provider"], "quark");
+        assert!(!result.to_string().contains("secret"));
+        for code in ["USER_ACTION_REQUIRED", "UNRECOGNIZED"] {
+            let mut invalid = data.clone(); invalid["result"]["error"]["code"] = json!(code);
+            assert!(project_interaction(invalid, Ok(INTERACTION_ID), "en").is_err());
+        }
+        data["result"]["error"]["interaction_id"] = json!(INTERACTION_ID);
+        assert!(project_interaction(data, Ok(INTERACTION_ID), "en").is_err());
+
+        let mut batch = completed_interaction();
+        batch["command"] = json!("batch_add");
+        batch["result"] = json!({"ok":true,"data":{"items":[{"request_id":"request","ok":false,
+            "error":{"code":"USER_ACTION_REQUIRED","message":"waiting","interaction_id":INTERACTION_ID}}],
+            "accepted":0,"failed":1}});
+        assert!(project_interaction(batch, Ok(INTERACTION_ID), "en").is_err());
+    }
+
+    #[test]
+    fn interaction_projection_uses_cloud_action_to_sanitize_original_result() {
+        let mut data = completed_interaction();
+        data["command"] = json!("cloud"); data["cloud_action"] = json!("confirm");
+        data["kind"] = json!("cloud_account"); data["provider"] = json!("quark");
+        data["result"] = json!({"ok":true,"data":{
+            "id":"operation","request_id":"stable","operation":"create_share","provider":"quark",
+            "account_ref":"opaque","status":"succeeded","completed_bytes":0,"total_bytes":null,
+            "supported_actions":["secret"],"files":[],"failures":[],"error":null,
+            "share":{"url":"https://example.test/share/demo","pass_code":"demo","token":"secret"},
+            "cookie":"secret"}});
+        let result = project_interaction(data.clone(), Ok(INTERACTION_ID), "en").unwrap();
+        assert_eq!(result["result"]["data"]["share"]["pass_code"], "demo");
+        assert!(!result.to_string().contains("secret"));
+        for action in ["prepare", "status", "auth_begin", "unknown"] {
+            data["cloud_action"] = json!(action);
+            assert!(project_interaction(data.clone(), Ok(INTERACTION_ID), "en").is_err(), "{action}");
+        }
+    }
+
+    #[test]
+    fn user_action_error_preserves_only_valid_interaction_identifiers() {
+        let mut error = ApiError::new("USER_ACTION_REQUIRED", "en");
+        error.message = "secret".into(); error.next_action = Some("approve-yourself".into());
+        error.interaction_id = Some(INTERACTION_ID.into());
+        let safe = sanitize_error(&error, "en");
+        assert_eq!(safe.interaction_id.as_deref(), Some(INTERACTION_ID));
+        assert_eq!(safe.next_action.as_deref(), Some("complete_vd_interaction_then_query_status"));
+        assert!(!safe.retryable);
+        assert!(!serde_json::to_string(&safe).unwrap().contains("secret"));
+        for id in ["secret", "00000000-0000-0000-0000-000000000000", "11111111111141118111111111111111"] {
+            error.interaction_id = Some(id.into());
+            assert!(sanitize_error(&error, "en").interaction_id.is_none(), "{id}");
+        }
+    }
 
     #[test]
     fn cloud_projection_keeps_safe_authorization_guidance_and_strips_credentials() {

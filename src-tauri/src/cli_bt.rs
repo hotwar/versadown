@@ -47,10 +47,10 @@ pub(crate) async fn prepare(app: &AppHandle, input: &str) -> Result<BtPreparatio
         crate::parser::CandidateKind::Torrent => {
             let path = if Path::new(&candidate.source).is_absolute() { PathBuf::from(&candidate.source) }
                 else { url::Url::parse(&candidate.source).ok().and_then(|url| url.to_file_path().ok()).ok_or("INVALID_ARGUMENT")? };
-            let path = crate::agent_access::authorize_file(&state, &path)?;
+            let path = crate::agent_access::authorize_upload_file(&state, &path)?;
             let source = path.to_str().ok_or("INVALID_ARGUMENT")?.to_owned();
             let torrent = crate::downloader::load_torrent_base64(&source).await.map_err(|_| "INVALID_ARGUMENT")?;
-            crate::agent_access::authorize_file(&state, &path)?;
+            crate::agent_access::authorize_upload_file(&state, &path)?;
             (source, "torrent", torrent, None)
         },
         _ => return Err("UNSUPPORTED"),

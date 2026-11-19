@@ -18,6 +18,8 @@ pub fn build_dirty() -> Option<bool> {
 pub struct Request {
     pub command: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub interaction: Option<crate::agent_interaction_protocol::InteractionRequest>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub cloud: Option<crate::cli_cloud_protocol::CloudRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
@@ -57,6 +59,8 @@ pub struct Discovery {
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct ApiError {
     pub code: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interaction_id: Option<String>,
     pub message: String,
     #[serde(default)]
     pub retryable: bool,
@@ -73,6 +77,7 @@ pub struct ApiError {
 impl ApiError {
     pub fn new(code: &str, lang: &str) -> Self {
         let (retryable, next_action) = match code {
+            "USER_ACTION_REQUIRED" => (false, Some("complete_vd_interaction_then_query_status")),
             "HOST_UNAVAILABLE" => (false, Some("inspect_desktop")),
             "HOST_DISABLED" => (false, Some("enable_desktop_agent")),
             "FORBIDDEN" => (false, Some("review_directory_permissions")),
@@ -93,7 +98,7 @@ impl ApiError {
             "TASK_FAILED" | "ENGINE_UNAVAILABLE" | "ACTION_FAILED" | "CLI_RECOVERY_REQUIRED" => (false, Some("inspect_desktop")),
             _ => (false, None),
         };
-        Self { code: code.into(), message: message(code, lang).into(), retryable,
+        Self { code: code.into(), interaction_id: None, message: message(code, lang).into(), retryable,
             next_action: next_action.map(str::to_owned),
             retry_after_ms: matches!(code, "BUSY" | "TASK_NOT_READY").then_some(1000), provider:None, reason:None }
     }
@@ -132,7 +137,8 @@ pub struct TaskListDto {
 pub struct BatchItemInput {
     #[schemars(length(min = 1, max = 8192))]
     pub url: String,
-    #[schemars(length(min = 1, max = 4096))]
+    #[serde(default)]
+    #[schemars(length(max = 4096))]
     pub directory: String,
     #[schemars(length(min = 1, max = 128), regex(pattern = "^[A-Za-z0-9_.:-]+$"))]
     pub request_id: String,
@@ -178,7 +184,8 @@ pub struct ResourceConfirmInput {
     pub preparation_id: String,
     #[schemars(length(min = 1, max = 100))]
     pub selection_ids: Vec<String>,
-    #[schemars(length(min = 1, max = 4096))]
+    #[serde(default)]
+    #[schemars(length(max = 4096))]
     pub directory: String,
     #[schemars(length(min = 1, max = 128), regex(pattern = "^[A-Za-z0-9_.:-]+$"))]
     pub request_id: String,
@@ -262,7 +269,7 @@ pub struct TypedResponse<T> {
     pub error: Option<ApiError>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 pub struct Response {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -286,6 +293,8 @@ impl Response {
 pub fn message(key: &str, lang: &str) -> &'static str {
     let zh = lang == "zh-CN";
     match (key, zh) {
+        ("USER_ACTION_REQUIRED", false) => "Complete the request in VD, then query interaction status. Do not create a new request or repeatedly reopen the window.",
+        ("USER_ACTION_REQUIRED", true) => "请在 VD 中完成授权或登录，然后查询 interaction 状态。请勿另建请求或反复打开授权窗口。",
         ("INVALID_ARGUMENT", false) => "Invalid arguments. Use help for usage.",
         ("INVALID_ARGUMENT", true) => "参数无效，请使用 help 查看用法。",
         ("HOST_UNAVAILABLE", false) => "Unable to connect to the local VD Agent service. Confirm VD is running, enable 'Allow local Agent access' in Settings > Advanced, and check the discovery file configuration.",
@@ -298,8 +307,8 @@ pub fn message(key: &str, lang: &str) -> &'static str {
         ("FORBIDDEN", true) => "此操作超出了已授权的下载目录范围。",
         ("AUTH_REQUIRED", false) => "Complete account authorization in the VD application.",
         ("AUTH_REQUIRED", true) => "请在 VD 主程序中完成账号授权。",
-        ("CLOUD_PERMISSION_REQUIRED", false) => "Grant access to this cloud account, folder and operation in VD Agent settings.",
-        ("CLOUD_PERMISSION_REQUIRED", true) => "请在 VD 的 Agent 设置中授予此网盘账号、目录和操作权限。",
+        ("CLOUD_PERMISSION_REQUIRED", false) => "Approve Agent access to this cloud account in VD.",
+        ("CLOUD_PERMISSION_REQUIRED", true) => "请在 VD 中确认允许 Agent 使用此网盘账号。",
         ("ACCOUNT_MISMATCH", false) => "The cloud account changed. Select the account and prepare the operation again.",
         ("ACCOUNT_MISMATCH", true) => "网盘账号已变化，请选择账号并重新准备操作。",
         ("CLOUD_RESULT_UNCERTAIN", false) => "The cloud operation outcome needs review. Do not resubmit it as a new request.",

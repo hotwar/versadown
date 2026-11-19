@@ -17,6 +17,10 @@ mod share_membership_tests;
 mod agent_resources;
 #[path = "store/agent_cloud.rs"]
 mod agent_cloud;
+#[path = "store/agent_permissions.rs"]
+mod agent_permissions;
+#[path = "store/agent_interactions.rs"]
+mod agent_interactions;
 
 use crate::{
     cloud::CloudProvider,
@@ -439,6 +443,8 @@ impl TaskStore {
         );")?;
         agent_resources::create_tables(&connection)?;
         agent_cloud::create_tables(&connection)?;
+        agent_permissions::create_tables(&connection)?;
+        agent_interactions::create_tables(&connection)?;
         connection.execute_batch("CREATE TABLE IF NOT EXISTS cloud_download_accounts (id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL, account_id TEXT NOT NULL);")?;
         let schema = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         schema.execute_batch("CREATE TABLE IF NOT EXISTS video_task_formats (

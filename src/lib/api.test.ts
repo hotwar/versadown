@@ -417,3 +417,19 @@ it('submits only native preview and format IDs and releases a fully submitted pr
   expect(native.invoke).toHaveBeenNthCalledWith(3, 'discard_video_preview', { previewId:'native-preview' });
   expect(created).toHaveBeenCalledWith(expect.objectContaining({id:'task-video'}));
 });
+
+it('loads the actual paired MCP program and setup prompt without changing settings', async () => {
+  const { getAgentConnectionInfo } = await import('./api');
+  const info = { executablePath: 'C:/VD 中文 space/vd-mcp-server.exe', executableExists: false, configJson: '{}', installationPrompt: 'Install complete VD bundle.' };
+  native.invoke.mockResolvedValueOnce(info);
+  await expect(getAgentConnectionInfo('zh-CN')).resolves.toEqual(info);
+  expect(native.invoke).toHaveBeenCalledTimes(1);
+  expect(native.invoke).toHaveBeenCalledWith('get_agent_connection_info', { lang: 'zh-CN' });
+});
+
+it('does not fabricate a connection configuration outside the desktop runtime', async () => {
+  const { getAgentConnectionInfo } = await import('./api');
+  Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+  await expect(getAgentConnectionInfo('en')).rejects.toThrow('桌面程序');
+  expect(native.invoke).not.toHaveBeenCalled();
+});

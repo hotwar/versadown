@@ -371,14 +371,7 @@ async fn open_authorization(app: AppHandle, provider: CloudProvider, authorizati
     // enter the UI initialization path. WebView creation runs off the UI thread.
     // The host owns this worker even if the CLI/MCP request disconnects.
     if current_session(&app, &authorization_id).is_ok_and(|session| session.status == Status::Pending) {
-        let ui_app = app.clone();
-        let shown = tauri::async_runtime::spawn_blocking(move || {
-            crate::agent_runtime::ensure_desktop_ui_from_worker(&ui_app)
-        }).await;
-        if !matches!(shown, Ok(Ok(()))) {
-            fail_session(&app, &authorization_id);
-        } else if current_session(&app, &authorization_id).is_ok_and(|session| session.status == Status::Pending)
-            && crate::cloud::commands::cloud_begin_authorization(app.clone(), provider).await.is_err()
+        if crate::cloud::commands::cloud_begin_authorization(app.clone(), provider).await.is_err()
         {
             fail_session(&app, &authorization_id);
         }
@@ -454,11 +447,11 @@ async fn read_account(app: AppHandle, provider: CloudProvider, lang: String) -> 
             if let Some(state) = app.try_state::<crate::commands::AppState>() {
                 if let Ok(settings) = state.settings.lock() {
                     if settings.agent_access.enabled {
-                        dto.permitted_operations = settings.agent_access.cloud_grants.iter()
-                            .filter(|grant| grant.provider == provider.key() && grant.account_id == account.id)
-                            .flat_map(|grant| grant.operations.iter().cloned()).collect();
-                        dto.permitted_operations.sort();
-                        dto.permitted_operations.dedup();
+                        if settings.agent_access.require_cloud_account(provider.key(), &account.id).is_ok() {
+                            dto.permitted_operations = [("browse", caps.list), ("download", caps.download),
+                                ("upload", caps.upload), ("create_share", caps.share_create)]
+                                .into_iter().filter(|(_, enabled)| *enabled).map(|(name, _)|name.to_owned()).collect();
+                        }
                     }
                 };
             }

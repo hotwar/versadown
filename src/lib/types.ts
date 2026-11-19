@@ -205,15 +205,17 @@ export interface Aria2Settings {
   p2pUploadLimit: number;
 }
 
-export type AgentCloudOperation = 'browse' | 'download' | 'upload' | 'create_share' | 'transfer';
-
 export interface AgentCloudGrant {
   provider: import('./cloudTypes').CloudProvider;
   accountId: string;
-  directoryIds: string[];
-  operations: AgentCloudOperation[];
   accountLabel?: string;
-  directoryLabels?: Record<string, string>;
+}
+
+export interface AgentConnectionInfo {
+  executablePath: string;
+  executableExists: boolean;
+  configJson: string;
+  installationPrompt: string;
 }
 
 export interface AgentAccessSettings {

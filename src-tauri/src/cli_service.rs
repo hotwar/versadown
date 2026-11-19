@@ -111,8 +111,8 @@ fn visit_files<'a>(task: &'a QueueTaskPayload, files: &mut Vec<&'a crate::aria2:
 
 fn authorized_outputs(state: &AppState, task: &QueueTaskPayload) -> ApiResult<()> {
     authorized_outputs_with(&state.store, task, |path, directory| {
-        if directory { crate::agent_access::authorize_directory(state, path).map(|_| ()) }
-        else { crate::agent_access::authorize_file(state, path).map(|_| ()) }
+        if directory { crate::agent_permissions::authorize_download_directory_in_scope(state, &task.id, path).map(|_| ()) }
+        else { crate::agent_permissions::authorize_download_file_in_scope(state, &task.id, path).map(|_| ()) }
     })
 }
 
@@ -160,7 +160,7 @@ fn task_result(state: &AppState, tasks: &[QueueTaskPayload], id: &str) -> ApiRes
     if files.len() > 100 { return Err("UNSUPPORTED"); }
     let mut outputs = std::collections::BTreeMap::new();
     for file in files {
-        let path = crate::agent_access::authorize_file(state, Path::new(&file.path))?;
+        let path = crate::agent_permissions::authorize_download_file_in_scope(state, id, Path::new(&file.path))?;
         let metadata = match std::fs::metadata(&path) {
             Ok(metadata) if metadata.is_file() => Some(metadata),
             Ok(_) => return Err("FORBIDDEN"),
@@ -216,7 +216,7 @@ where
     status(store, id, false)
 }
 
-fn direct_source(source: &str) -> ApiResult<String> {
+pub(crate) fn direct_source(source: &str) -> ApiResult<String> {
     let candidate = crate::parser::validate_download_input(source).map_err(|_| "INVALID_ARGUMENT")?;
     if !matches!(candidate.kind, CandidateKind::Direct | CandidateKind::Ftp) {
         return Err("UNSUPPORTED");
@@ -237,7 +237,7 @@ fn fingerprint(source: &str, directory: &str) -> String {
     format!("{:x}", Sha256::digest(parameters))
 }
 
-fn valid_request_id(id: &str) -> bool {
+pub(crate) fn valid_request_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 128
         && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-_.:".contains(&byte))
 }
@@ -250,7 +250,7 @@ fn validate_batch(items: &[BatchItemInput]) -> ApiResult<()> {
         // particular, an invalid ID must not be a channel for returning URLs.
         if !valid_request_id(&item.request_id) || !ids.insert(&item.request_id)
             || item.url.is_empty() || item.url.len() > 8192
-            || item.directory.is_empty() || item.directory.len() > 4096
+            || item.directory.len() > 4096
         {
             return Err("INVALID_ARGUMENT");
         }
@@ -315,7 +315,11 @@ async fn add_one(app: &AppHandle, input: BatchItemInput) -> ApiResult<TaskDto> {
         .map_err(|_| "INVALID_ARGUMENT")?;
     let directory = options.directory.as_deref().and_then(Path::to_str).ok_or("INVALID_ARGUMENT")?;
     crate::agent_access::authorize_directory(&state, Path::new(directory))?;
+    let dispatcher = app.state::<std::sync::Arc<crate::cli_dispatch::CliDispatcher>>();
+    let gate = dispatcher.gate.lock().await;
     let task = create_direct_intent(&state.store, &source, directory, &input.request_id, &options)?;
+    crate::agent_permissions::inherit_scope(&state, &task.id.to_string())?;
+    drop(gate);
     app.state::<std::sync::Arc<crate::cli_dispatch::CliDispatcher>>().notify();
     let _ = commands::emit_task_update_for_task(app, &state.store, None, task.clone());
     serde_json::from_value(host_status(app, &task.id.to_string()).await?).map_err(|_| "INTERNAL_ERROR")
@@ -329,6 +333,7 @@ fn validate_request(request: &Request) -> ApiResult<()> {
         || (request.command == "prepare") != request.prepare.is_some()
         || (request.command == "confirm") != request.confirm.is_some()
         || (request.command == "cloud") != request.cloud.is_some()
+        || (request.command == "interaction") != request.interaction.is_some()
         || (request.command != "list" && (request.status.is_some() || request.query.is_some()
             || request.parent_id.is_some() || request.cursor.is_some() || request.limit.is_some()))
     {
@@ -352,6 +357,13 @@ fn validate_request(request: &Request) -> ApiResult<()> {
 pub(crate) async fn execute(app: AppHandle, request: Request) -> Response {
     let lang = request.lang.as_deref().unwrap_or("en");
     if let Err(code)=validate_request(&request){return Response::failure(code,lang)}
+    if !crate::agent_access::is_enabled(&app.state::<AppState>()){return Response::failure("HOST_DISABLED",lang)}
+    if let Some(input)=&request.interaction{return crate::agent_interactions::interaction(&app,input,lang).await}
+    crate::agent_interactions::execute(app,request).await
+}
+
+pub(crate) async fn execute_business(app: AppHandle, request: Request) -> Response {
+    let lang = request.lang.as_deref().unwrap_or("en");
     if !crate::agent_access::is_enabled(&app.state::<AppState>()){return Response::failure("HOST_DISABLED",lang)}
     if let Some(cloud)=&request.cloud{return crate::cli_cloud::execute(app.clone(),cloud,lang).await}
     match execute_inner(&app, &request).await {
@@ -383,7 +395,7 @@ async fn execute_inner(app: &AppHandle, request: &Request) -> ApiResult<Value> {
             capabilities: CapabilitiesDto { new_download_protocols: vec!["http".into(), "https".into(), "ftp".into()],
                 prepared_resource_kinds: Some(["video", "cloud", "share", "torrent"].map(str::to_owned).to_vec()),
                 task_types: ["file", "cloud", "web_video", "directory", "magnet", "torrent", "ftp"].map(str::to_owned).to_vec(),
-                operations: ["health", "add", "batch_add", "prepare", "confirm", "list", "status", "pause", "resume", "cancel", "result", "cloud"].map(str::to_owned).to_vec(),
+                operations: ["health", "add", "batch_add", "prepare", "confirm", "list", "status", "pause", "resume", "cancel", "result", "cloud", "interaction"].map(str::to_owned).to_vec(),
                 private_tasks: false },
             limits: LimitsDto { list_default_limit: 50, list_max_limit: 100, poll_interval_ms: 1000,
                 max_response_bytes: 8 * 1024 * 1024, max_pending_tasks: 1000 },
@@ -591,8 +603,9 @@ mod tests {
         let mut empty_directory = item.clone();
         empty_directory.request_id = "two".into();
         empty_directory.directory.clear();
+        assert!(validate_batch(&[empty_directory]).is_ok(), "VD chooses an omitted directory before submission");
         for items in [Vec::new(), vec![item.clone(), item.clone()], vec![item.clone(), invalid_id],
-            vec![item.clone(), long_url], vec![item.clone(), empty_directory], vec![item; 21]] {
+            vec![item.clone(), long_url], vec![item; 21]] {
             let result = batch_add_with(&items, "en", |_| {
                 panic!("invalid batch reached submission");
                 #[allow(unreachable_code)]

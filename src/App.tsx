@@ -892,6 +892,16 @@ export function App() {
     return () => { active = false; };
   }, []);
 
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<AppSettings>('agent-access-changed', ({ payload }) => {
+      if (!disposed) setSettings(payload);
+    }).then(stop => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+
   const checkUpdates = useCallback(async () => {
     setOpenUpdateFailed(false);
     setAppUpdateStatus('checking');

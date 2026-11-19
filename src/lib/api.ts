@@ -1,4 +1,4 @@
-import { AgentAccessSettings, AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, PrivacyTaskVisibility, QueueTask, ScanDownloadResult, TaskActionResult, TaskCommand } from './types';
+import { AgentConnectionInfo, AgentAccessSettings, AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, PrivacyTaskVisibility, QueueTask, ScanDownloadResult, TaskActionResult, TaskCommand } from './types';
 import { videoConfirmation, videoMessage } from './webVideo';
 import type { ScanDownloadProgress, VideoPreview } from './types';
 import { Channel, invoke } from '@tauri-apps/api/core';
@@ -348,6 +348,11 @@ export async function configurePrivacyDownload(enabled: boolean, currentPassword
     currentPassword: currentPassword || null,
     newPassword: newPassword || null
   });
+}
+
+export async function getAgentConnectionInfo(lang: string): Promise<AgentConnectionInfo> {
+  if (!isTauriRuntime()) throw new Error(t('settings.agent.error.desktopRequired'));
+  return invoke<AgentConnectionInfo>('get_agent_connection_info', { lang });
 }
 
 export async function configureAgentAccess(settings: AgentAccessSettings): Promise<AppSettings> {

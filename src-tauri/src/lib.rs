@@ -18,6 +18,12 @@ mod cli_dispatch;
 mod cli_resources;
 mod cli_bt;
 mod agent_access;
+mod agent_permissions;
+mod agent_interaction_protocol;
+mod agent_interactions;
+mod agent_connect;
+mod cli_setup;
+mod cli_client;
 mod agent_runtime;
 mod connectors;
 mod downloader;
@@ -516,14 +522,15 @@ pub fn run() -> i32 {
             let cli_dispatcher = cli_dispatch::CliDispatcher::start(
                 std::sync::Arc::clone(&dispatch_state.store),
                 std::sync::Arc::clone(&dispatch_state.runtime),
-                std::sync::Arc::new(move |path| {
+                std::sync::Arc::new(move |id, path| {
                     let state = authorization_app.state::<commands::AppState>();
-                    agent_access::authorize_file(&state, path).is_ok()
+                    agent_permissions::authorize_download_file_in_scope(&state, &id.to_string(), path).is_ok()
                 }),
             );
             app.manage(cli_dispatcher);
             cli_resources::start(app.handle().clone());
             cli_cloud_auth::register(app.handle());
+            agent_interactions::register(app.handle());
             cli_cloud::start(app.handle().clone());
             if let Err(error) = cli_host::start(app.handle(), &data_dir) {
                 if startup_options.agent_host {
@@ -631,6 +638,10 @@ pub fn run() -> i32 {
         })
         .invoke_handler(tauri::generate_handler![
             agent_access::configure_agent_access,
+            agent_connect::get_agent_connection_info,
+            agent_interactions::agent_interaction_view,
+            agent_interactions::agent_interaction_choose_directory,
+            agent_interactions::agent_interaction_decide,
             build_info::get_build_info,
             startup::startup_health,
             web_video::submit_video_download,

@@ -2,9 +2,28 @@
 
 `vd-cli.exe`（macOS/Linux 为 `vd-cli`）通过鉴权的本机接口调用 VD。默认实例未运行时，CLI / MCP 会按需启动同目录的 `versadown --agent-host`，等待本机 API 就绪。后台宿主持有数据库、账号与下载引擎；客户端不直接打开任务库。本文描述当前开发分支行为，已生成的旧版程序需要重新配套构建才能获得自动启动能力。
 
-首次在桌面「设置 → 高级」中启用「允许本机 Agent 调用」并授权下载目录，保存后再调用 `health` 检查能力与限制。之后无需预先打开主界面。后台启动不创建主界面、悬浮窗或托盘；用户正常打开 VD 时，在同一宿主中创建桌面界面，继续使用同一批任务。CLI 和 MCP 共用宿主权限；GUI 已解锁隐私任务也不会授予它们访问权。取消本机访问会阻止后续调用，已受理任务仍由宿主管理。此接口以当前操作系统用户为信任边界，不提供同用户下不同 Agent 的强隔离。
+首次在桌面「设置 → 高级」中启用「允许本机 Agent 调用」，保存后复制「AI 接入提示词」交给支持本机 stdio MCP 的客户端，实际调用 `health` 验证。提示词包含当前安装的 MCP 程序绝对路径；不同客户端的配置格式、配置权限和重新加载方式仍可能不同，复制不代表连接成功。无需预填下载目录、上传目录或网盘目录。之后无需预先打开主界面。后台宿主持有任务与账号，授权时只打开 VD 的任务确认或网盘登录窗口。CLI 和 MCP 共用宿主权限；GUI 已解锁隐私任务也不会授予它们访问权。此接口以当前操作系统用户为信任边界，不提供同用户下不同 Agent 的强隔离。
 
-后台模式复用 Tauri 和现有下载运行时，仍需要受支持的桌面运行环境；它不是面向无图形环境服务器的独立 Headless 核心。普通请求不会因网盘验证失败反复弹窗；收到 `AUTH_REQUIRED` 后，显式调用 `cloud auth-begin` 打开 VD 授权流程，用户完成交互后再继续原操作。
+后台模式复用 Tauri 和现有下载运行时，仍需要桌面运行环境。本轮不包含无图形环境服务器部署。业务请求缺少本地权限、网盘登录或账号使用授权时，返回 `USER_ACTION_REQUIRED` 与 `error.interaction_id`。Agent 解释请求用途，用户在 **VD 窗口**中选择下载目录、允许读取指定文件或完成网盘登录；Agent 不能替用户批准。第三方客户端也可能额外确认是否调用工具，那是客户端自己的权限提示。
+
+## 任务授权与接续
+
+本地权限默认只绑定当前任务：下载获得所选目录的写入范围，上传只获得指定文件的读取范围。任务后台执行、结果查询和恢复使用相同的持久授权，另一项任务不会继承这些权限。已存在的长期目录授权仍可在设置中查看及撤销。
+
+本次修改的是未发布开发版的网盘授权结构，不将旧版目录/操作授权自动扩大为账号授权，也不提供旧结构迁移。开发验收使用隔离配置，重新确认账号授权。
+
+网盘授权以实际账号为单位。VD 明确告知并确认“允许本机 Agent 使用此账号”；需要登录时打开该网盘的 VD 登录页，成功且账号匹配后继续原操作。获准账号内的不同目录无需重复授权，设置可撤销账号访问。账号切换必须重新选择资源，密码、验证码、Cookie 不传给 Agent。上传及创建分享仍有准备、确认和结果查询；创建分享只针对云端已有文件。
+
+```powershell
+vd-cli.exe add "https://example.com/file.zip" --request-id download-001
+# 未提供目录时，VD 提供原生目录选择。
+vd-cli.exe interaction status INTERACTION_ID
+vd-cli.exe interaction cancel INTERACTION_ID
+# 只有用户明确要求恢复时才调用，普通轮询不会重开窗口。
+vd-cli.exe interaction resume INTERACTION_ID
+```
+
+状态为 `awaiting_user`、`awaiting_login`、`resuming`、`succeeded`、`failed`、`cancelled`、`expired` 或 `interrupted`。按 `poll_interval_ms` 查询；`succeeded` 的 `data.result` 是原操作的业务结果，再用其中的任务/云端操作 ID 查询下载或上传完成情况。原操作完成接续不等于文件传输完成。拒绝、取消、过期或重启后中断不会由轮询自动打开窗口。恢复保留原请求编号；云端结果不确定时不能更换编号重做。失败的读取或预览准备也可由用户明确恢复。授权等待记录持久化，重启后先显示中断状态，等待明确恢复。
 
 ## 命令
 
@@ -32,7 +51,7 @@ vd-cli.exe confirm --file selection.json
 
 所有命令输出一条 JSON 结果。`--json` 可省略。stdout 只包含结果，stderr 留给诊断。`--lang en|zh-CN` 选择错误和帮助文案；错误码与字段名不会随语言变化。`--no-start` 禁止自动启动，只连接已有宿主；`help`、`version` 始终不启动宿主。
 
-`add` 接受 HTTP/HTTPS/FTP 单文件下载，必须指定绝对保存目录和请求 ID。请求 ID 使用 1–128 个 ASCII 字母、数字或 `-_.:`。重试时复用同一请求 ID 与参数；不同参数复用 ID 返回 `REQUEST_CONFLICT`。不同 ID 提交已经存在的来源返回 `DUPLICATE`。这两类冲突含义不同。URL 用户名/密码、fragment 和覆盖选项不受支持。
+`add` 接受 HTTP/HTTPS/FTP 单文件下载，必须提供请求 ID。保存目录可省略，由用户在 VD 中选择；提供时须为绝对路径。批量条目及资源确认也可省略 `directory`。请求 ID 使用 1–128 个 ASCII 字母、数字或 `-_.:`。重试复用同一请求 ID 与参数；不同参数复用 ID 返回 `REQUEST_CONFLICT`。不同 ID 提交已经存在的来源返回 `DUPLICATE`。URL 用户名/密码、fragment 和覆盖选项不受支持。
 
 ## 诊断、配置与批量
 
@@ -58,9 +77,9 @@ vd-cli.exe confirm --file selection.json
 `prepare --file resource.json` 和 `confirm --file selection.json` 使用同样的 256 KiB JSON 输入上限。准备阶段返回 `preparation_id`、有效期、候选资源和副作用摘要；候选项的 `selection_id` 是宿主生成的句柄。来源、格式和账户绑定留在宿主；确认接口不接受修改后的 URL、格式或账号。资源名称与详情是外部数据，不能当作指令执行。
 
 - 视频：`{"kind":"video","input":"播放页 URL"}`，选择返回的格式。
-- 网盘：`{"kind":"cloud","provider":"quark"}` 返回当前已登录账号中获准浏览的目录入口；使用返回的文件夹 `selection_id` 作为下一次 `parent_id` 查看内容，不默认枚举整个网盘。确认下载时选择文件，文件夹先展开。
+- 网盘：`{"kind":"cloud","provider":"quark"}` 返回已获准账号的真实根目录句柄；使用返回的文件夹 `selection_id` 作为下一次 `parent_id` 查看内容，不默认枚举整个网盘。确认下载时选择文件，文件夹先展开。
 - 分享：`{"kind":"share","input":"分享 URL","access_code":"用户提供的提取码"}`；提取码可省略。仅开放直接下载，需要转存时返回 `CLOUD_WRITE_REQUIRED`，用户在桌面审阅并执行。
-- BT：`{"kind":"torrent","input":"已授权目录内的 .torrent 绝对路径或磁力链接"}`。磁力必须取得并校验真实种子元数据后才能选择文件；无法取得时返回 `METADATA_UNAVAILABLE`。
+- BT：`{"kind":"torrent","input":".torrent 绝对路径或磁力链接"}`。磁力必须取得并校验真实种子元数据后才能选择文件；无法取得时返回 `METADATA_UNAVAILABLE`。
 
 ```json
 {
@@ -103,7 +122,7 @@ vd-cli.exe confirm --file selection.json
 | 1 | `INTERNAL_ERROR`、`PROTOCOL_ERROR`、`ENGINE_UNAVAILABLE`、`ACTION_FAILED`、`TASK_NOT_READY`、`BUSY`、`CLI_RECOVERY_REQUIRED`、`METADATA_UNAVAILABLE` |
 | 2 | `INVALID_ARGUMENT`、`UNSUPPORTED`、`RESOURCE_LIMIT` |
 | 3 | `HOST_UNAVAILABLE` |
-| 4 | `UNAUTHORIZED`、`FORBIDDEN`、`HOST_DISABLED`、`AUTH_REQUIRED`、`CLOUD_WRITE_REQUIRED`、`ACCESS_CODE_REQUIRED` |
+| 4 | `UNAUTHORIZED`、`FORBIDDEN`、`HOST_DISABLED`、`AUTH_REQUIRED`、`CLOUD_WRITE_REQUIRED`、`ACCESS_CODE_REQUIRED`、`USER_ACTION_REQUIRED` |
 | 5 | `NOT_FOUND`、`PREPARATION_EXPIRED` |
 | 6 | `REQUEST_CONFLICT`、`DUPLICATE` |
 | 7 | `TIMEOUT` |
@@ -114,7 +133,7 @@ vd-cli.exe confirm --file selection.json
 
 Windows 默认发现文件是 `%APPDATA%\com.versadown.desktop\cli\connection.json`。使用 `--discovery PATH` 或 `VD_CLI_DISCOVERY` 可显式选择实例；命令行优先。显式指定发现文件时始终只连接已有实例，不会回退到默认实例或自动启动另一个宿主。发现文件含本机接口令牌，不应分享、打印或加入版本控制。
 
-`HOST_UNAVAILABLE`（退出码 3，`next_action: inspect_desktop`）表示无法发现或连接本机 Agent 服务，不能据此断定 VD 未启动。即使 VD 和 MCP 进程都在运行，未启用 Agent 调用也可能没有发现文件。请确认 VD 已启动，在「设置 → 高级」中启用「允许本机 Agent 调用」并授权下载目录，再检查 `--discovery` / `VD_CLI_DISCOVERY` 是否指向该实例的发现文件。`HOST_DISABLED` 仅表示明确收到 Agent 调用已关闭的响应，对应退出码 4 和 `enable_desktop_agent`；客户端不会通过读取桌面设置猜测授权状态。完成检查后重新调用 `health`。
+`HOST_UNAVAILABLE`（退出码 3，`next_action: inspect_desktop`）表示无法发现或连接本机 Agent 服务，不能据此断定 VD 未启动。即使 VD 和 MCP 进程都在运行，未启用 Agent 调用也可能没有发现文件。请确认 VD 已启动，在「设置 → 高级」中启用「允许本机 Agent 调用」，再检查 `--discovery` / `VD_CLI_DISCOVERY` 是否指向该实例的发现文件。`HOST_DISABLED` 仅表示明确收到 Agent 调用已关闭的响应，对应退出码 4 和 `enable_desktop_agent`；客户端不会通过读取桌面设置猜测授权状态。完成检查后重新调用 `health`。
 
 默认模式先以 `health` 探测宿主，确认不可达后按需启动。启动等待上限为 20 秒，CLI 的整体 `--timeout` 可以更早结束等待；启动超时不会取消已经受理的下载。缺少配套宿主或启动失败返回 `HOST_UNAVAILABLE`；宿主明确拒绝未启用的授权时返回 `HOST_DISABLED`；超时返回 `TIMEOUT`。客户端不会读取桌面配置或替用户授权。
 
@@ -166,8 +185,11 @@ Windows 默认发现文件是 `%APPDATA%\com.versadown.desktop\cli\connection.js
 | `vd_cloud_confirm` | 用稳定 request_id 确认已准备的云端操作 |
 | `vd_cloud_status` | 查询云端操作进度、逐项失败和真实结果 |
 | `vd_cloud_cancel` | 按 supported_actions 取消操作，不隐式删除云端文件 |
+| `vd_interaction_status` | 查询 VD 任务授权、登录及原请求接续结果 |
+| `vd_interaction_cancel` | 取消尚在等待用户确认或登录的请求 |
+| `vd_interaction_resume` | 用户明确要求后恢复已取消、过期、中断的请求或失败的预览 |
 
-19 个工具通过 `structuredContent` 返回同一业务 envelope，并在文本 content 中提供 JSON。`isError = !ok`，查询失败任务、部分失败的批次仍可为 `isError:false`。未知工具属于协议错误；已知工具的参数/业务失败返回可读业务错误。工具 outputSchema 基于共享 DTO；注解不代替宿主授权。MCP 没有 wait，Agent 应每 1–5 秒查询 status，不把会话结束当作 cancel。上传和创建分享使用独立的云端操作权限与准备/确认流程；已有分享链接下载仍不会自动转存或删除云端文件。
+22 个工具通过 `structuredContent` 返回同一业务 envelope，并在文本 content 中提供 JSON。`isError = !ok`，查询失败任务、部分失败的批次仍可为 `isError:false`。未知工具属于协议错误；已知工具的参数/业务失败返回可读业务错误。工具 outputSchema 基于共享 DTO；注解不代替 VD 授权。MCP 没有 wait，Agent 应每 1–5 秒查询 status，不把会话结束当作 cancel。已有分享链接下载仍不会自动转存或删除云端文件。
 
 Windows Quick 构建在相同产物目录收集 `versadown.exe`、`vd-cli.exe` 和 `vd-mcp-server.exe`。应使用配套版本；本说明不代表安装包及 macOS/Linux 已经实机验收。
 
@@ -175,7 +197,7 @@ FTP 当前使用匿名登录，不接收 URL 内嵌凭据，也不经全局 HTTP
 
 ## 网盘账号授权、上传与创建分享
 
-账号连接与 Agent 操作授权是两件事。先在 VD 设置中授予上传源目录的读取权限，以及目标网盘账号、目录和所需云端操作的权限。已有下载目录许可不自动包含读取本地文件上传或创建分享；Agent 不能通过工具扩大自己的权限。
+账号登录与允许 Agent 使用账号由 VD 确认，后续不再按网盘目录或操作类型配置授权。无需预填上传源目录：准备上传时由 VD 请求读取这些文件的单次任务权限。已有下载写入许可不包含上传读取许可；Agent 工具没有批准权限的接口。
 
 ```powershell
 vd-cli.exe cloud accounts --provider quark --json
@@ -222,13 +244,13 @@ vd-cli.exe cloud cancel OPERATION_ID --json
 
 ## English
 
-The capability branch adds FTP file submission, `batch-add --file`, and `prepare/confirm --file` for complex resources. The MCP adapter exposes 19 tools, including eight cloud account/authorization/operation tools. Batch input is a UTF-8 JSON array of 1–20 independent `{url,directory,request_id}` items (256 KiB maximum file size). Top-level success means processing finished: inspect `accepted`, `failed`, and every item. Retry with the original IDs and parameters; successful acceptance is durable and is not duplicated.
+The capability branch adds FTP file submission, `batch-add --file`, and `prepare/confirm --file` for complex resources. The MCP adapter exposes 22 tools, including eight cloud account/authorization/operation tools and three interaction status/cancel/resume tools. Batch input is a UTF-8 JSON array of 1–20 independent `{url,directory,request_id}` items (256 KiB maximum file size). Top-level success means processing finished: inspect `accepted`, `failed`, and every item. Retry with the original IDs and parameters; successful acceptance is durable and is not duplicated.
 
 `doctor` is read-only and never starts VD. Inspect `data.ready`, build identity, health, and optional bundle hash verification separately from the command's success. `mcp-config` returns a copyable configuration in `data.config` and an Agent prompt; it never edits client settings. Build metadata identifies different source revisions even when product versions match.
 
-Use `prepare` for video pages, cloud browsing, direct-download shares and verified torrent metadata. Cloud browsing begins with `kind:cloud`, a provider and empty input, returning authorized directory entry selections rather than listing the entire drive. Pass a returned folder selection as `parent_id` to browse its contents. Confirm uses only `preparation_id`, `selection_ids`, an authorized directory, and a stable `request_id`; it returns `task_ids`. Previews expire after 15 minutes, but accepted receipts remain retryable. Preparation does not start file content downloads or grant cloud write access. Shares requiring a cloud save return `CLOUD_WRITE_REQUIRED` for desktop review. An uncertain resource submission after a crash requires review (`CLI_RECOVERY_REQUIRED`) instead of blind resubmission. These additions require matching binaries and separate real-service acceptance evidence.
+Use `prepare` for video pages, cloud browsing, direct-download shares and verified torrent metadata. Cloud browsing begins with `kind:cloud`, a provider and empty input, returning a selection for the account's real root folder. Pass a returned folder selection as `parent_id` to browse its contents. Confirm uses only `preparation_id`, `selection_ids`, an authorized directory, and a stable `request_id`; it returns `task_ids`. Previews expire after 15 minutes, but accepted receipts remain retryable. Preparation does not start file content downloads or grant cloud write access. Shares requiring a cloud save return `CLOUD_WRITE_REQUIRED` for desktop review. An uncertain resource submission after a crash requires review (`CLI_RECOVERY_REQUIRED`) instead of blind resubmission. These additions require matching binaries and separate real-service acceptance evidence.
 
-Enable Agent access once in VD's desktop settings and authorize output directories. The CLI and MCP then start the default host on demand using the sibling `versadown --agent-host` executable. The background host creates no main window, launcher or tray; opening VD normally creates its desktop in that same process. This is the current development branch behavior and requires matching rebuilt binaries. It reuses Tauri and the existing runtime, not a standalone server Headless core; a supported desktop environment is still required. Interactive login requires an explicit `cloud auth-begin` request; ordinary queries never repeatedly open login windows.
+Enable Agent access once in VD's desktop settings. Copy the setup prompt with the actual MCP executable path, then verify the connection by calling vd_health. Local file permissions are requested by VD for the current task; no directory list needs to be filled in beforehand. The CLI and MCP then start the default host on demand using the sibling `versadown --agent-host` executable. The background host creates no main window, launcher or tray; opening VD normally creates its desktop in that same process. This is the current development branch behavior and requires matching rebuilt binaries. It reuses Tauri and the existing runtime, not a standalone server Headless core; a supported desktop environment is still required. When a business request needs local access or cloud login/account consent, it returns USER_ACTION_REQUIRED with an interaction_id. The user approves or signs in inside VD; query interaction status for the original operation result. Cloud consent covers the actual account without per-folder prompts and can be revoked in Settings. Polling never reopens cancelled/expired requests; resume only on an explicit user request. Restarted interactions remain interrupted until resumed. Explicit auth-begin is still available for standalone account login.
 
 Every CLI command emits one JSON envelope to stdout. `--json` is optional; `--lang en` selects English messages. Use `help` for the command grammar. Both adapters share the same host authorization and download engine. `--no-start`, `--discovery PATH`, or `VD_CLI_DISCOVERY` selects connect-only behavior. Help/version and MCP initialization/tool listing never start the host. Startup waits up to 20 seconds, bounded further by the CLI operation timeout. The client probes health before startup and never replays an already-sent business operation after a transport failure.
 
@@ -236,7 +258,7 @@ A profile startup lock coordinates clients; a separate lifetime lock gives one h
 
 Health success means the local API is ready. The engine may still be initializing; inspect `data.engine_available` separately. Successful submission means acceptance, not completion.
 
-`add URL --directory ABSOLUTE_PATH --request-id ID` submits an HTTP/HTTPS/FTP single-file download. Retry with the same request ID and arguments. Reusing an ID for different arguments yields `REQUEST_CONFLICT`; a different ID for an existing download source yields `DUPLICATE`. Private tasks are always excluded, regardless of the desktop privacy unlock state. FTP is anonymous and does not use the global HTTP proxy. BT currently supports v1 metadata, at most 100 files and safe UTF-8 paths; magnets require a configured metadata service to return verified torrent bytes. BT outputs use an isolated task subdirectory. Preserve the complete bundle, including `binaries/` and video tools.
+`add URL [--directory ABSOLUTE_PATH] --request-id ID` submits an HTTP/HTTPS/FTP single-file download. Retry with the same request ID and arguments. Reusing an ID for different arguments yields `REQUEST_CONFLICT`; a different ID for an existing download source yields `DUPLICATE`. Private tasks are always excluded, regardless of the desktop privacy unlock state. FTP is anonymous and does not use the global HTTP proxy. BT currently supports v1 metadata, at most 100 files and safe UTF-8 paths; magnets require a configured metadata service to return verified torrent bytes. BT outputs use an isolated task subdirectory. Preserve the complete bundle, including `binaries/` and video tools.
 
 `wait ID --timeout SECONDS` waits for completion, including pending cleanup. Timeout and Ctrl-C end only the client operation; they never cancel the task. An interrupted `add` may still have been accepted, so retry using its original request ID. Discovery can be overridden with `--discovery PATH` or `VD_CLI_DISCOVERY`. Keep the discovery file private because it contains the local authentication token. The exit-code table above is language-independent.
 

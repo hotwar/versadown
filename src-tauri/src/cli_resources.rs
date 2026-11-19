@@ -88,6 +88,16 @@ fn video_error(error:String)->&'static str {match error.as_str() {
     "FORBIDDEN"=>"FORBIDDEN",
     _=>"ACTION_FAILED",
 }}
+// This is a host-created provider root, never an Agent-supplied folder ID.
+// Its opaque selection works for both browsing and choosing an upload target.
+fn cloud_root_choice(provider:CloudProvider,account_id:&str)->ResourceSelection {
+    let root=crate::cloud::ProviderRegistry::global().get(provider).root_directory_id.to_owned();
+    let name=provider.key().to_owned();
+    choice(name.clone(),"folder",None,Some("/".into()),ResourceTarget::Cloud {
+        provider,account_id:account_id.into(),file_id:root.clone(),name,size_bytes:None,
+        folder:true,directory_chain:vec![root],
+    })
+}
 fn validate_text(value:&str,max:usize)->ResultCode<()> {
     if value.len()>max || value.chars().any(char::is_control) {Err("INVALID_ARGUMENT")} else {Ok(())}
 }
@@ -151,30 +161,25 @@ async fn prepare(app:&AppHandle,input:&ResourcePrepareInput)->ResultCode<Resourc
             let provider=input.provider.as_deref().and_then(|key|crate::cloud::ProviderRegistry::global().by_key(key)).map(|d|d.provider).filter(|p|p.is_enabled()).ok_or("INVALID_ARGUMENT")?;
             if input.parent_id.is_none() {
                 let account=crate::cloud::commands::cloud_account(app.clone(),provider).await.map_err(cloud_error)?;
-                let policy=state.settings.lock().map_err(|_|"INTERNAL_ERROR")?.agent_access.clone();
-                let mut roots=Vec::new();
-                for grant in &policy.cloud_grants {
-                    if grant.provider==provider.key()&&grant.account_id==account.id&&!grant.operations.is_empty() {
-                        for id in &grant.directory_ids {if !roots.contains(id){roots.push(id.clone());}}
-                    }
-                }
-                if roots.is_empty(){return Err("CLOUD_PERMISSION_REQUIRED")}
-                return Ok(ResourcePlan{id:Uuid::new_v4().to_string(),expires_at:now()+TTL_SECONDS,kind:"cloud".into(),bt:None,effects:vec!["authorized_cloud_directories".into()],
-                    choices:roots.into_iter().enumerate().map(|(index,id)|choice(format!("{} {}",provider.key(),index+1),"folder",None,None,
-                        ResourceTarget::Cloud{provider,account_id:account.id.clone(),file_id:id.clone(),name:format!("{} {}",provider.key(),index+1),size_bytes:None,folder:true,directory_chain:vec![id]})).collect()});
+                crate::agent_access::require_cloud_account(&state,provider.key(),&account.id)?;
+                let root=cloud_root_choice(provider,&account.id);
+                // The account grant covers this drive. Verify that the real root
+                // is accessible before exposing its browse/upload handle.
+                crate::cli_cloud::validate_target(app,&root.target).await?;
+                return Ok(ResourcePlan{id:Uuid::new_v4().to_string(),expires_at:now()+TTL_SECONDS,kind:"cloud".into(),bt:None,effects:vec!["cloud_account_root".into()],choices:vec![root]});
             }
             let mut chain=Vec::new();
             let expected=if let Some(parent)=input.parent_id.as_deref() {
                 validate_text(parent,128)?;
                 let target=state.store.agent_resource_folder(parent,now())?;
-                crate::cli_cloud::validate_target(app,&target,"browse").await?;
+                crate::cli_cloud::validate_target(app,&target).await?;
                 match target {
                     ResourceTarget::Cloud{provider:p,account_id,file_id,folder:true,directory_chain,..} if p==provider=>{chain=directory_chain;if chain.last()!=Some(&file_id){chain.push(file_id.clone());}Some((account_id,file_id))},
                     _=>return Err("INVALID_ARGUMENT"),
                 }
             }else{None};
             let (account,listing)=crate::cloud::commands::prepare_agent_cloud_directory(app.clone(),provider,expected).await.map_err(cloud_error)?;
-            state.settings.lock().map_err(|_|"INTERNAL_ERROR")?.agent_access.require_cloud_grant(provider.key(),&account,&chain,"browse")?;
+            crate::agent_access::require_cloud_account(&state,provider.key(),&account)?;
             listing.items.into_iter().map(|file| {
                 let folder=file.kind==crate::cloud::CloudFileKind::Folder;
                 let name=safe_name(&file.name);
@@ -219,23 +224,46 @@ async fn confirm(app:&AppHandle,input:&ResourceConfirmInput)->ResultCode<Resourc
     let unique:HashSet<_>=input.selection_ids.iter().collect();
     if unique.len()!=input.selection_ids.len()||input.selection_ids.iter().any(|id|Uuid::parse_str(id).is_err()){return Err("INVALID_ARGUMENT")}
     let state=app.state::<AppState>();
-    let directory=crate::agent_access::authorize_directory(&state,Path::new(&input.directory))?;
+    crate::agent_access::validate_components(Path::new(&input.directory))?;
+    let directory=crate::agent_access::resolve_existing_ancestor(Path::new(&input.directory))?;
     let fingerprint=confirm_fingerprint(input,&directory)?;
-    if let Some(receipt)=state.store.agent_resource_receipt(&input.request_id,&fingerprint)? {return Ok(receipt)}
+    if let Some(receipt)=state.store.agent_resource_receipt(&input.request_id,&fingerprint)? {
+        let _gate=DISPATCH_GATE.lock().await;
+        for task_id in &receipt.task_ids {
+            // Repair an acceptance interrupted before its grant was attached.
+            // A replay without a new approval uses only its durable task scope.
+            if state.store.agent_task_grant(task_id)?.is_none() {
+                if let Some(scope)=crate::agent_permissions::current_scope_id() {
+                    crate::agent_access::authorize_directory(&state,&directory)?;
+                    state.store.claim_agent_grant(&scope,&input.request_id)?;
+                    crate::agent_permissions::inherit_scope(&state,task_id)?;
+                }
+            }
+            crate::agent_permissions::authorize_download_directory_in_scope(&state,task_id,&directory)?;
+        }
+        return Ok(receipt)
+    }
+    crate::agent_access::authorize_directory(&state,&directory)?;
     let plan=state.store.agent_resource_plan(&input.preparation_id,now())?;
     let selected=input.selection_ids.iter().map(|id|plan.choices.iter().find(|c|&c.id==id).cloned().ok_or("INVALID_ARGUMENT")).collect::<Result<Vec<_>,_>>()?;
     if plan.kind=="video"&&selected.len()!=1 {return Err("INVALID_ARGUMENT")}
     for selected in &selected {
         if !matches!(selected.target,ResourceTarget::BtFile{..}) {selected.target.new_task()?;}
         match &selected.target {
-            ResourceTarget::Cloud{..}=>crate::cli_cloud::validate_target(app,&selected.target,"download").await?,
+            ResourceTarget::Cloud{..}=>crate::cli_cloud::validate_target(app,&selected.target).await?,
             ResourceTarget::Share{source,..}=> {crate::cloud::commands::resolve_agent_share_read_only(app.clone(),source).await.map_err(cloud_error)?;},
             _=>(),
         }
     }
     // Recheck revocation after metadata/provider work and before durable acceptance.
     crate::agent_access::authorize_directory(&state,&directory)?;
-    state.store.accept_agent_resources(&plan,&selected,&directory,&input.request_id,&fingerprint,now())
+    let _gate=DISPATCH_GATE.lock().await;
+    if let Some(scope)=crate::agent_permissions::current_scope_id() {
+        state.store.claim_agent_grant(&scope,&input.request_id)?;
+    }
+    let receipt=state.store.accept_agent_resources(&plan,&selected,&directory,&input.request_id,&fingerprint,now())?;
+    for task_id in &receipt.task_ids {crate::agent_permissions::inherit_scope(&state,task_id)?;}
+    Ok(receipt)
 }
 
 pub(crate) async fn control_pending(app:&AppHandle,id:Uuid,action:&str)->ResultCode<Option<DownloadTask>> {
@@ -243,7 +271,7 @@ pub(crate) async fn control_pending(app:&AppHandle,id:Uuid,action:&str)->ResultC
     let Some(dir)=state.store.agent_resource_directory(id)? else{return Ok(None)};
     let _gate=DISPATCH_GATE.lock().await;
     state.web_video.bind_agent_application(app.clone());
-    if action=="resume" {crate::agent_access::authorize_directory(&state,&dir)?;}
+    if action=="resume" {crate::agent_permissions::authorize_download_directory_in_scope(&state,&id.to_string(),&dir)?;}
     state.store.control_agent_resource_pending(id,action)
 }
 
@@ -251,9 +279,10 @@ pub(crate) async fn control_pending(app:&AppHandle,id:Uuid,action:&str)->ResultC
 pub(crate) fn authorize_task(app:&AppHandle,id:Uuid)->ResultCode<()> {
     let state=app.state::<AppState>();
     if let Some(directory)=state.store.agent_resource_directory(id)? {
-        crate::agent_access::authorize_directory(&state,&directory)?;
+        let scope=id.to_string();
+        crate::agent_permissions::authorize_download_directory_in_scope(&state,&scope,&directory)?;
         for file in state.store.files(id).map_err(|_|"INTERNAL_ERROR")? {
-            crate::agent_access::authorize_file(&state,Path::new(&file.path))?;
+            crate::agent_permissions::authorize_download_file_in_scope(&state,&scope,Path::new(&file.path))?;
         }
     }
     Ok(())
@@ -271,7 +300,7 @@ pub(crate) fn start(app:AppHandle) {
                     let Ok(task)=state.store.find(id) else{continue};
                     let stopping=matches!(target,ResourceTarget::Bt{..})&&matches!(task.status,TaskStatus::Paused|TaskStatus::Cancelled);
                     if task.is_private||(!stopping&&!matches!(task.status,TaskStatus::Parsing|TaskStatus::Queued)){continue;}
-                    if !stopping {if let Err(code)=crate::agent_access::authorize_directory(&state,&directory) {
+                    if !stopping {if let Err(code)=crate::agent_permissions::authorize_download_directory_in_scope(&state,&id.to_string(),&directory) {
                         if matches!(target,ResourceTarget::Bt{..}) {let _=state.store.block_agent_resource_authorization(id,code);}
                         else {let _=state.store.fail_with_code(id,Some(code),crate::cli_protocol::message(code,"en"));}
                         continue;
@@ -279,7 +308,7 @@ pub(crate) fn start(app:AppHandle) {
                     if !state.runtime.status().available {continue;}
                     let claimed=if stopping{state.store.claim_agent_resource_stop(id)}else{state.store.claim_agent_resource(id)};
                     if !claimed.unwrap_or(false){continue;}
-                    let outcome=dispatch_existing(&app,id,&directory,&target).await;
+                    let outcome=crate::agent_permissions::with_scope(id.to_string(),dispatch_existing(&app,id,&directory,&target)).await;
                     if let Err(code)=outcome {
                         if matches!(target,ResourceTarget::Bt{..})&&matches!(code,"ENGINE_UNAVAILABLE"|"TIMEOUT"|"UNKNOWN") {
                             let _=state.store.retry_agent_resource_dispatch(id);
@@ -309,16 +338,16 @@ async fn dispatch_existing(app:&AppHandle,id:Uuid,directory:&Path,target:&Resour
         crate::cli_bt::dispatch(app,id,metadata,indices,&options).await?;
         return Ok(())
     }
-    crate::agent_access::authorize_directory(&state,directory)?;
+    crate::agent_permissions::authorize_download_directory_in_scope(&state,&id.to_string(),directory)?;
     if !matches!(task.status,TaskStatus::Parsing|TaskStatus::Queued) {return Err("FORBIDDEN")}
     let output=crate::output_path::reserve_unique_output_path(&state.store,id,directory,&task.name).map_err(|_|"ACTION_FAILED")?;
-    crate::agent_access::authorize_file(&state,&output)?;
+    crate::agent_permissions::authorize_download_file_in_scope(&state,&id.to_string(),&output)?;
     let mut record=task.clone();record.total_length=target.size_bytes();
     let record=state.store.apply_transfer_snapshot_with_files(record,&[(1,output.to_string_lossy().into_owned(),target.size_bytes().unwrap_or(0),0,true)]).map_err(|_|"INTERNAL_ERROR")?;
     match target {
         ResourceTarget::Video{..}=> {state.web_video.bind_agent_application(app.clone());state.web_video.start_agent_task(&state,record).await.map_err(video_error)?;},
         ResourceTarget::Cloud{provider,account_id,..}=> {
-            crate::cli_cloud::validate_target(app,target,"download").await?;
+            crate::cli_cloud::validate_target(app,target).await?;
             crate::cloud::commands::require_download_account(app,*provider,account_id).map_err(cloud_error)?;
             let options=crate::commands::download_submission_options_for_directory(&state,Some(&directory.to_string_lossy())).map_err(|_|"INVALID_ARGUMENT")?;
             crate::cloud::commands::queue_cloud_dispatch(app.clone(),&state,record,options).await.map_err(cloud_error)?;
@@ -364,6 +393,27 @@ mod tests {
         let fingerprint=confirm_fingerprint(&input,root.path()).unwrap();input.selection_ids.reverse();
         assert_eq!(fingerprint,confirm_fingerprint(&input,root.path()).unwrap());
         assert_ne!(fingerprint,confirm_fingerprint(&input,&root.path().join("other")).unwrap());
+    }
+    #[test]
+    fn agent_resource_cloud_root_is_a_real_account_bound_browse_and_upload_selection() {
+        for provider in [CloudProvider::Baidu,CloudProvider::Quark,CloudProvider::Aliyun,CloudProvider::Pikpak] {
+            let root=cloud_root_choice(provider,"private-owner");
+            let ResourceTarget::Cloud {provider:p,account_id,file_id,folder,directory_chain,..}=&root.target else {panic!("cloud root expected")};
+            assert_eq!(*p,provider);
+            assert_eq!(account_id,"private-owner");
+            assert!(*folder);
+            assert_eq!(file_id,crate::cloud::ProviderRegistry::global().get(provider).root_directory_id);
+            assert_eq!(directory_chain,&vec![file_id.clone()]);
+            assert_eq!(root.kind,"folder");
+            assert!(Uuid::parse_str(&root.id).is_ok());
+            // A directory is a browse/upload target, not a file download.
+            assert!(matches!(root.target.new_task(),Err("INVALID_ARGUMENT")));
+            let plan=ResourcePlan{id:Uuid::new_v4().to_string(),expires_at:123,kind:"cloud".into(),effects:vec![],bt:None,choices:vec![root]};
+            let public=serde_json::to_value(plan.public()).unwrap();
+            assert_eq!(public["resources"][0]["kind"],"folder");
+            assert!(public["resources"][0].get("file_id").is_none());
+            assert!(!public.to_string().contains("private-owner"));
+        }
     }
     #[test]
     fn agent_resource_url_and_auth_errors_are_bounded_and_stable() {

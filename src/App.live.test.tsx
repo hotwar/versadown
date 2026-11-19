@@ -23,6 +23,7 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock('./lib/api', () => ({
+  getAgentConnectionInfo: vi.fn().mockResolvedValue({ executablePath: 'C:/VD/vd-mcp-server.exe', executableExists: true, configJson: '{}', installationPrompt: 'Connect VD' }),
   isTauriRuntime: () => true, listPersistedTasks: state.list, parseDownload: state.parse,
   syncMainWindowIcon: vi.fn().mockResolvedValue(undefined), takeExternalLinks: state.takeExternalLinks,
   scanDownloadInputs: vi.fn().mockResolvedValue([]),
@@ -2460,4 +2461,22 @@ it('does not label a failed cloud operation as completed when session storage al
   }));
   expect(screen.getByRole('alert')).toHaveTextContent('登录状态未能保存，操作结果请查看原提示');
   expect(screen.getByRole('alert')).not.toHaveTextContent('操作已完成');
+});
+
+it('synchronizes Agent account grants from native approval without saving settings', async () => {
+  const user = userEvent.setup();
+  const loaded = await state.getSettings();
+  render(<App />);
+  await waitFor(() => expect(state.listeners.has('agent-access-changed')).toBe(true));
+  await user.click(within(screen.getByRole('navigation', { name: '主导航' })).getByRole('button', { name: '设置' }));
+  await user.click(screen.getByRole('tab', { name: '高级' }));
+  await act(async () => {
+    state.listeners.get('agent-access-changed')?.({ payload: {
+      ...loaded,
+      agentAccess: { enabled: true, allowedDirectories: [], uploadDirectories: [],
+        cloudGrants: [{ provider: 'quark', accountId: 'private-agent-account', accountLabel: 'Native approved account' }] }
+    } });
+  });
+  expect(await screen.findByText('夸克网盘 · Native approved account')).toBeVisible();
+  expect(state.updateSettings).not.toHaveBeenCalled();
 });

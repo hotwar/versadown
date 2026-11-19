@@ -464,7 +464,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, browseVideoC
       </form>
       </>}
       {activeTab === 'advanced' && <>
-        <AgentAccessSettings initial={initial.agentAccess} onSave={configureAgentAccess} browseDirectory={browseDirectory} />
+        <AgentAccessSettings initial={initial.agentAccess} onSave={configureAgentAccess} />
         <section className="aria2-debug-settings proxy-settings">
           <label className="setting-row"><span><b>{t('settings.debugLogging')}</b><small>{t('settings.debugLogging.description')}</small></span><input aria-label={t('settings.debugLogging')} type="checkbox" checked={aria2.debugLogging} onChange={(event) => void updateDebugLogging(event.target.checked)} /></label>
           {aria2Status?.kind === 'error' && <div className="settings-actions"><span role="status" className="error">{aria2Status.message}</span></div>}

@@ -1,79 +1,68 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 import { AgentAccessSettings } from './AgentAccessSettings';
 import { defaultSettings } from '../lib/api';
+vi.mock('./AgentConnect', () => ({ AgentConnect: () => <section aria-label="MCP 连接配置"><button type="button">复制 MCP JSON</button></section> }));
+const empty = { enabled: false, allowedDirectories: [], uploadDirectories: [], cloudGrants: [] };
 
-it('allows query access without granting download or upload directories', async () => {
+it('enables Agent access without prefilled local or cloud permissions', async () => {
   const user = userEvent.setup();
-  const permissions = { enabled: true, allowedDirectories: [], uploadDirectories: [], cloudGrants: [] };
+  const permissions = { ...empty, enabled: true };
   const save = vi.fn().mockResolvedValue({ ...defaultSettings, agentAccess: permissions });
   render(<AgentAccessSettings onSave={save} />);
-  expect(screen.getByRole('checkbox')).not.toBeChecked();
-  expect(screen.getByText(/全部非隐私任务/)).toBeVisible();
-  await user.click(screen.getByRole('checkbox'));
-  await user.click(screen.getByRole('button', { name: '保存 Agent 授权' }));
-  await waitFor(() => expect(save).toHaveBeenCalledWith(permissions));
-  expect(screen.getByRole('status')).toHaveTextContent('Agent 授权已保存');
+  const area = within(screen.getByRole('region', { name: 'Agent 接入' }));
+  const toggle = area.getByRole('checkbox', { name: '允许本机 Agent 调用' });
+  const saveButton = area.getByRole('button', { name: '保存调用与授权' });
+  const connection = area.getByRole('region', { name: 'MCP 连接配置' });
+  expect(toggle.closest('form')).toContainElement(saveButton);
+  expect(connection.closest('form')).toBeNull();
+  expect(saveButton.compareDocumentPosition(connection)).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+  expect(saveButton).toHaveAccessibleDescription('应用上方的调用开关和目录、网盘账号授权变更。');
+  expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+  await user.click(toggle);
+  await user.click(within(connection).getByRole('button', { name: '复制 MCP JSON' }));
+  expect(save).not.toHaveBeenCalled();
+  await user.click(saveButton);
+  expect(save).toHaveBeenCalledWith(permissions);
+  expect(screen.getByRole('status')).toHaveTextContent('调用与授权已保存');
 });
 
-it('saves normalized directory input through the dedicated permission operation', async () => {
+it('shows saved local grants and persists selected removals', async () => {
   const user = userEvent.setup();
-  const saved = { enabled: true, allowedDirectories: ['C:\\下载 目录', 'D:\\files'], uploadDirectories: [], cloudGrants: [] };
-  const save = vi.fn().mockResolvedValue({ ...defaultSettings, agentAccess: saved });
-  render(<AgentAccessSettings onSave={save} />);
-  await user.click(screen.getByRole('checkbox'));
-  fireEvent.change(screen.getByRole('textbox', { name: '允许的下载目录' }), { target: { value: ' C:\\下载 目录 \nD:\\files\nC:\\下载 目录\n' } });
-  await user.click(screen.getByRole('button', { name: '保存 Agent 授权' }));
-  await waitFor(() => expect(save).toHaveBeenCalledWith(saved));
-  expect(screen.getByRole('textbox', { name: '允许的下载目录' })).toHaveValue('C:\\下载 目录\nD:\\files');
-  expect(screen.getByRole('status')).toHaveTextContent('Agent 授权已保存');
+  const initial = { ...empty, enabled: true, allowedDirectories: ['C:/One', 'C:/Two'], uploadDirectories: ['C:/Upload'] };
+  const expected = { ...initial, allowedDirectories: ['C:/Two'], uploadDirectories: [] };
+  const save = vi.fn().mockResolvedValue({ ...defaultSettings, agentAccess: expected });
+  render(<AgentAccessSettings initial={initial} onSave={save} />);
+  expect(screen.getByText('C:/One')).toBeVisible();
+  expect(screen.getByText('C:/Upload')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '撤销第 1 项下载目录授权' }));
+  await user.click(screen.getByRole('button', { name: '撤销第 1 项上传目录授权' }));
+  expect(save).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('button', { name: '保存调用与授权' }));
+  expect(save).toHaveBeenCalledWith(expected);
+  expect(screen.getByText('C:/Two')).toBeVisible();
 });
 
-it('allows revocation without any directory and does not imply task cancellation', async () => {
+it('refreshes grants from another VD window and saves account revocation', async () => {
   const user = userEvent.setup();
-  const permissions = { enabled: false, allowedDirectories: [], uploadDirectories: [], cloudGrants: [] };
-  const save = vi.fn().mockResolvedValue({ ...defaultSettings, agentAccess: permissions });
-  render(<AgentAccessSettings initial={{ ...permissions, enabled: true, allowedDirectories: ['C:\\gone'] }} onSave={save} />);
-  await user.click(screen.getByRole('checkbox'));
-  fireEvent.change(screen.getByRole('textbox', { name: '允许的下载目录' }), { target: { value: '' } });
-  await user.click(screen.getByRole('button', { name: '保存 Agent 授权' }));
-  await waitFor(() => expect(save).toHaveBeenCalledWith(permissions));
-  expect(screen.getByRole('checkbox')).not.toBeChecked();
-  expect(screen.getByText(/不取消下载/)).toBeVisible();
+  const initial = { ...empty, enabled: true };
+  const authorized = { ...initial, cloudGrants: [{ provider: 'quark' as const, accountId: 'private-id', accountLabel: 'My account' }] };
+  const save = vi.fn().mockResolvedValue({ ...defaultSettings, agentAccess: initial });
+  const { rerender } = render(<AgentAccessSettings initial={initial} onSave={save} />);
+  rerender(<AgentAccessSettings initial={authorized} onSave={save} />);
+  expect(screen.getByText('夸克网盘 · My account')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '撤销第 1 项网盘账号授权' }));
+  await user.click(screen.getByRole('button', { name: '保存调用与授权' }));
+  expect(save).toHaveBeenCalledWith(initial);
 });
 
-it('shows a failed save and allows retry without falsely reporting success', async () => {
+it('reports a failed save without claiming access changed', async () => {
   const user = userEvent.setup();
   const save = vi.fn().mockRejectedValue(new Error('无法应用本机访问设置'));
-  render(<AgentAccessSettings initial={{ enabled: true, allowedDirectories: ['C:\\Downloads'], uploadDirectories: [], cloudGrants: [] }} onSave={save} />);
-  await user.click(screen.getByRole('button', { name: '保存 Agent 授权' }));
-  await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('无法应用本机访问设置'));
-  expect(screen.queryByText('Agent 授权已保存。')).not.toBeInTheDocument();
-  expect(screen.getByRole('button', { name: '保存 Agent 授权' })).toBeEnabled();
-});
-
-it('adds an explicitly selected directory without enabling or saving automatically', async () => {
-  const user = userEvent.setup();
-  const browse = vi.fn().mockResolvedValue('C:\\Selected');
-  const save = vi.fn();
-  render(<AgentAccessSettings onSave={save} browseDirectory={browse} />);
-  await user.click(screen.getByRole('button', { name: '添加目录' }));
-  await waitFor(() => expect(screen.getByRole('textbox', { name: '允许的下载目录' })).toHaveValue('C:\\Selected'));
-  expect(screen.getByRole('checkbox')).not.toBeChecked();
-  expect(save).not.toHaveBeenCalled();
-});
-
-it('keeps selected upload source directories separate from download grants', async () => {
-  const user = userEvent.setup();
-  const browse = vi.fn().mockResolvedValue('C:\\Upload');
-  const permissions = { enabled: true, allowedDirectories: [], uploadDirectories: ['C:\\Upload'], cloudGrants: [] };
-  const save = vi.fn().mockResolvedValue({ ...defaultSettings, agentAccess: permissions });
-  render(<AgentAccessSettings onSave={save} browseDirectory={browse} />);
-  await user.click(screen.getByRole('checkbox'));
-  await user.click(screen.getByRole('button', { name: '添加上传源目录' }));
-  await waitFor(() => expect(screen.getByRole('textbox', { name: '允许读取并上传的本地目录' })).toHaveValue('C:\\Upload'));
-  expect(screen.getByRole('textbox', { name: '允许的下载目录' })).toHaveValue('');
-  await user.click(screen.getByRole('button', { name: '保存 Agent 授权' }));
-  await waitFor(() => expect(save).toHaveBeenCalledWith(permissions));
+  render(<AgentAccessSettings initial={empty} onSave={save} />);
+  await user.click(screen.getByRole('button', { name: '保存调用与授权' }));
+  expect(screen.getByRole('status')).toHaveTextContent('无法应用本机访问设置');
+  expect(screen.getByRole('button', { name: '保存调用与授权' })).toBeEnabled();
 });

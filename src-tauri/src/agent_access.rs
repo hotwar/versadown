@@ -21,13 +21,9 @@ pub struct AgentAccessSettings {
 pub struct AgentCloudGrant {
     pub provider: String,
     pub account_id: String,
-    pub directory_ids: Vec<String>,
-    pub operations: Vec<String>,
     /// Local presentation only; never used to identify accounts or grant scope.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_label: Option<String>,
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub directory_labels: std::collections::BTreeMap<String, String>,
 }
 
 impl AgentAccessSettings {
@@ -42,8 +38,6 @@ impl AgentAccessSettings {
             validate_cloud_grant(grant)?;
             let mut grant = grant.clone();
             normalize_grant_labels(&mut grant);
-            grant.directory_ids.sort(); grant.directory_ids.dedup();
-            grant.operations.sort(); grant.operations.dedup();
             if !cloud_grants.contains(&grant) { cloud_grants.push(grant); }
         }
         Ok(Self { enabled: self.enabled, allowed_directories: directories, upload_directories, cloud_grants })
@@ -73,13 +67,11 @@ impl AgentAccessSettings {
         Ok(resolved)
     }
 
-    /// The host constructs this ancestor chain from verified directory listings.
-    /// Never accept a chain supplied by a CLI or MCP caller.
-    pub fn require_cloud_grant(&self, provider: &str, account_id: &str, directory_ancestor_ids: &[String], operation: &str) -> Result<(), &'static str> {
+    /// VD approves access to an account. Provider capabilities and actual
+    /// resource ownership remain checked at each cloud operation.
+    pub fn require_cloud_account(&self, provider: &str, account_id: &str) -> Result<(), &'static str> {
         if self.enabled && self.cloud_grants.iter().any(|grant| {
             grant.provider == provider && grant.account_id == account_id
-                && grant.operations.iter().any(|allowed| allowed == operation)
-                && grant.directory_ids.iter().any(|root| directory_ancestor_ids.contains(root))
         }) { Ok(()) } else { Err("CLOUD_PERMISSION_REQUIRED") }
     }
 
@@ -87,11 +79,8 @@ impl AgentAccessSettings {
         (!self.enabled || previous.enabled)
             && self.allowed_directories.iter().all(|root| previous.allowed_directories.contains(root))
             && self.upload_directories.iter().all(|root| previous.upload_directories.contains(root))
-            && self.cloud_grants.iter().all(|grant| grant.directory_ids.iter().all(|directory| {
-                grant.operations.iter().all(|operation| previous.cloud_grants.iter().any(|old| {
-                    old.provider == grant.provider && old.account_id == grant.account_id
-                        && old.directory_ids.contains(directory) && old.operations.contains(operation)
-                }))
+            && self.cloud_grants.iter().all(|grant| previous.cloud_grants.iter().any(|old| {
+                old.provider == grant.provider && old.account_id == grant.account_id
             }))
     }
 
@@ -117,7 +106,7 @@ impl AgentAccessSettings {
     }
 }
 
-fn validated_roots(roots: &[String]) -> Result<Vec<String>, &'static str> {
+pub(crate) fn validated_roots(roots: &[String]) -> Result<Vec<String>, &'static str> {
     if roots.len() > 16 { return Err("settings.agent.error.tooManyDirectories"); }
     let mut directories = Vec::new();
     for directory in roots {
@@ -132,35 +121,53 @@ fn validated_roots(roots: &[String]) -> Result<Vec<String>, &'static str> {
 }
 
 fn validate_cloud_grant(grant: &AgentCloudGrant) -> Result<(), &'static str> {
-    let descriptor = crate::cloud::ProviderRegistry::global().by_key(&grant.provider)
+    crate::cloud::ProviderRegistry::global().by_key(&grant.provider)
         .filter(|descriptor| descriptor.provider.is_enabled()).ok_or("settings.agent.error.invalidCloudGrant")?;
-    let valid_id = |id: &str| !id.is_empty() && id.len() <= 4096 && !id.chars().any(char::is_control);
-    if !valid_id(&grant.account_id) || grant.directory_ids.is_empty() || grant.directory_ids.len() > 32 || grant.directory_labels.len() > 32
-        || grant.directory_ids.iter().any(|id| !valid_id(id) || id == descriptor.recycle_bin_directory_id)
-        || grant.operations.is_empty() || grant.operations.len() > 5
-        || grant.operations.iter().any(|operation| match operation.as_str() {
-            "browse" => !descriptor.capabilities.list,
-            "download" => !descriptor.capabilities.download,
-            "upload" => !descriptor.capabilities.upload,
-            "create_share" => !descriptor.capabilities.share_create,
-            // Agent transfer execution is not exposed in this phase.
-            "transfer" => true,
-            _ => true,
-        }) { return Err("settings.agent.error.invalidCloudGrant"); }
+    if grant.account_id.is_empty() || grant.account_id.len() > 4096
+        || grant.account_id.chars().any(char::is_control) {
+        return Err("settings.agent.error.invalidCloudGrant");
+    }
     Ok(())
 }
 
 fn normalize_grant_labels(grant: &mut AgentCloudGrant) {
-    let label = |value: &str| value.chars().filter(|character| !character.is_control()).take(512).collect::<String>().trim().to_owned();
-    grant.account_label = grant.account_label.as_deref().map(label).filter(|value| !value.is_empty());
-    let directory_ids = &grant.directory_ids;
-    grant.directory_labels.retain(|id, value| {
-        *value = label(value);
-        directory_ids.contains(id) && !value.is_empty()
-    });
+    grant.account_label = grant.account_label.as_deref().map(|value| {
+        value.chars().filter(|character| !character.is_control()).take(512).collect::<String>().trim().to_owned()
+    }).filter(|value| !value.is_empty());
 }
 
-fn validate_components(path: &Path) -> Result<(), &'static str> {
+pub(crate) fn require_cloud_account(state: &AppState, provider: &str, account_id: &str) -> Result<(), &'static str> {
+    state.settings.lock().map_err(|_| "INTERNAL_ERROR")?.agent_access.require_cloud_account(provider, account_id)
+}
+
+/// Called only after a trusted VD interaction; this helper is not an IPC command.
+pub(crate) fn approve_cloud_account(app: &AppHandle, provider: &str, account_id: &str, label: Option<String>) -> Result<(), &'static str> {
+    use tauri::Manager;
+    let mut grant = AgentCloudGrant { provider: provider.into(), account_id: account_id.into(), account_label: label };
+    validate_cloud_grant(&grant).map_err(|_| "INVALID_ARGUMENT")?;
+    normalize_grant_labels(&mut grant);
+    let provider_id = crate::cloud::ProviderRegistry::global().by_key(provider).ok_or("UNSUPPORTED")?.provider;
+    crate::cloud::commands::require_download_account(app, provider_id, account_id).map_err(|_| "ACCOUNT_MISMATCH")?;
+    let state = app.state::<AppState>();
+    let mut current = state.settings.lock().map_err(|_| "INTERNAL_ERROR")?;
+    if !current.agent_access.enabled { return Err("HOST_DISABLED"); }
+    let mut updated = current.clone();
+    if let Some(existing) = updated.agent_access.cloud_grants.iter_mut().find(|existing| {
+        existing.provider == provider && existing.account_id == account_id
+    }) { *existing = grant; }
+    else {
+        if updated.agent_access.cloud_grants.len() >= 32 { return Err("RESOURCE_LIMIT"); }
+        updated.agent_access.cloud_grants.push(grant);
+    }
+    persist(&state.settings_path, &updated).map_err(|_| "INTERNAL_ERROR")?;
+    *current = updated.clone();
+    drop(current);
+    use tauri::Emitter;
+    let _ = app.emit_to("main", "agent-access-changed", updated);
+    Ok(())
+}
+
+pub(crate) fn validate_components(path: &Path) -> Result<(), &'static str> {
     if !path.is_absolute() { return Err("INVALID_ARGUMENT"); }
     for component in path.components() {
         if matches!(component, Component::ParentDir) { return Err("FORBIDDEN"); }
@@ -184,7 +191,7 @@ fn validate_components(path: &Path) -> Result<(), &'static str> {
     Ok(())
 }
 
-fn resolve_existing_ancestor(path: &Path) -> Result<PathBuf, &'static str> {
+pub(crate) fn resolve_existing_ancestor(path: &Path) -> Result<PathBuf, &'static str> {
     let mut ancestor = path;
     let mut suffix = Vec::new();
     loop {
@@ -204,7 +211,7 @@ fn resolve_existing_ancestor(path: &Path) -> Result<PathBuf, &'static str> {
     }
 }
 
-fn normal_path(path: PathBuf) -> PathBuf {
+pub(crate) fn normal_path(path: PathBuf) -> PathBuf {
     #[cfg(windows)]
     {
         let text = path.to_string_lossy();
@@ -226,7 +233,7 @@ fn within(path: &Path, root: &Path) -> bool {
     root.components().all(|part| candidate.next().is_some_and(|next| same_component(part, next)))
 }
 
-fn same_path(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     a.components().count() == b.components().count() && within(a, b)
 }
 
@@ -235,19 +242,23 @@ pub(crate) fn is_enabled(state: &AppState) -> bool {
 }
 
 pub(crate) fn authorize_directory(state: &AppState, path: &Path) -> Result<PathBuf, &'static str> {
-    state.settings.lock().map_err(|_| "INTERNAL_ERROR")?.agent_access.authorize_directory(path)
+    crate::agent_permissions::authorize_download_directory(state, path)
 }
 
 pub(crate) fn authorize_file(state: &AppState, path: &Path) -> Result<PathBuf, &'static str> {
-    state.settings.lock().map_err(|_| "INTERNAL_ERROR")?.agent_access.authorize_file(path)
+    crate::agent_permissions::authorize_download_file(state, path)
+}
+
+pub(crate) fn authorize_upload_path(state: &AppState, path: &Path) -> Result<PathBuf, &'static str> {
+    crate::agent_permissions::authorize_upload_path(state, path)
 }
 
 pub(crate) fn authorize_upload_file(state: &AppState, path: &Path) -> Result<PathBuf, &'static str> {
-    state.settings.lock().map_err(|_| "INTERNAL_ERROR")?.agent_access.authorize_upload_file(path)
+    crate::agent_permissions::authorize_upload_file(state, path)
 }
 
 pub(crate) fn authorize_upload_directory(state: &AppState, path: &Path) -> Result<PathBuf, &'static str> {
-    state.settings.lock().map_err(|_| "INTERNAL_ERROR")?.agent_access.authorize_upload_directory(path)
+    crate::agent_permissions::authorize_upload_directory(state, path)
 }
 
 fn persist(path: &Path, settings: &AppSettings) -> Result<(), String> {
@@ -301,14 +312,9 @@ pub async fn configure_agent_access(
             if only_this_grant.is_restriction_of(&previous) { continue; }
             let provider = crate::cloud::ProviderRegistry::global().by_key(&grant.provider)
                 .ok_or("settings.agent.error.invalidCloudGrant")?.provider;
-            for directory_id in &grant.directory_ids {
-                let (account, directory) = crate::cloud::commands::prepare_agent_cloud_directory(
-                    app.clone(), provider, Some((grant.account_id.clone(), directory_id.clone()))
-                ).await.map_err(|_| "settings.agent.error.cloudVerification".to_string())?;
-                if account != grant.account_id || directory.id != *directory_id {
-                    return Err("settings.agent.error.cloudVerification".into());
-                }
-            }
+            let account = crate::cloud::commands::cloud_account(app.clone(), provider).await
+                .map_err(|_| "settings.agent.error.cloudVerification".to_string())?;
+            if account.id != grant.account_id { return Err("settings.agent.error.cloudVerification".into()); }
             crate::cloud::commands::require_download_account(&app, provider, &grant.account_id)
                 .map_err(|_| "settings.agent.error.cloudVerification".to_string())?;
         }
@@ -337,7 +343,7 @@ mod tests {
 
     fn grant() -> AgentCloudGrant {
         AgentCloudGrant { provider: "quark".into(), account_id: "account-a".into(),
-            directory_ids: vec!["approved-folder".into()], operations: vec!["browse".into(), "download".into()], ..Default::default() }
+            ..Default::default() }
     }
 
     #[test]
@@ -363,53 +369,33 @@ mod tests {
     }
 
     #[test]
-    fn agent_cloud_grants_bind_account_operation_and_verified_ancestor_scope() {
+    fn agent_cloud_access_binds_provider_and_account_without_directory_prompts() {
         let policy = AgentAccessSettings { enabled: true, cloud_grants: vec![grant()], ..Default::default() };
-        let chain = vec!["approved-folder".into(), "child".into()];
-        assert!(policy.require_cloud_grant("quark", "account-a", &chain, "download").is_ok());
-        for (provider, account, chain, operation) in [
-            ("quark", "account-b", chain.clone(), "download"),
-            ("baidu", "account-a", chain.clone(), "download"),
-            ("quark", "account-a", vec!["sibling".into()], "download"),
-            ("quark", "account-a", Vec::new(), "download"),
-            ("quark", "account-a", chain.clone(), "upload"),
-            ("quark", "account-a", chain.clone(), "create_share"),
-            ("quark", "account-a", chain.clone(), "transfer"),
-        ] {
-            assert_eq!(policy.require_cloud_grant(provider, account, &chain, operation), Err("CLOUD_PERMISSION_REQUIRED"));
-        }
-        let disabled = AgentAccessSettings { enabled: false, ..policy };
-        assert_eq!(disabled.require_cloud_grant("quark", "account-a", &chain, "download"), Err("CLOUD_PERMISSION_REQUIRED"));
+        assert!(policy.require_cloud_account("quark", "account-a").is_ok());
+        assert_eq!(policy.require_cloud_account("quark", "account-b"), Err("CLOUD_PERMISSION_REQUIRED"));
+        assert_eq!(policy.require_cloud_account("baidu", "account-a"), Err("CLOUD_PERMISSION_REQUIRED"));
+        assert_eq!(AgentAccessSettings { enabled: false, ..policy }.require_cloud_account("quark", "account-a"), Err("CLOUD_PERMISSION_REQUIRED"));
     }
 
     #[test]
-    fn agent_cloud_grants_reject_unknown_operations_and_unsupported_provider_capabilities() {
+    fn agent_cloud_account_grants_reject_invalid_provider_and_identity() {
         let mut invalid = grant();
-        invalid.operations = vec!["delete".into()];
-        assert!(validate_cloud_grant(&invalid).is_err());
-        invalid.operations = vec!["transfer".into()];
-        invalid.provider = "tianyi".into();
-        assert!(validate_cloud_grant(&invalid).is_err());
-        invalid = grant(); invalid.directory_ids.clear();
+        invalid.provider = "unknown".into();
         assert!(validate_cloud_grant(&invalid).is_err());
         invalid = grant(); invalid.account_id.clear();
         assert!(validate_cloud_grant(&invalid).is_err());
-        invalid = grant(); invalid.directory_ids = vec![crate::cloud::ProviderRegistry::global().by_key("quark").unwrap().recycle_bin_directory_id.into()];
+        invalid = grant(); invalid.account_id = "bad\nidentity".into();
         assert!(validate_cloud_grant(&invalid).is_err());
     }
 
     #[test]
-    fn agent_cloud_display_labels_never_expand_authorized_scope() {
+    fn agent_cloud_display_labels_never_replace_account_identity() {
         let mut grant = grant();
         grant.account_label = Some(" Display\nAccount ".into());
-        grant.directory_labels.insert("approved-folder".into(), " Root / Work ".into());
-        grant.directory_labels.insert("unapproved-folder".into(), "Fake scope".into());
         normalize_grant_labels(&mut grant);
         assert_eq!(grant.account_label.as_deref(), Some("DisplayAccount"));
-        assert_eq!(grant.directory_labels.len(), 1);
         let policy = AgentAccessSettings { enabled: true, cloud_grants: vec![grant], ..Default::default() };
-        assert_eq!(policy.require_cloud_grant("quark", "DisplayAccount", &["approved-folder".into()], "browse"), Err("CLOUD_PERMISSION_REQUIRED"));
-        assert_eq!(policy.require_cloud_grant("quark", "account-a", &["Root / Work".into()], "browse"), Err("CLOUD_PERMISSION_REQUIRED"));
+        assert_eq!(policy.require_cloud_account("quark", "DisplayAccount"), Err("CLOUD_PERMISSION_REQUIRED"));
     }
 
     #[test]
@@ -418,11 +404,12 @@ mod tests {
             allowed_directories: vec!["no-longer-mounted".into()],
             upload_directories: vec!["offline-upload-root".into()], cloud_grants: vec![grant()] };
         let mut restricted = previous.clone();
-        restricted.cloud_grants[0].operations = vec!["browse".into()];
+        restricted.cloud_grants.clear();
         restricted.upload_directories.clear();
         assert!(restricted.is_restriction_of(&previous));
         assert!(AgentAccessSettings::default().is_restriction_of(&previous));
-        restricted.cloud_grants[0].operations.push("upload".into());
+        let mut other = grant(); other.account_id = "account-b".into();
+        restricted.cloud_grants.push(other);
         assert!(!restricted.is_restriction_of(&previous));
         let disabled = AgentAccessSettings { enabled: false, ..previous.clone() };
         assert!(disabled.is_restriction_of(&previous));

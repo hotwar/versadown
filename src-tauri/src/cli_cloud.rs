@@ -16,7 +16,7 @@ pub(crate) struct CloudPlan {
     pub targets:Vec<ResourceTarget>,pub sources:Vec<FileSnapshot>,pub share_options:Option<CloudShareOptions>,
 }
 
-fn cloud_code(e:QuarkError)->&'static str {
+pub(crate) fn cloud_code(e:QuarkError)->&'static str {
     match &e {
         QuarkError::InvalidInput(s) if s=="agent.error.forbidden"=>"CLOUD_PERMISSION_REQUIRED",
         QuarkError::InvalidInput(s) if s=="agent.error.fileConflict"=>"FILE_CONFLICT",
@@ -28,18 +28,18 @@ fn cloud_code(e:QuarkError)->&'static str {
 fn target_fields(target:&ResourceTarget)->CodeResult<(CloudProvider,&str,&str,&[String],bool)> {
     match target {ResourceTarget::Cloud{provider,account_id,file_id,directory_chain,folder,..}=>Ok((*provider,account_id,file_id,directory_chain,*folder)),_=>Err("INVALID_ARGUMENT")}
 }
-pub(crate) fn scope(app:&AppHandle,target:&ResourceTarget,operation:&str)->CodeResult<()> {
-    let (provider,account,_,chain,_)=target_fields(target)?;
-    app.state::<AppState>().settings.lock().map_err(|_|"INTERNAL_ERROR")?.agent_access.require_cloud_grant(provider.key(),account,chain,operation)
+pub(crate) fn scope(app:&AppHandle,target:&ResourceTarget)->CodeResult<()> {
+    let (provider,account,_,_,_)=target_fields(target)?;
+    crate::agent_access::require_cloud_account(&app.state::<AppState>(),provider.key(),account)
 }
-pub(crate) async fn validate_target(app:&AppHandle,target:&ResourceTarget,operation:&str)->CodeResult<()> {
-    scope(app,target,operation)?;
+pub(crate) async fn validate_target(app:&AppHandle,target:&ResourceTarget)->CodeResult<()> {
+    scope(app,target)?;
     let (provider,account,id,chain,folder)=target_fields(target)?;
     let account=account.to_owned();let id=id.to_owned();let chain=chain.to_vec();
     crate::cloud::commands::run_session_work(app.clone(),provider,crate::cloud::SessionWorkKind::Read,move|s,h|{
         crate::cloud::commands::validate_agent_cloud_path(provider,&s.store,h,&account,&chain,&id,folder)
     }).await.map_err(cloud_code)?;
-    scope(app,target,operation)
+    scope(app,target)
 }
 fn snapshot(path:&Path)->CodeResult<FileSnapshot>{
     let meta=std::fs::symlink_metadata(path).map_err(|_|"SOURCE_CHANGED")?;
@@ -49,15 +49,15 @@ fn snapshot(path:&Path)->CodeResult<FileSnapshot>{
     let modified=meta.modified().map_err(|_|"SOURCE_CHANGED")?.duration_since(UNIX_EPOCH).map_err(|_|"SOURCE_CHANGED")?.as_nanos();
     Ok(FileSnapshot{path:path.into(),name,size:meta.len(),modified})
 }
-fn validate_source(app:&AppHandle,file:&FileSnapshot)->CodeResult<()> {
-    let path=crate::agent_access::authorize_upload_file(&app.state::<AppState>(),&file.path)?;
+fn validate_source(app:&AppHandle,permission_scope:&str,file:&FileSnapshot)->CodeResult<()> {
+    let path=crate::agent_permissions::authorize_upload_file_in_scope(&app.state::<AppState>(),permission_scope,&file.path)?;
     let current=snapshot(&path)?;
     if path!=file.path||current.size!=file.size||current.modified!=file.modified {Err("SOURCE_CHANGED")}else{Ok(())}
 }
 fn allowed_plan(app:&AppHandle,plan:&CloudPlan)->CodeResult<()> {
-    for target in &plan.targets {scope(app,target,&plan.operation)?;}
-    let state=app.state::<AppState>();let settings=state.settings.lock().map_err(|_|"INTERNAL_ERROR")?;
-    for file in &plan.sources {settings.agent_access.authorize_upload_path(&file.path)?;}
+    for target in &plan.targets {scope(app,target)?;}
+    let state=app.state::<AppState>();
+    for file in &plan.sources {crate::agent_permissions::authorize_upload_path_in_scope(&state,&plan.id,&file.path)?;}
     Ok(())
 }
 fn preview(plan:&CloudPlan)->CloudPreparedDto {
@@ -79,12 +79,12 @@ async fn prepare(app:&AppHandle,input:&CloudPrepareInput)->CodeResult<CloudPrepa
             if !crate::cloud::ProviderRegistry::global().get(provider).capabilities.upload{return Err("UNSUPPORTED")}
             let mut names=HashSet::new();
             for path in paths {
-                let canonical=state.settings.lock().map_err(|_|"INTERNAL_ERROR")?.agent_access.authorize_upload_path(Path::new(path))?;
+                let canonical=crate::agent_permissions::authorize_upload_path(&state,Path::new(path))?;
                 let file=snapshot(&canonical)?;
                 if !names.insert(file.name.to_lowercase()){return Err("FILE_CONFLICT")}
                 plan.sources.push(file);
             }
-            validate_target(app,&target,"upload").await?;
+            validate_target(app,&target).await?;
             let (_,_,id,_,_)=target_fields(&target)?;
             let listing=crate::cloud::commands::cloud_list_directory(app.clone(),provider,id.to_owned()).await.map_err(cloud_code)?;
             if listing.items.iter().any(|f|names.contains(&f.name.to_lowercase())){return Err("FILE_CONFLICT")}
@@ -98,7 +98,7 @@ async fn prepare(app:&AppHandle,input:&CloudPrepareInput)->CodeResult<CloudPrepa
                 if plan.targets.is_empty(){plan.provider=provider;plan.account_id=account.into();}
                 if plan.provider!=provider||plan.account_id!=account{return Err("ACCOUNT_MISMATCH")}
                 if !crate::cloud::ProviderRegistry::global().get(provider).capabilities.share_create{return Err("UNSUPPORTED")}
-                validate_target(app,&target,"create_share").await?;
+                validate_target(app,&target).await?;
                 plan.targets.push(target);
             }
             let options=CloudShareOptions{name:name.clone(),pass_code:pass_code.clone(),generate_pass_code:*generate_pass_code,expires_in_days:if *expires_in_days==0{None}else{Some(*expires_in_days)}};
@@ -106,6 +106,9 @@ async fn prepare(app:&AppHandle,input:&CloudPrepareInput)->CodeResult<CloudPrepa
             plan.share_options=Some(options);
         }
     }
+    // Carry the one-request local approval beyond the prepare request and into
+    // confirmation/background execution. It never becomes a saved setting.
+    crate::agent_permissions::inherit_scope(&state,&plan.id)?;
     allowed_plan(app,&plan)?;
     state.store.save_agent_cloud_plan(&plan,now())?;
     Ok(preview(&plan))
@@ -118,9 +121,12 @@ async fn confirm(app:&AppHandle,id:&str,request_id:&str)->CodeResult<CloudOperat
     let state=app.state::<AppState>();let fingerprint=fingerprint(id);
     if let Some((plan,dto))=state.store.agent_cloud_receipt(request_id,&fingerprint)?{allowed_plan(app,&plan)?;return Ok(dto)}
     let plan=state.store.agent_cloud_plan(id,now())?;
-    for target in &plan.targets{validate_target(app,target,&plan.operation).await?;}
-    for source in &plan.sources{validate_source(app,source)?;}
+    for target in &plan.targets{validate_target(app,target).await?;}
+    for source in &plan.sources{validate_source(app,&plan.id,source)?;}
     allowed_plan(app,&plan)?;
+    // One prepared write belongs to one request. Retrying that request is
+    // allowed; a new request cannot reuse its task-specific local approval.
+    state.store.claim_agent_grant(&plan.id,request_id)?;
     state.store.accept_agent_cloud(&plan,&operation_dto(&plan,request_id),&fingerprint)
 }
 fn status(app:&AppHandle,id:&str)->CodeResult<CloudOperationDto>{let (plan,dto)=app.state::<AppState>().store.agent_cloud_operation(id)?;allowed_plan(app,&plan)?;Ok(dto)}
@@ -158,7 +164,7 @@ async fn output_file(app:&AppHandle,plan:&CloudPlan,file:crate::cloud::CloudFile
     }
     let id=Uuid::new_v4().to_string();let result=CloudFileResultDto{selection_id:id.clone(),name:file.name.clone(),size_bytes:file.size,kind:file.kind.as_str().into()};
     let target=ResourceTarget::Cloud{provider:plan.provider,account_id:plan.account_id.clone(),file_id:file.id,name:file.name.clone(),size_bytes:file.size,folder:file.kind==crate::cloud::CloudFileKind::Folder,directory_chain:chain};
-    validate_target(app,&target,"upload").await?;
+    validate_target(app,&target).await?;
     app.state::<AppState>().store.save_agent_resource_plan(&ResourcePlan{id:Uuid::new_v4().to_string(),expires_at:now()+900,kind:"cloud".into(),bt:None,effects:vec![],choices:vec![ResourceSelection{id,name:file.name,kind:file.kind.as_str().into(),size_bytes:file.size,detail:None,target}]},now())?;
     Ok(result)
 }
@@ -180,7 +186,7 @@ async fn perform(app:&AppHandle,plan:&CloudPlan,dto:&mut CloudOperationDto)->Cod
         let (_,_,parent,chain,_)=target_fields(&plan.targets[0])?;
         for (index,file) in plan.sources.iter().enumerate(){
             if operation_cancelled(app,&dto.id){dto.status="cancelled".into();break;}
-            if let Err(code)=allowed_plan(app,plan).and_then(|_|validate_source(app,file)) {
+            if let Err(code)=allowed_plan(app,plan).and_then(|_|validate_source(app,&plan.id,file)) {
                 dto.failures.push(CloudItemErrorDto{index,name:file.name.clone(),error:ApiError::new(code,"en")});break;
             }
             let progress_app=app.clone();let id=dto.id.clone();let done=dto.completed_bytes;let provider=plan.provider;let progress_plan=plan.clone();
@@ -190,7 +196,7 @@ async fn perform(app:&AppHandle,plan:&CloudPlan,dto:&mut CloudOperationDto)->Cod
                     if current.status=="running" {current.completed_bytes=done.saturating_add(event.uploaded_bytes).min(current.total_bytes.unwrap_or(u64::MAX));let _=progress_app.state::<AppState>().store.update_agent_cloud(&current,&["running"]);}
                 }
             });
-            let result=crate::cloud::commands::upload_agent_file(app.clone(),plan.provider,plan.account_id.clone(),chain.to_vec(),parent.into(),file.clone(),dto.id.clone(),progress).await;
+            let result=crate::cloud::commands::upload_agent_file(app.clone(),plan.provider,plan.account_id.clone(),chain.to_vec(),parent.into(),file.clone(),dto.id.clone(),plan.id.clone(),progress).await;
             match result {
                 Ok(uploaded)=>{dto.files.push(output_file(app,plan,uploaded).await.map_err(|_|"CLOUD_RESULT_UNCERTAIN")?);dto.completed_bytes=dto.completed_bytes.saturating_add(file.size);},
                 Err(e)=>{

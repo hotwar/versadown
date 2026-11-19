@@ -77,16 +77,17 @@ pub fn cloud_control_upload(
 }
 
 fn agent_upload_access(
-    app: &AppHandle, provider: CloudProvider, account_id: &str, chain: &[String], path: &Path,
+    app: &AppHandle, provider: CloudProvider, account_id: &str, permission_scope: &str, path: &Path,
 ) -> Result<PathBuf, QuarkError> {
     let state = app.state::<AppState>();
-    let policy = state.settings.lock().map_err(|_| QuarkError::Storage)?.agent_access.clone();
-    policy.require_cloud_grant(provider.key(), account_id, chain, "upload")
+    crate::agent_access::require_cloud_account(&state, provider.key(), account_id)
         .map_err(|_| QuarkError::InvalidInput("agent.error.forbidden".into()))?;
-    let source = policy.authorize_upload_path(path)
+    // Provider session work runs on a blocking thread without Tokio task-local
+    // context. The durable cloud plan is the authority for this upload only.
+    let source = crate::agent_permissions::authorize_upload_path_in_scope(&state, permission_scope, path)
         .map_err(|_| QuarkError::InvalidInput("agent.error.forbidden".into()))?;
     if source.is_dir() { return Err(QuarkError::ProviderUnsupported); }
-    policy.authorize_upload_file(&source)
+    crate::agent_permissions::authorize_upload_file_in_scope(&state, permission_scope, &source)
         .map_err(|_| QuarkError::InvalidInput("agent.error.forbidden".into()))
 }
 
@@ -170,9 +171,10 @@ pub(crate) async fn upload_agent_file(
     parent_id: String,
     expected_source: crate::cli_cloud::FileSnapshot,
     upload_id: String,
+    permission_scope: String,
     on_progress: Arc<dyn Fn(CloudUploadProgress) + Send + Sync>,
 ) -> Result<CloudFile, AgentUploadError> {
-    let source = agent_upload_access(&app, provider, &account_id, &directory_chain, &expected_source.path)?;
+    let source = agent_upload_access(&app, provider, &account_id, &permission_scope, &expected_source.path)?;
     let capacity_app = app.clone();
     let entered_mutation = Arc::new(AtomicBool::new(false));
     let worker_entered_mutation = Arc::clone(&entered_mutation);
@@ -186,7 +188,7 @@ pub(crate) async fn upload_agent_file(
             let result = run_session_work_checked(app, provider, SessionWorkKind::Mutation, move |state, transport| {
                 upload_control.wait_ready_blocking()?;
                 let http = crate::cloud::http::ControlledUploadHttp { inner: transport, control: upload_control.clone() };
-                let approved = agent_upload_access(&access_app, provider, &account_id, &directory_chain, &source)?;
+                let approved = agent_upload_access(&access_app, provider, &account_id, &permission_scope, &source)?;
                 let prepared = prepare_upload_input(provider, &approved, &upload_control, &tracker, 0)?;
                 let PreparedUpload::File(path) = prepared else { return Err(QuarkError::ProviderUnsupported); };
                 tracker.start_uploading();
@@ -198,7 +200,7 @@ pub(crate) async fn upload_agent_file(
                     validate_agent_cloud_path(provider, &state.store, &http, &account_id, &directory_chain, &parent_id, true)?;
                     let listing = list_cloud_directory(provider, &state.store, &http, &parent_id)?;
                     ensure_agent_upload_name_available(&listing, &path)?;
-                    let approved = agent_upload_access(&access_app, provider, &account_id, &directory_chain, &path)?;
+                    let approved = agent_upload_access(&access_app, provider, &account_id, &permission_scope, &path)?;
                     dispatch_agent_upload(&expected_source, &approved, &worker_entered_mutation, || {
                         ProviderRegistry::global().driver(provider, &state.store, &http).upload_no_replace(&http, &parent_id, &approved)
                     })?

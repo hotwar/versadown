@@ -7,13 +7,13 @@ use uuid::Uuid;
 
 use crate::{DownloadAction, DownloadTask, EngineRuntime, StoreError, TaskStore};
 
-type Authorize = Arc<dyn Fn(&Path) -> bool + Send + Sync>;
+type Authorize = Arc<dyn Fn(Uuid, &Path) -> bool + Send + Sync>;
 
 pub(crate) struct CliDispatcher {
     store: Arc<TaskStore>,
     runtime: Arc<EngineRuntime>,
     authorize: Authorize,
-    gate: Mutex<()>,
+    pub(crate) gate: Mutex<()>,
     wake: Arc<Notify>,
 }
 
@@ -43,8 +43,9 @@ impl CliDispatcher {
         let Ok(intents) = self.store.pending_cli_intents() else { return; };
         for intent in intents {
             let _gate = self.gate.lock().await;
+            let authorize = |path: &Path| (self.authorize)(intent.task_id, path);
             if self.store.find(intent.task_id).is_ok_and(|task| task.kind == "ftp") {
-                if let Err(error) = self.runtime.dispatch_cli_ftp_intent(&intent, self.authorize.as_ref()).await {
+                if let Err(error) = self.runtime.dispatch_cli_ftp_intent(&intent, &authorize).await {
                     let code = match error {
                         crate::ftp::FtpDownloadError::InvalidOption("recovery checkpoint") => Some("CLI_RECOVERY_REQUIRED"),
                         crate::ftp::FtpDownloadError::InvalidOption("engine is stopping") => None,
@@ -62,7 +63,7 @@ impl CliDispatcher {
             let Some(service) = &service else { continue; };
             // Errors may mean that an RPC was accepted. Leave the intent and
             // its fixed GID for reconciliation, and do not log raw RPC errors.
-            if let Err(error) = service.dispatch_cli_intent(&intent, self.authorize.as_ref()).await {
+            if let Err(error) = service.dispatch_cli_intent(&intent, &authorize).await {
                 let code = match error {
                     crate::DownloadServiceError::InvalidNativeCheckpoint => Some("CLI_RECOVERY_REQUIRED"),
                     crate::DownloadServiceError::InvalidUriOption(_) | crate::DownloadServiceError::Input(_) => Some("INVALID_ARGUMENT"),
