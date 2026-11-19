@@ -75,7 +75,12 @@ mod tests {
     fn baidu_upload_token_rejection_leaves_listed_account_and_never_starts_a_write() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), b"upload fixture").unwrap();
-        let http = Http::new(vec![json!({"errno":0,"list":[]}), json!({"errno":-6})]);
+        let http = Http::new(vec![
+            json!({"errno":0,"list":[]}),
+            json!({"errno":-6}),
+            json!({"errno":0,"user":{"uk":7}}),
+            json!({"errno":-6}),
+        ]);
         let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
         assert!(client.directory("/").is_ok());
         let error = client.upload_file("/", file.path(), &http).unwrap_err();
@@ -89,9 +94,53 @@ mod tests {
             "baidu_upload_session_required"
         );
         let requests = http.requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 4);
         assert!(requests.iter().all(|request| request.method == "GET"));
         assert!(requests[1].url.contains("/api/gettemplatevariable?"));
+        assert!(requests[2].url.contains("/rest/2.0/xpan/nas?method=uinfo"));
+        assert_eq!(requests[3].url, requests[1].url);
+    }
+
+    #[test]
+    fn baidu_upload_initializes_a_cold_session_before_sending_writes() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"upload fixture").unwrap();
+        let http = Http::new(vec![
+            json!({"errno":-6}),
+            json!({"errno":0,"user":{"uk":7}}),
+            json!({"errno":0,"result":{"bdstoken":"token"}}),
+            json!({"errno":0,"uploadid":"upload-fixture","block_list":[]}),
+            json!({"errno":0,"fs_id":42}),
+        ]);
+
+        BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http)
+            .upload_file("/", file.path(), &http)
+            .unwrap();
+
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[0].method, "GET");
+        assert!(requests[0].url.contains("/api/gettemplatevariable?"));
+        assert_eq!(requests[1].method, "GET");
+        assert!(requests[1].url.contains("/rest/2.0/xpan/nas?method=uinfo"));
+        assert_eq!(requests[2].method, "GET");
+        assert_eq!(requests[2].url, requests[0].url);
+        assert_eq!(requests[3].method, "POST");
+        assert!(requests[3].url.contains("/api/precreate?"));
+        assert_eq!(requests[4].method, "POST");
+        assert!(requests[4].url.contains("/api/create?"));
+    }
+
+    #[test]
+    fn baidu_upload_keeps_token_failure_if_account_lookup_fails() {
+        let http = Http::new(vec![json!({"errno":-6}), json!({"errno":0})]);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
+
+        assert!(matches!(
+            client.upload_web_token(),
+            Err(QuarkError::BaiduUploadAuthorizationRequired(BaiduUploadAuthStage::Token))
+        ));
+        assert_eq!(http.requests.lock().unwrap().len(), 2);
     }
 
     #[test]
@@ -165,6 +214,8 @@ mod tests {
                 let stage = match (request.method, endpoint.scheme(), endpoint.host_str(), endpoint.path()) {
                     ("GET", "https", Some("pan.baidu.com"), "/api/list") => "directory",
                     ("GET", "https", Some("pan.baidu.com"), "/api/gettemplatevariable") => "upload_token",
+                    ("GET", "https", Some("pan.baidu.com"), "/rest/2.0/xpan/nas")
+                        if endpoint.query_pairs().any(|(key, value)| key == "method" && value == "uinfo") => "account",
                     _ => return Err(QuarkError::InvalidInput("unexpected probe request".into())),
                 };
                 let response = self.0.send(request)?;
@@ -205,13 +256,22 @@ mod tests {
                 .expect("the selected profile has no saved Baidu session"),
         );
         store.save("baidu", &saved).expect("copy session to memory");
-        let http = ReadOnlyProbe(crate::cloud::ReqwestTransport::new()
-            .unwrap_or_else(|error| panic!("transport unavailable: {}", safe_code(&error))));
-        let session = load_provider_session(CloudProvider::Baidu, &store)
+        let transport = || {
+            ReadOnlyProbe(crate::cloud::ReqwestTransport::new()
+                .unwrap_or_else(|error| panic!("transport unavailable: {}", safe_code(&error))))
+        };
+        let session: BaiduSession = load_provider_session(CloudProvider::Baidu, &store)
             .unwrap_or_else(|error| panic!("session unavailable: {}", safe_code(&error)));
-        let directory = BaiduClient::new(session, &http).directory("/");
-        let upload_token = verify_baidu_upload_session(&store, &http);
-        for (stage, result) in [("directory", directory.map(|_| ())), ("upload_token", upload_token)] {
+        let direct_http = transport();
+        let direct_token = BaiduClient::new(session.clone(), &direct_http).web_token().map(|_| ());
+        let upload_token = verify_baidu_upload_session(&store, &transport());
+        let directory_http = transport();
+        let directory = BaiduClient::new(session, &directory_http).directory("/");
+        for (stage, result) in [
+            ("upload_token_without_initialization", direct_token),
+            ("upload_token_with_initialization", upload_token),
+            ("directory_from_fresh_http_session", directory.map(|_| ())),
+        ] {
             match result {
                 Ok(()) => eprintln!("[baidu-live-probe] {stage}=ok"),
                 Err(error) => eprintln!("[baidu-live-probe] {stage}={}", safe_code(&error)),
@@ -1547,7 +1607,7 @@ pub(crate) fn verify_baidu_upload_session(
 ) -> Result<(), QuarkError> {
     let session = load_provider_session(CloudProvider::Baidu, store)?;
     BaiduClient::new(session, http)
-        .web_token_at_stage(Some(BaiduUploadAuthStage::Token))
+        .upload_web_token()
         .map(|_| ())
 }
 
@@ -2677,8 +2737,19 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
 
     fn upload_web_token(&self) -> Result<String, QuarkError> {
         let stage = BaiduUploadAuthStage::Token;
-        self.web_token_at_stage(Some(stage))
-            .map_err(|error| baidu_upload_auth_error(stage, error))
+        let token = self.web_token_at_stage(Some(stage));
+        let token = match token {
+            // A fresh HTTP client can receive -6 before the Pan session is
+            // initialized. Let the same cookie jar absorb any cookies from
+            // the account GET, then retry before dispatching any write.
+            Err(error @ QuarkError::AuthorizationExpired) => match self.account() {
+                Ok(_) => self.web_token_at_stage(Some(stage)),
+                Err(error) if super::is_upload_cancelled(&error) => Err(error),
+                Err(_) => Err(error),
+            },
+            result => result,
+        };
+        token.map_err(|error| baidu_upload_auth_error(stage, error))
     }
 
     fn web_token_at_stage(&self, stage: Option<BaiduUploadAuthStage>) -> Result<String, QuarkError> {
@@ -3114,12 +3185,6 @@ fn baidu_json_at_stage(
     }
     if let Some(errno) = errno {
         if matches!(errno, -6 | -7 | 110 | 111 | 31045) {
-            if diagnostic && upload_stage.is_none() {
-                return Err(QuarkError::Provider(format!(
-                    "百度授权拒绝（errno {errno}，HTTP {}）",
-                    response.status
-                )));
-            }
             return Err(QuarkError::AuthorizationExpired);
         }
         return Err(QuarkError::Provider(format!(
