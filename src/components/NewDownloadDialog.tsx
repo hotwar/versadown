@@ -1,7 +1,7 @@
 import { FormEvent, ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { isTauriRuntime, listPersistedTasks } from '../lib/api';
 import { formatBytes } from '../lib/downloadEvents';
-import { ConfirmResource, ParseDownloadResult, ScanDownloadProgress, ScanDownloadResult } from '../lib/types';
+import { ConfirmResource, ParseDownloadResult, ScanDownloadProgress, ScanDownloadResult, VideoPreview } from '../lib/types';
 import { ResourceFileRow } from './ResourceFileRow';
 import { VideoFormatCard } from './VideoFormatCard';
 import { canExpandDownloadDraft, DownloadDraftItem, DraftSubmissionFailure, useDownloadDraftBatch } from './useDownloadDraftBatch';
@@ -17,6 +17,7 @@ export interface NewDownloadDialogProps {
   onClose(): void;
   onOpenTaskList?(): void | Promise<void>;
   initialInput?: string;
+  initialVideos?: VideoPreview[];
   onDiscardPrepared?(reference: string): Promise<void>;
   onSubmitBatch?(items: DownloadDraftItem[], destinationDirectory?: string, privateDownload?: boolean, postProcessingNote?: string): void | Promise<void | DraftSubmissionFailure[]>;
   downloadDirectory?: string;
@@ -277,6 +278,7 @@ function BatchNewDownloadDialog({
   open,
   placement = 'modal',
   initialInput = '',
+  initialVideos,
   onParse,
   onScan,
   onDiscardPrepared,
@@ -326,9 +328,9 @@ function BatchNewDownloadDialog({
     setManualInput(initialInput);
     setScanning(Boolean(initialInput.trim()));
     let current = true;
-    void batch.start(initialInput).finally(() => { if (current) setScanning(false); });
+    void batch.start(initialInput, initialVideos).finally(() => { if (current) setScanning(false); });
     return () => { current = false; };
-  }, [open, initialInput]);
+  }, [open, initialInput, initialVideos]);
 
   useEffect(() => {
     const pending = batch.items.filter(item => item.status === 'ready'

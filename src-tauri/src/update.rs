@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use std::{io::Read, time::Duration};
 
-pub const LATEST_RELEASE_URL: &str = "https://versadown.aigutta.com/releases/latest.json";
-pub const DOWNLOAD_PAGE_URL: &str = "https://versadown.aigutta.com/#download";
+pub const LATEST_RELEASE_URL: &str = "https://www.versadown.com/releases/latest.json";
+pub const DOWNLOAD_PAGE_URL: &str = "https://www.versadown.com/#gate";
 const MAX_MANIFEST_BYTES: u64 = 64 * 1024;
+const MAX_REDIRECTS: usize = 5;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -31,7 +32,8 @@ fn update_client(current_version: &str) -> reqwest::blocking::ClientBuilder {
     reqwest::blocking::Client::builder()
         .connect_timeout(Duration::from_secs(3))
         .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
+        .https_only(true)
+        .redirect(reqwest::redirect::Policy::limited(MAX_REDIRECTS))
         .user_agent(format!("VersaDown/{current_version}"))
 }
 
@@ -117,13 +119,13 @@ mod tests {
     use std::{io::Write, net::TcpListener, thread};
 
     fn serve_manifest(
-        status: &str,
+        status_and_headers: &str,
         body: String,
         delay: Duration,
     ) -> (String, thread::JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/latest.json", listener.local_addr().unwrap());
-        let status = status.to_owned();
+        let status_and_headers = status_and_headers.to_owned();
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
             stream
@@ -142,7 +144,7 @@ mod tests {
             }
             thread::sleep(delay);
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                "HTTP/1.1 {status_and_headers}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len()
             );
             // The client intentionally closes early for timeout/oversize tests.
@@ -150,6 +152,10 @@ mod tests {
             String::from_utf8(request).unwrap()
         });
         (url, server)
+    }
+
+    fn loopback_client() -> reqwest::blocking::ClientBuilder {
+        update_client("0.3.0").https_only(false).no_proxy()
     }
 
     #[test]
@@ -242,13 +248,13 @@ mod tests {
     fn requests_fresh_json_and_accepts_optional_notes() {
         let (url, server) =
             serve_manifest("200 OK", r#"{"version":"0.3.1"}"#.into(), Duration::ZERO);
-        let client = update_client("0.3.0").no_proxy().build().unwrap();
+        let client = loopback_client().build().unwrap();
         let result = fetch_app_update_from(&client, &url, "0.3.0");
         let request = server.join().unwrap().to_ascii_lowercase();
         let update = result.unwrap().unwrap();
         assert_eq!(update.version, "0.3.1");
         assert_eq!(update.notes, "");
-        assert_eq!(update.download_url, "https://versadown.aigutta.com/#download");
+        assert_eq!(update.download_url, "https://www.versadown.com/#gate");
         assert!(request.starts_with("get /latest.json http/1.1\r\n"));
         assert!(request.contains("\r\naccept: application/json\r\n"));
         assert!(request.contains("\r\ncache-control: no-cache\r\n"));
@@ -256,8 +262,27 @@ mod tests {
     }
 
     #[test]
-    fn rejects_http_errors_redirects_and_invalid_json() {
-        let client = update_client("0.3.0").no_proxy().build().unwrap();
+    fn follows_a_redirect_to_a_manifest_on_another_origin() {
+        let (target, target_server) =
+            serve_manifest("200 OK", r#"{"version":"0.3.1"}"#.into(), Duration::ZERO);
+        let (url, redirect_server) = serve_manifest(
+            &format!("301 Moved Permanently\r\nLocation: {target}"),
+            String::new(),
+            Duration::ZERO,
+        );
+        let client = loopback_client().build().unwrap();
+        let update = fetch_app_update_from(&client, &url, "0.3.0")
+            .unwrap()
+            .unwrap();
+        assert_eq!(update.version, "0.3.1");
+        assert_eq!(update.download_url, DOWNLOAD_PAGE_URL);
+        redirect_server.join().unwrap();
+        target_server.join().unwrap();
+    }
+
+    #[test]
+    fn rejects_http_errors_redirects_without_location_and_invalid_json() {
+        let client = loopback_client().build().unwrap();
         for (status, body, expected_error) in [
             ("404 Not Found", "", "Unexpected release response: 404"),
             (
@@ -290,7 +315,7 @@ mod tests {
             "x".repeat(MAX_MANIFEST_BYTES as usize)
         );
         let (url, server) = serve_manifest("200 OK", body, Duration::ZERO);
-        let client = update_client("0.3.0").no_proxy().build().unwrap();
+        let client = loopback_client().build().unwrap();
         let result = fetch_app_update_from(&client, &url, "0.3.0");
         server.join().unwrap();
         assert_eq!(result.unwrap_err(), "Release manifest exceeds size limit");
@@ -303,8 +328,7 @@ mod tests {
             r#"{"version":"0.3.1"}"#.into(),
             Duration::from_millis(250),
         );
-        let client = update_client("0.3.0")
-            .no_proxy()
+        let client = loopback_client()
             .timeout(Duration::from_millis(50))
             .build()
             .unwrap();

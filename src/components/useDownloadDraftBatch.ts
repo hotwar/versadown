@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ConfirmResource, ParseDownloadResult, ScanDownloadProgress, ScanDownloadResult, VideoFormat } from '../lib/types';
+import { ConfirmResource, ParseDownloadResult, ScanDownloadProgress, ScanDownloadResult, VideoFormat, VideoPreview } from '../lib/types';
+import { videoConfirmation } from '../lib/webVideo';
 import { t } from '../i18n';
 
 export type DownloadDraftStatus = 'parsing' | 'ready' | 'access_code_required' | 'failed';
@@ -18,6 +19,7 @@ export interface DownloadDraftItem {
   expanded: boolean;
   submitted: boolean;
   completedVideoSizes?: ReadonlySet<string>;
+  videoMediaId?: string;
   generation: number;
 }
 
@@ -35,7 +37,7 @@ export interface DraftSubmissionFailure {
   resourceIds?: string[];
 }
 
-type WorkItem = { id: string; generation: number; accessCodeRetry?: boolean; superseded?: string };
+type WorkItem = { id: string; generation: number; accessCodeRetry?: boolean; superseded?: string; videos?: VideoPreview[] };
 
 function sizeKey(format: VideoFormat): string {
   return `${format.width}x${format.height}`;
@@ -65,8 +67,10 @@ function isRejectedAccessCode(message: string): boolean {
   return /(?:访问码|分享码).*(?:错误|不正确|缺失)|提取码.*(?:错误|不正确|失败|缺失)/.test(message);
 }
 
-function resultReference(result?: ParseDownloadResult): string | undefined {
-  return result?.confirmation?.taskId ?? result?.task?.id;
+function resultReferences(result?: ParseDownloadResult): string[] {
+  if (result?.videos) return result.videos.map(video => 'video-page:' + video.previewId);
+  const reference = result?.confirmation?.taskId ?? result?.task?.id;
+  return reference ? [reference] : [];
 }
 
 function hasRelativeDirectoryPath(path: string): boolean {
@@ -118,6 +122,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4,
   const queueRef = useRef<WorkItem[]>([]);
   const activeRef = useRef({ video: 0, ordinary: 0 });
   const sessionRef = useRef(0);
+  const consumedVideosRef = useRef(new WeakSet<VideoPreview[]>());
 
   const replaceItems = useCallback((update: (current: DownloadDraftItem[]) => DownloadDraftItem[]) => {
     const next = update(itemsRef.current);
@@ -142,6 +147,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4,
       const lane = item.probeVideo ? 'video' : 'ordinary';
       activeRef.current[lane] += 1;
       const prepareItem = async () => {
+        if (work.videos) return { videos: work.videos };
         if (work.superseded) {
           await discard(work.superseded);
           // A removed or closed draft must not start a second extraction.
@@ -158,31 +164,44 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4,
           if (!result) return;
           const current = itemsRef.current.find(candidate => candidate.id === work.id && candidate.generation === work.generation);
           if (!current) {
-            const reference = resultReference(result);
-            if (reference) void discard(reference).catch(() => undefined);
+            for (const reference of resultReferences(result)) void discard(reference).catch(() => undefined);
             return;
           }
-          let prepared: ParseDownloadResult;
+          let prepared: ParseDownloadResult[];
           try {
-            prepared = refreshVideoSelection(result, item);
+            if (result.videos) {
+              // Refresh only this media item. Siblings already have independent
+              // selections and may have been submitted or removed.
+              const videos = item.videoMediaId === undefined ? result.videos : result.videos.filter(video => video.mediaId === item.videoMediaId);
+              if (!videos.length) throw new Error(t('video.error.formatGone'));
+              prepared = videos.map(video => refreshVideoSelection({ confirmation: videoConfirmation(video) }, item));
+              for (const video of result.videos) {
+                if (!videos.includes(video)) void discard('video-page:' + video.previewId).catch(() => undefined);
+              }
+            } else {
+              prepared = [refreshVideoSelection(result, item)];
+            }
           } catch (error) {
-            const reference = resultReference(result);
-            if (reference) void discard(reference).catch(() => undefined);
+            for (const reference of resultReferences(result)) void discard(reference).catch(() => undefined);
             throw error;
           }
-          replaceItems(current => current.map(candidate => {
-            if (candidate.id !== work.id || candidate.generation !== work.generation) return candidate;
-            if (prepared.shareAccessCodeRequired) {
-              return { ...candidate, result: prepared, status: 'access_code_required', error: prepared.shareAccessCodeRequired.message };
-            }
-            return {
-              ...candidate,
-              result: prepared,
-              selected: candidate.selected && (!prepared.confirmation?.video || prepared.confirmation.resources.some(r => r.selected)),
-              status: 'ready',
-              error: undefined,
-              expanded: candidate.expanded || canExpandDownloadDraft(prepared),
-            };
+          replaceItems(current => current.flatMap(candidate => {
+            if (candidate.id !== work.id || candidate.generation !== work.generation) return [candidate];
+            return prepared.map((next, index): DownloadDraftItem => {
+              if (next.shareAccessCodeRequired) {
+                return { ...candidate, result: next, status: 'access_code_required', error: next.shareAccessCodeRequired.message };
+              }
+              return {
+                ...candidate,
+                id: index === 0 ? candidate.id : `${candidate.id}-video-${index}`,
+                videoMediaId: next.confirmation?.video?.mediaId,
+                result: next,
+                selected: candidate.selected && (!next.confirmation?.video || next.confirmation.resources.some(r => r.selected)),
+                status: 'ready',
+                error: undefined,
+                expanded: candidate.expanded || canExpandDownloadDraft(next),
+              };
+            });
           }));
         })
         .catch(reason => {
@@ -210,7 +229,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4,
     const abandoned = itemsRef.current.filter(item => !item.submitted);
     itemsRef.current = [];
     queueRef.current = [];
-    const references = abandoned.map(item => resultReference(item.result)).filter((ref): ref is string => !!ref);
+    const references = abandoned.flatMap(item => resultReferences(item.result));
     await Promise.allSettled([...new Set(references)].map(reference => discard(reference)));
   }, [discard]);
 
@@ -218,8 +237,12 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4,
   discardAllRef.current = discardAll;
   useEffect(() => () => { void discardAllRef.current(); }, []);
 
-  const start = useCallback(async (input: string) => {
+  const start = useCallback(async (input: string, videos?: VideoPreview[]) => {
     void discardAll();
+    // Prepared previews transfer ownership once. Reopening or replaying an
+    // effect must extract fresh IDs after the previous session released them.
+    const preparedVideos = videos && !consumedVideosRef.current.has(videos) ? videos : undefined;
+    if (preparedVideos) consumedVideosRef.current.add(preparedVideos);
     const session = sessionRef.current;
     setItems([]);
     if (!input.trim()) return;
@@ -256,7 +279,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4,
         };
         if (!waiting.has(entry.input)) {
           released.add(id);
-          if (entry.valid) work.push({ id, generation: item.generation });
+          if (entry.valid) work.push({ id, generation: item.generation, videos: preparedVideos });
         }
       }
       itemsRef.current = next;
@@ -265,7 +288,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4,
       pumpRef.current();
     };
     try {
-      const entries = await scan(input, receive);
+      const entries: ScanDownloadResult[] = preparedVideos ? [{ input, valid: true, kind: 'web_video' }] : await scan(input, receive);
       receive({ entries: entries.length ? entries : [{ input, valid: false, message: t('download.noSupportedLinks') }], pending: [] });
     } catch (error) {
       if (session !== sessionRef.current) return;
@@ -296,9 +319,9 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4,
 
   const remove = useCallback((id: string) => {
     const item = itemsRef.current.find(candidate => candidate.id === id);
-    const reference = item && !item.submitted ? resultReference(item.result) : undefined;
+    const references = item && !item.submitted ? resultReferences(item.result) : [];
     replaceItems(current => current.filter(candidate => candidate.id !== id));
-    if (reference) void discard(reference).catch(() => undefined);
+    for (const reference of references) void discard(reference).catch(() => undefined);
   }, [discard, replaceItems]);
 
   const toggleItem = useCallback((id: string) => {

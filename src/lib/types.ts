@@ -117,6 +117,7 @@ export interface VideoFormat {
 
 export interface VideoPreview {
   previewId: string;
+  mediaId: string;
   pageUrl: string;
   title: string;
   site: string;
@@ -157,10 +158,11 @@ export interface CloudShareAccessCodeRequired {
 }
 
 export type ParseDownloadResult =
-  | { task: QueueTask; confirmation?: never; shareAccessCodeRequired?: never; duplicate?: never }
-  | { confirmation: ParseResult; task?: never; shareAccessCodeRequired?: never; duplicate?: never }
-  | { shareAccessCodeRequired: CloudShareAccessCodeRequired; task?: never; confirmation?: never; duplicate?: never }
-  | { duplicate: DuplicateDownload; task?: never; confirmation?: never; shareAccessCodeRequired?: never };
+  | { task: QueueTask; confirmation?: never; shareAccessCodeRequired?: never; duplicate?: never; videos?: never }
+  | { confirmation: ParseResult; task?: never; shareAccessCodeRequired?: never; duplicate?: never; videos?: never }
+  | { shareAccessCodeRequired: CloudShareAccessCodeRequired; task?: never; confirmation?: never; duplicate?: never; videos?: never }
+  | { duplicate: DuplicateDownload; task?: never; confirmation?: never; shareAccessCodeRequired?: never; videos?: never }
+  | { videos: VideoPreview[]; task?: never; confirmation?: never; shareAccessCodeRequired?: never; duplicate?: never };
 
 export type ProxyProtocol = 'http' | 'https';
 export type LauncherVisibility = 'always' | 'downloading' | 'hidden';

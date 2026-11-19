@@ -147,7 +147,7 @@ async fn cookie_file_authenticates_preview_and_aria2_retry_without_modifying_the
                 engine.prepare(page(), &anonymous).await.unwrap_err(),
                 "video.error.accessDenied"
             );
-            let preview = engine.prepare(page(), &options()).await.unwrap();
+            let preview = engine.prepare(page(), &options()).await.unwrap().remove(0);
             assert_eq!(preview.formats.len(), 1);
             assert_eq!(std::fs::read(&cookie_path).unwrap(), original.as_bytes());
 

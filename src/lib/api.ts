@@ -1,5 +1,5 @@
 import { AgentConnectionInfo, AgentAccessSettings, AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, PrivacyTaskVisibility, QueueTask, ScanDownloadResult, TaskActionResult, TaskCommand } from './types';
-import { videoConfirmation, videoMessage } from './webVideo';
+import { videoMessage } from './webVideo';
 import type { ScanDownloadProgress, VideoPreview } from './types';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type { ThemeId } from './theme';
@@ -82,7 +82,7 @@ type NativeAccessCodeRequiredOutcome = {
   message: string;
 };
 
-type NativeParseOutcome = NativeTaskParseOutcome | NativeShareConfirmationOutcome | NativeAccessCodeRequiredOutcome | ({ kind: 'web_video' } & VideoPreview);
+type NativeParseOutcome = NativeTaskParseOutcome | NativeShareConfirmationOutcome | NativeAccessCodeRequiredOutcome | { kind: 'web_video'; videos: VideoPreview[] };
 
 function duplicateResult(result: NativeTaskOutcome): TaskActionResult {
   const { duplicate, queueTask, ...task } = result;
@@ -104,7 +104,7 @@ export async function parseDownload(input: string, accessCode?: string, requireC
       if (typeof error === 'string' && error.startsWith('video.error.')) throw new Error(videoMessage(error));
       throw error;
     });
-  if (result.kind === 'web_video') return { confirmation: videoConfirmation(result) };
+  if (result.kind === 'web_video') return { videos: result.videos };
   if (result.kind === 'share_confirmation') {
     return {
       confirmation: {
@@ -393,7 +393,7 @@ export async function checkForAppUpdate(): Promise<AppUpdate | null> {
 }
 
 export async function openExternalUrl(url: string): Promise<void> {
-  if (url !== 'https://versadown.aigutta.com/#download') throw new Error(t('about.openUpdateFailed'));
+  if (url !== 'https://www.versadown.com/#gate') throw new Error(t('about.openUpdateFailed'));
   if (isTauriRuntime()) {
     const { openUrl } = await import('@tauri-apps/plugin-opener');
     await openUrl(url);

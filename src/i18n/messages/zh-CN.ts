@@ -776,7 +776,7 @@ const messages = {
   'about.checkUpdateFailed': '暂时无法检查更新，请稍后重试。',
   'about.downloadOfficial': '去官网下载',
   'about.updateNotesFallback': '前往官网查看本次更新内容。',
-  'about.openUpdateFailed': '无法打开官网，请重试或在浏览器中访问 versadown.aigutta.com。',
+  'about.openUpdateFailed': '无法打开官网，请重试或在浏览器中访问 www.versadown.com。',
   'about.updateDesktopOnly': '请在桌面应用中检查更新。',
   'about.versionLabel': '版本 {version}',
   'about.intro': '一款支持 Windows、macOS 和 Linux 的全能下载工具，支持常用下载协议，并可集中管理多种网盘文件，让下载更轻松、更方便。',

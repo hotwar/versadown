@@ -937,7 +937,7 @@ it('selects the first video format when a generic webpage probe succeeds', async
   const user = userEvent.setup();
   const input = 'https://example.test/watch.html';
   const onParse = vi.fn(async (): Promise<ParseDownloadResult> => ({ confirmation: videoConfirmation({
-    previewId: 'generic-preview', pageUrl: input, title: '网页中的视频', site: 'Generic', duration: 10, thumbnail: null,
+    mediaId: 'generic', previewId: 'generic-preview', pageUrl: input, title: '网页中的视频', site: 'Generic', duration: 10, thumbnail: null,
     formats: [
       { id: 'large', width: 1280, height: 720, ext: 'mp4', bytes: null, estimated: false },
       { id: 'small', width: 640, height: 360, ext: 'mp4', bytes: null, estimated: false },
@@ -989,7 +989,7 @@ it('shows a fast video before slow pages finish and submits only the choices the
     return { promise, resolve };
   });
   const preview = (index: number): ParseDownloadResult => ({ confirmation: videoConfirmation({
-    previewId: `preview-${index}`, pageUrl: urls[index], title: index === 1 ? '快速视频' : `视频 ${index}`, site: 'Example', duration: 10, thumbnail: null,
+    mediaId: String(index), previewId: `preview-${index}`, pageUrl: urls[index], title: index === 1 ? '快速视频' : `视频 ${index}`, site: 'Example', duration: 10, thumbnail: null,
     formats: [
       { id: 'large', width: 1280, height: 720, ext: 'mp4', bytes: null, estimated: false },
       { id: 'small', width: 640, height: 360, ext: 'mp4', bytes: null, estimated: false },
@@ -1056,7 +1056,7 @@ it.each([6, 40])('shows all %i links and a known video while remaining site matc
   let finishKnown!: (result: ParseDownloadResult) => void;
   const known = new Promise<ParseDownloadResult>(resolve => { finishKnown = resolve; });
   const preview = (input: string): ParseDownloadResult => ({ confirmation: videoConfirmation({
-    previewId: input, pageUrl: input, title: input === urls[0] ? '先显示的视频' : input, site: 'Example', duration: 10, thumbnail: null,
+    mediaId: input, previewId: input, pageUrl: input, title: input === urls[0] ? '先显示的视频' : input, site: 'Example', duration: 10, thumbnail: null,
     formats: [{ id: '360p', width: 640, height: 360, ext: 'mp4', bytes: null, estimated: false }],
   }) });
   const prepare = vi.fn((input: string) => input === urls[0] ? known : Promise.resolve(preview(input)));

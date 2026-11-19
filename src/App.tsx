@@ -25,7 +25,7 @@ import type { AgentAccessSettings } from './lib/types';
 import { createTaskUpdateMerger, subscribeToDownloadEvents, type TaskSnapshotScope } from './lib/downloadEvents';
 import { downloadErrorMessage, isPrivateTask, normalizeQueueTask, normalizeQueueTasks } from './lib/queueTask';
 import { sendDownloadNotification, shouldNotifyTask } from './lib/downloadNotifications';
-import { AiSettingsInput, AppSettings, AppUpdate, DownloadEngineState, DuplicateDownload, ParseResult, PrivacyTaskVisibility, QueueTask, QueueTaskInput, TaskActionResult, TaskCommand } from './lib/types';
+import { AiSettingsInput, AppSettings, AppUpdate, DownloadEngineState, DuplicateDownload, ParseResult, PrivacyTaskVisibility, QueueTask, QueueTaskInput, TaskActionResult, TaskCommand, VideoPreview } from './lib/types';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
 import darkMintIcon from './assets/launcher/dark_mint.svg';
 import mintWhiteIcon from './assets/launcher/mint_white.svg';
@@ -382,7 +382,12 @@ export function App() {
   const [privacyUnlockError, setPrivacyUnlockError] = useState<string | null>(null);
   const [privacyUnlocking, setPrivacyUnlocking] = useState(false);
   const [newDownloadOpen, setNewDownloadOpen] = useState(false);
-  const [newDownloadInput, setNewDownloadInput] = useState('');
+  const [newDownloadInput, setDownloadInput] = useState('');
+  const [preparedVideos, setPreparedVideos] = useState<VideoPreview[]>();
+  const setNewDownloadInput = (input: string) => {
+    setDownloadInput(input);
+    setPreparedVideos(undefined);
+  };
   const [detailsTaskId, setDetailsTaskId] = useState<string | null>(null);
   const [pendingPurgeTaskIds, setPendingPurgeTaskIds] = useState<string[] | null>(null);
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
@@ -1176,6 +1181,12 @@ export function App() {
       ? await parseDownload(input, accessCode, probeVideo || (settings.privacyDownloadEnabled ?? false), probeVideo)
       : await parseDownload(input, accessCode, settings.privacyDownloadEnabled ?? false);
     if (result.task) { addNewDownloadTask(result.task); setSelectedTaskId(result.task.id); }
+    if (result.videos) {
+      setNewDownloadInput(input);
+      setPreparedVideos(result.videos);
+      setNewDownloadOpen(true);
+      setHeaderPanel(null);
+    }
     if (result.confirmation) {
       if (confirmationPlacement === 'header') showHeaderConfirmation(result.confirmation);
       else showConfirmation(result.confirmation);
@@ -1901,7 +1912,7 @@ export function App() {
         onRestartMissing={() => void resolveDuplicate('restart_missing')}
         onClose={() => dismissDuplicate(duplicate.task.id)}
       />}
-      <NewDownloadDialog open={newDownloadOpen} placement="modal" initialInput={newDownloadInput} onScan={scanDownloadInputs} onParse={(input, accessCode, probeVideo) => probeVideo !== undefined ? parseDownload(input, accessCode, true, probeVideo) : parseDownload(input, accessCode, true)} onDiscardPrepared={discardPreparedDownload} onSubmitBatch={submitPreparedBatch} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onClose={() => { setNewDownloadOpen(false); setNewDownloadInput(''); }} />
+      <NewDownloadDialog open={newDownloadOpen} placement="modal" initialInput={newDownloadInput} initialVideos={preparedVideos} onScan={scanDownloadInputs} onParse={(input, accessCode, probeVideo) => probeVideo !== undefined ? parseDownload(input, accessCode, true, probeVideo) : parseDownload(input, accessCode, true)} onDiscardPrepared={discardPreparedDownload} onSubmitBatch={submitPreparedBatch} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onClose={() => { setNewDownloadOpen(false); setNewDownloadInput(''); }} />
       {detailsTask && <TaskDetailsDialog task={detailsTask} onClose={() => setDetailsTaskId(null)} />}
       {pendingPurgeTasks.length > 0 && <RemoveTaskDialog taskNames={pendingPurgeTasks.map(displayTaskName)} onConfirm={(deleteFiles) => void confirmTaskRemoval(deleteFiles)} onClose={() => setPendingPurgeTaskIds(null)} />}
       {notice && <div className={`task-toast ${notice.kind}`} role="status">{notice.message}</div>}

@@ -28,7 +28,6 @@ pub(crate) struct VideoFormat {
 #[serde(rename_all = "camelCase")]
 pub struct VideoPreview {
     pub preview_id: Uuid,
-    #[serde(skip)]
     pub(super) media_id: String,
     pub page_url: String,
     pub site: String,
@@ -105,6 +104,7 @@ struct Extracted {
     availability: Option<String>,
     #[serde(rename = "_has_drm")]
     has_drm: Option<bool>,
+    entries: Option<Vec<serde_json::Value>>,
 }
 
 // When a page only supplies one media URL, -J can put its fields on the
@@ -317,6 +317,37 @@ fn preview(page: PlaybackPage, raw: Extracted, can_merge: bool) -> Result<VideoP
     })
 }
 
+fn page_previews(
+    page: PlaybackPage,
+    bytes: &[u8],
+    can_merge: bool,
+) -> Result<Vec<VideoPreview>, String> {
+    let raw = decode(bytes)?;
+    if !matches!(raw.kind.as_deref(), Some("playlist" | "multi_video" | "compat_list")) {
+        return preview(page, raw, can_merge).map(|video| vec![video]);
+    }
+    // Flat extraction distinguishes inline media on one page from links to a
+    // playlist's other pages. Only the former already carry downloadable formats.
+    let entries = raw.entries.filter(|entries| !entries.is_empty())
+        .ok_or("video.error.collection")?;
+    let mut videos = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let bytes = serde_json::to_vec(&entry).map_err(|_| "video.error.extract")?;
+        let mut entry = decode(&bytes)?;
+        if !matches!(entry.kind.as_deref(), None | Some("video")) {
+            return Err("video.error.collection".into());
+        }
+        if entry.formats.as_ref().is_none_or(Vec::is_empty) {
+            return Err("video.error.collection".into());
+        }
+        if entry.extractor_key.is_none() {
+            entry.extractor_key = raw.extractor_key.clone();
+        }
+        videos.push(preview(page.clone(), entry, can_merge)?);
+    }
+    Ok(videos)
+}
+
 // Some extractors return HTTP covers even when the CDN supports HTTPS.
 fn secure_thumbnail(raw: &str) -> Option<String> {
     let mut url = url::Url::parse(raw).ok()?;
@@ -404,8 +435,6 @@ pub(super) fn base_command() -> Result<Command, String> {
         "--ignore-config",
         "--no-plugin-dirs",
         "--no-playlist",
-        "--playlist-items",
-        "1",
         "--no-cache-dir",
         "--no-colors",
         "--downloader",
@@ -605,7 +634,7 @@ pub(crate) async fn inspect(
     page: PlaybackPage,
     proxy: Option<&str>,
     cookie_file: Option<&Path>,
-) -> Result<VideoPreview, String> {
+) -> Result<Vec<VideoPreview>, String> {
     let cookies = super::cookies::CookieFile::load(cookie_file)?;
     let mut cmd = command(proxy)?;
     if let Some(cookies) = &cookies {
@@ -619,7 +648,7 @@ pub(crate) async fn inspect(
     ])
     .arg(page.url.as_str());
     let bytes = metadata(cmd).await?;
-    preview(page, decode(&bytes)?, tool("ffmpeg").is_some())
+    page_previews(page, &bytes, tool("ffmpeg").is_some())
 }
 
 #[cfg(test)]
@@ -728,6 +757,65 @@ mod tests {
                 .unwrap(),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn inline_page_videos_keep_separate_previews_formats_and_media_ids() {
+        let url = "https://x.com/Ekimko/status/2111347724071088497";
+        for kind in ["playlist", "multi_video", "compat_list"] {
+            let raw = json!({
+                "_type": kind, "extractor_key": "Twitter", "webpage_url": url,
+                "entries": (1..=3).map(|index| json!({
+                    "id": format!("media-{index}"), "webpage_url": url,
+                    "title": format!("Post #{index}"), "duration": index as f64,
+                    "thumbnail": format!("https://example.org/cover-{index}.jpg"),
+                    "formats": [{"format_id": "http", "ext": "mp4", "height": index * 240}]
+                })).collect::<Vec<_>>()
+            });
+            let videos = page_previews(
+                manual_page(&url.parse().unwrap()).unwrap(),
+                &serde_json::to_vec(&raw).unwrap(), true,
+            ).unwrap();
+            assert_eq!(videos.len(), 3);
+            assert_eq!(videos.iter().map(|v| v.preview_id).collect::<HashSet<_>>().len(), 3);
+            for (index, video) in videos.iter().enumerate() {
+                let number = index + 1;
+                assert_eq!(video.media_id, format!("media-{number}"));
+                assert_eq!(video.title, format!("Post #{number}"));
+                assert_eq!(video.page_url, url);
+                assert_eq!(video.site, "Twitter");
+                assert_eq!(video.duration, Some(number as f64));
+                assert_eq!(video.thumbnail.as_deref(), Some(format!("https://example.org/cover-{number}.jpg").as_str()));
+                assert_eq!(video.formats[0].height, number as u32 * 240);
+            }
+            let outcome = serde_json::to_value(crate::commands::ParseDownloadOutcome::WebVideo { videos }).unwrap();
+            assert_eq!(outcome["kind"], "web_video");
+            assert_eq!(outcome["videos"].as_array().unwrap().len(), 3);
+            assert_eq!(outcome["videos"][2]["mediaId"], "media-3");
+        }
+    }
+
+    #[test]
+    fn flat_collections_of_page_links_are_not_inline_videos() {
+        for entries in [
+            json!([]),
+            json!([{"_type":"url", "url":"https://example.org/watch/1"}]),
+            json!([{"_type":"playlist", "entries":[]}]),
+            json!([null]),
+        ] {
+            let bytes = serde_json::to_vec(&json!({"_type":"playlist", "entries":entries})).unwrap();
+            assert!(page_previews(page(), &bytes, true).is_err());
+        }
+    }
+
+    #[test]
+    fn inline_single_url_formats_use_the_same_decoder_as_single_videos() {
+        let raw = json!({"_type":"multi_video", "entries":[{
+            "id":"inline", "url":"https://cdn.example.org/video.mp4", "ext":"mp4", "format_id":"direct"
+        }]});
+        let videos = page_previews(page(), &serde_json::to_vec(&raw).unwrap(), true).unwrap();
+        assert_eq!(videos.len(), 1);
+        assert_eq!(videos[0].formats[0].id, "direct");
     }
 
     #[test]

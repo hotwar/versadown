@@ -25,7 +25,7 @@ use crate::{
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ParseDownloadOutcome {
     Task(ParseOutcome),
-    WebVideo(crate::web_video::VideoPreview),
+    WebVideo { videos: Vec<crate::web_video::VideoPreview> },
     ShareConfirmation(CloudShareConfirmation),
     AccessCodeRequired {
         provider: CloudProvider,
@@ -681,8 +681,8 @@ pub(crate) async fn prepare_non_share_download(
     };
     if let Some(page) = page {
         let options = options()?;
-        let preview = video.prepare(page, &options).await?;
-        return Ok(ParseDownloadOutcome::WebVideo(preview));
+        let videos = video.prepare(page, &options).await?;
+        return Ok(ParseDownloadOutcome::WebVideo { videos });
     }
     let mut outcome = prepare_download(input, store).map_err(|error| error.to_string())?;
     if outcome.duplicate.is_none() && require_confirmation && !outcome.requires_confirmation {

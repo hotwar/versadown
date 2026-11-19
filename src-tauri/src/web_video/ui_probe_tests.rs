@@ -78,8 +78,8 @@ fn result_summary(command: &str, value: &Value) -> Value {
         "scan_download_inputs" => json!({"entries": value}),
         "parse_download" => json!({
             "kind": value.get("kind"),
-            "formatCount": value.get("formats").and_then(Value::as_array).map(Vec::len),
-            "formats": value.get("formats"),
+            "videoCount": value.get("videos").and_then(Value::as_array).map(Vec::len),
+            "videos": value.get("videos"),
             "taskId": value.pointer("/task/id"),
             "taskKind": value.pointer("/task/kind"),
             "requiresConfirmation": value.get("requires_confirmation"),

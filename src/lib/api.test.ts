@@ -401,16 +401,15 @@ it.each([
 it('submits only native preview and format IDs and releases a fully submitted preview', async () => {
   const { parseDownload, submitVideoFormats } = await import('./api');
   const format = (id: string, width: number, height: number) => ({ id, width, height, ext: 'mp4', bytes: null, estimated: true });
-  const vid = { kind: 'web_video', previewId: 'native-preview', pageUrl: 'https://vimeo.com/12345', site: 'Vimeo', title: 'At the zoo',
+  const vid = { mediaId: '12345', previewId: 'native-preview', pageUrl: 'https://vimeo.com/12345', site: 'Vimeo', title: 'At the zoo',
     duration: 19, thumbnail: null, formats: [format('18', 320, 240),format('160+140', 192, 144)] };
-  native.invoke.mockResolvedValueOnce(vid);
-  const {confirmation} = await parseDownload(vid.pageUrl, undefined, true, true);
+  native.invoke.mockResolvedValueOnce({ kind: 'web_video', videos: [vid] });
+  const {videos} = await parseDownload(vid.pageUrl, undefined, true, true);
   expect(native.invoke).toHaveBeenCalledWith('parse_download', {input: vid.pageUrl, accessCode: undefined, requireConfirmation:true, probeVideo:true});
-  expect(confirmation?.resources.map(r => r.selected)).toEqual([true,false]);
-  expect(confirmation?.taskId).toBe('video-page:native-preview');
+  expect(videos).toEqual([vid]);
   const created = vi.fn();
   native.invoke.mockResolvedValueOnce({ id: 'task-video', kind:'web_video', status:'queued' });
-  expect(await submitVideoFormats(confirmation!.video!, ['160+140'], '/movies', false, created)).toEqual([]);
+  expect(await submitVideoFormats(videos![0], ['160+140'], '/movies', false, created)).toEqual([]);
   expect(native.invoke).toHaveBeenNthCalledWith(2, 'submit_video_download', {
     previewId:'native-preview', formatId:'160+140', destinationDirectory:'/movies', privateDownload:false, postProcessingNote:undefined,
   });
