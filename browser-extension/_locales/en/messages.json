@@ -1,0 +1,156 @@
+{
+  "addonName": {
+    "message": "VersaDown+"
+  },
+  "addonDescription": {
+    "message": "Identify available media for a video and open a download in VersaDown."
+  },
+  "detectAllVideos": {
+    "message": "Detect videos on all sites"
+  },
+  "detectAllHelp": {
+    "message": "Works on Bilibili, YouTube, and X by default. Enabling this option asks Chrome for access to additional websites."
+  },
+  "detectAllDenied": {
+    "message": "Chrome did not grant access to additional websites."
+  },
+  "detectAllEnabled": {
+    "message": "Enabled. Reload other open pages to detect their videos."
+  },
+  "detectAllError": {
+    "message": "Could not apply the detection setting. Try again."
+  },
+  "downloadButton": {
+    "message": "VersaDown+"
+  },
+  "buttonTitle": {
+    "message": "Show download options for this video"
+  },
+  "automatic": {
+    "message": "Automatic selection"
+  },
+  "checking": {
+    "message": "VD is finding downloadable qualities for this video…"
+  },
+  "noVideoTarget": {
+    "message": "VD could not identify a download address for this player."
+  },
+  "noDownloadFormats": {
+    "message": "VD could not find downloadable qualities for this video."
+  },
+  "hostUpgrade": {
+    "message": "Update and re-register VD to use VersaDown+."
+  },
+  "videoRestricted": {
+    "message": "This site requires sign-in or restricts this video. Check VD’s video download settings."
+  },
+  "videoNetwork": {
+    "message": "VD could not read this site’s video data. Check your network or VD’s proxy settings."
+  },
+  "videoDrm": {
+    "message": "This site only provides protected media."
+  },
+  "videoUnknownQuality": {
+    "message": "Source quality"
+  },
+  "videoQualityFallback": {
+    "message": "$QUALITY$ · $FORMAT$",
+    "placeholders": {
+      "quality": {"content": "$1"},
+      "format": {"content": "$2"}
+    }
+  },
+  "noMedia": {
+    "message": "No file, manifest, or audio/video track pair could be matched to this video."
+  },
+  "playToIdentify": {
+    "message": "Start playback to load media information."
+  },
+  "sabrPlayback": {
+    "message": "YouTube offers a SABR playback session for this video. VD cannot download that session format yet."
+  },
+  "currentVideoTrack": {
+    "message": "Playing video track"
+  },
+  "protectedMedia": {
+    "message": "This player is using protected media."
+  },
+  "changedMedia": {
+    "message": "The video changed. Click again."
+  },
+  "hostUnavailable": {
+    "message": "Cannot reach VD. Check that its Chrome native host is installed and registered."
+  },
+  "hostRejected": {
+    "message": "VD did not accept this task. Check the media source."
+  },
+  "extensionError": {
+    "message": "The extension could not finish this request. Reload the page and try again."
+  },
+  "reportedOnly": {
+    "message": "The player reports $HEIGHTS$. No media address could be handed to VD for these qualities. No task was created.",
+    "placeholders": {
+      "heights": {
+        "content": "$1"
+      }
+    }
+  },
+  "selectionExpired": {
+    "message": "These options expired. Click the video download button again."
+  },
+  "chooseSource": {
+    "message": "Choose a video source to download"
+  },
+  "openPublicEmbed": {
+    "message": "View this post’s videos in X’s official embed"
+  },
+  "unboundManifest": {
+    "message": "This page requested a media manifest, but its player could not be identified."
+  },
+  "currentSource": {
+    "message": "Current source"
+  },
+  "creating": {
+    "message": "Preparing download…"
+  },
+  "sourceHttpError": {
+    "message": "The media server returned HTTP $STATUS$ for the selected file. No VD task was created.",
+    "placeholders": {"status":{"content":"$1"}}
+  },
+  "sourceNotFile": {
+    "message": "The selected address did not return a recognizable media file. No VD task was created."
+  },
+  "sourceUnreachable": {
+    "message": "Could not connect and read the selected media. No VD task was created."
+  },
+  "taskCreated": {
+    "message": "Download task created."
+  },
+  "additionalHeights": {
+    "message": "The player also lists $HEIGHTS$ without individual media addresses.",
+    "placeholders": {
+      "heights": {
+        "content": "$1"
+      }
+    }
+  },
+  "numberedOption": {
+    "message": "Option $NUMBER$ · $LABEL$",
+    "placeholders": {
+      "number": {
+        "content": "$1"
+      },
+      "label": {
+        "content": "$2"
+      }
+    }
+  },
+  "frameSize": {
+    "message": "Current picture size: $SIZE$.",
+    "placeholders": {
+      "size": {
+        "content": "$1"
+      }
+    }
+  }
+}

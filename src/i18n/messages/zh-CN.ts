@@ -1,4 +1,5 @@
 const messages = {
+  'browserMedia.taskKind': '浏览器视频',
   'buildInfo.label': '开发构建信息',
   'buildInfo.commit': '基于提交 {commit} 编译',
   'buildInfo.modified': '* 编译时包含未提交修改',

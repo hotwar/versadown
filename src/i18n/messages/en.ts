@@ -1,4 +1,5 @@
 const messages = {
+  'browserMedia.taskKind': 'Browser video',
   'buildInfo.label': 'Development build',
   'buildInfo.commit': 'Built from commit {commit}',
   'buildInfo.modified': '* Compiled with uncommitted changes',

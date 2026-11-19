@@ -27,7 +27,8 @@ test('installers add only host video tools and their notices to existing platfor
     const ext = platform === 'windows' ? '.exe' : '';
     assert.deepEqual(installerResources(platform), [
       ...config(`tauri.${platform}.conf.json`).bundle.resources,
-      ...['yt-dlp', 'ffmpeg', 'qjs'].map(name => `binaries/video-${platform}/${name}${ext}`),
+      platform === 'macos' ? 'binaries/video-macos/yt-dlp-macos' : `binaries/video-${platform}/yt-dlp${ext}`,
+      ...['ffmpeg', 'qjs'].map(name => `binaries/video-${platform}/${name}${ext}`),
       'video-tool-notices',
     ]);
   }

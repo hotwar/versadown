@@ -8,6 +8,8 @@ Download `VersaDown-video-tool-sources.tar.gz` alongside the installers for the 
 
 VersaDown packages the official PyInstaller build and applies platform signing during packaging where required. Its combined license is GPL-3.0-or-later. The yt-dlp source itself is released under the Unlicense. This directory includes the upstream [license](yt-dlp-LICENSE.txt) and [component notices and licenses](yt-dlp-THIRD_PARTY_LICENSES.txt).
 
+The macOS installer uses the universal `yt-dlp_macos.zip` release asset. Its executable and Python dependencies ship together and are extracted when preparing the package.
+
 - [Official release, source tarball and executable checksums](https://github.com/yt-dlp/yt-dlp/releases/tag/2026.10.26)
 - [Tagged source and build scripts (ZIP)](https://github.com/yt-dlp/yt-dlp/archive/refs/tags/2026.10.26.zip)
 - [Platform-specific build instructions](https://github.com/yt-dlp/yt-dlp/blob/2026.10.26/.github/workflows/build.yml) and [pinned component versions](https://github.com/yt-dlp/yt-dlp/blob/2026.10.26/pyproject.toml)

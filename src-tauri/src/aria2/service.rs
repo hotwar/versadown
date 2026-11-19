@@ -490,7 +490,19 @@ impl DownloadService {
         // with `pause=true` until its scheduler grants a slot.
         options.insert("pause".into(), "false".into());
         let directory = self.prepare_directory_uri(task_id, &mut options)?;
-        let gid = self.add_uri_for_task(task_id, uris, options).await?;
+        let requested_gid = options.get("gid").cloned();
+        let gid = match self.add_uri_for_task(task_id, uris, options).await {
+            Ok(gid) => gid,
+            Err(error) => {
+                // A repeated Chrome handoff may find aria2 already owns its GID
+                // after a lost addUri reply or a crash before SQLite's bind.
+                let Some(gid) = requested_gid else { return Err(error.into()) };
+                if !self.tell_status_for_task(task_id, &gid).await.is_ok_and(|status| status.gid == gid) {
+                    return Err(error.into());
+                }
+                gid
+            }
+        };
         if let Err(error) = self.store.bind_gid(task_id, &gid) {
             let _ = self.api().remove(&gid).await;
             return Err(error.into());
@@ -544,8 +556,42 @@ impl DownloadService {
         options: UriSubmissionOptions,
     ) -> Result<DownloadTask, DownloadServiceError> {
         let mut task = self.store.find(task_id)?;
-        let options = self.prepare_uri_options(&mut task, options)?;
+        let (uris, options) = self.prepare_transfer(&mut task, uris, options)?;
         self.submit_uri(task_id, uris, options).await
+    }
+
+    pub(crate) async fn submit_browser_media(
+        &self,
+        task: &mut DownloadTask,
+        options: UriSubmissionOptions,
+    ) -> Result<DownloadTask, DownloadServiceError> {
+        let (uris, mut options) = self.prepare_transfer(task, Vec::new(), options)?;
+        // UUIDv4's low half includes the nonzero variant bits and stays stable
+        // for this database task across retries of the same browser request.
+        options.insert("gid".into(), format!("{:016x}", task.id.as_u128() as u64));
+        self.submit_uri(task.id, uris, options).await
+    }
+
+    fn prepare_transfer(
+        &self,
+        task: &mut DownloadTask,
+        uris: Vec<String>,
+        mut options: UriSubmissionOptions,
+    ) -> Result<(Vec<String>, Aria2Options), DownloadServiceError> {
+        if task.kind != "browser_media" {
+            return Ok((uris, self.prepare_uri_options(task, options)?));
+        }
+        let plan = self.store.browser_media_plan(task.id)?;
+        let mut media_options = Aria2Options::new();
+        let target = crate::browser_media::apply_selection(&plan, &task.source, &mut media_options)
+            .ok_or(DownloadServiceError::InvalidUriOption("browser media"))?;
+        if media_options.get("media").map(String::as_str) != Some("file") {
+            // Fragmented media owns native segment state, not HTTP byte ranges.
+            options.continue_download = false;
+        }
+        let mut options = self.prepare_uri_options(task, options)?;
+        options.extend(media_options);
+        Ok((vec![target], options))
     }
 
     fn prepare_uri_options(
@@ -662,7 +708,7 @@ impl DownloadService {
         let _guard = self.operation.lock().await;
         self.ensure_accepting()?;
         let mut task = self.task_for_uri_submission(task_id)?;
-        let mut options = self.prepare_uri_options(&mut task, options)?;
+        let (uris, mut options) = self.prepare_transfer(&mut task, uris, options)?;
         // Restored sessions are globally paused. A re-submitted cloud URL is
         // an explicit retry and must begin once its replacement GID is bound.
         options.insert("pause".into(), "false".into());

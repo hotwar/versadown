@@ -2403,7 +2403,7 @@ async fn run_local_task_action(
             || (current.aria_gid.is_none()
                 && matches!(
                     current.kind.as_str(),
-                    "file" | "magnet" | "ed2k" | "hls" | "dash" | "cloud"
+                    "file" | "magnet" | "ed2k" | "hls" | "dash" | "cloud" | "browser_media"
                 )))
     {
         let task = resubmit_task(
@@ -4045,6 +4045,9 @@ pub async fn update_settings(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<AppSettings, String> {
+    if !crate::workspace_runtime::allows_link_association(&app) {
+        settings.associate_download_links = false;
+    }
     settings.download_directory = settings.download_directory.trim().to_string();
     let download_directory = PathBuf::from(&settings.download_directory);
     if settings.download_directory.is_empty() || !download_directory.is_absolute() {
@@ -4092,7 +4095,9 @@ pub async fn update_settings(
             return Err(error);
         }
     }
-    if settings.associate_download_links != previous.associate_download_links {
+    if crate::workspace_runtime::allows_link_association(&app)
+        && settings.associate_download_links != previous.associate_download_links
+    {
         let enabled = settings.associate_download_links;
         let data_dir = state
             .settings_path

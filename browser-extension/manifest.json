@@ -1,0 +1,75 @@
+{
+  "manifest_version": 3,
+  "name": "__MSG_addonName__",
+  "description": "__MSG_addonDescription__",
+  "version": "0.3.0",
+  "default_locale": "zh_CN",
+  "minimum_chrome_version": "111",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyvfIxZZcN43NZfBit9F3RYEUxsCyjBa9ZSaDP2oknDAo6tlM6QR8wQO/aLKwq+9mwC1UmTmARTW86nyt+GKfXBpHBq9MO/KdTvWMhEFbdtWsyxMuLDVu1nbTRvChsLx56jWHFlm4FbPK5nQ3xm7me6U+3iu/TACi7WK81GcgvBd22JJ/LBSLPT+BlUQm7sPE95+s3roijoOC8VI3MVA0R6E/0PA6SCcvMg1tfwcLMs3Qg8Kk9PPPBrgyQIXbMLVa6jrMPfzY/t3D6FFhaCyzMnRlsLb/pLi8DU38SHx0IWiMeyaALYiEzQaCEwTDK6Xgt/vs0+C0dyX4FzXEaQNyMwIDAQAB",
+  "permissions": [
+    "webRequest",
+    "storage",
+    "scripting",
+    "nativeMessaging"
+  ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
+  "host_permissions": [
+    "https://*.bilibili.com/*",
+    "https://*.youtube.com/*",
+    "https://*.x.com/*",
+    "https://platform.twitter.com/embed/Tweet.html*",
+    "http://localhost/*",
+    "http://127.0.0.1/*",
+    "https://*.bilivideo.com/*",
+    "https://*.bilivideo.cn/*",
+    "https://*.hdslb.com/*",
+    "https://*.googlevideo.com/*",
+    "https://video.twimg.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.bilibili.com/*",
+        "https://*.youtube.com/*",
+        "https://*.x.com/*",
+        "https://platform.twitter.com/embed/Tweet.html*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "js": [
+        "site-media-main.js"
+      ],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    },
+    {
+      "matches": [
+        "https://*.bilibili.com/*",
+        "https://*.youtube.com/*",
+        "https://*.x.com/*",
+        "https://platform.twitter.com/embed/Tweet.html*",
+        "http://localhost/*",
+        "http://127.0.0.1/*"
+      ],
+      "js": [
+        "detection-scope.js",
+        "site-media.js",
+        "media.js",
+        "content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_title": "__MSG_addonName__",
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

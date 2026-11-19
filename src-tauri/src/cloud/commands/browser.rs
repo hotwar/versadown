@@ -1,3 +1,4 @@
+use crate::workspace_runtime::WorkspaceWebviewProfile;
 use super::*;
 
 pub(crate) struct TianyiBrowserValidationTransport<'a, T: CloudHttpTransport> {
@@ -31,17 +32,7 @@ pub(crate) fn password_webview_data_directory(
     app: &AppHandle,
     provider: CloudProvider,
 ) -> Result<PathBuf, QuarkError> {
-    let root = if std::env::var("VERSADOWN_BACKGROUND_UI_TEST")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
-        std::env::var_os("VERSADOWN_TEST_DATA_DIR")
-            .map(PathBuf::from)
-            .ok_or(QuarkError::Storage)?
-    } else {
-        app.path().app_data_dir().map_err(|_| QuarkError::Storage)?
-    };
+    let root = crate::workspace_runtime::data_dir(app).map_err(|_| QuarkError::Storage)?;
     password_webview_data_directory_from_root(&root, provider)
 }
 
@@ -100,7 +91,7 @@ pub(crate) fn clear_password_webview_profile(
         ),
     )
     .visible(false)
-    .data_directory(password_webview_data_directory(app, provider)?)
+    .workspace_data_directory(app, password_webview_data_directory(app, provider)?)
     .build()
     .map_err(|_| QuarkError::Storage)?;
     let result = window
@@ -242,17 +233,7 @@ pub(crate) fn authorization_profile_directory(
     if browser_login::supports_browser_password(provider) {
         return password_webview_data_directory(app, provider);
     }
-    let root = if std::env::var("VERSADOWN_BACKGROUND_UI_TEST")
-        .ok()
-        .as_deref()
-        == Some("1")
-    {
-        std::env::var_os("VERSADOWN_TEST_DATA_DIR")
-            .map(PathBuf::from)
-            .ok_or(CloudError::Storage)?
-    } else {
-        app.path().app_data_dir().map_err(|_| CloudError::Storage)?
-    };
+    let root = crate::workspace_runtime::data_dir(app).map_err(|_| CloudError::Storage)?;
     Ok(root.join("web-auth").join(provider.key()))
 }
 
@@ -294,7 +275,7 @@ fn capture_persistent_authorization(
         ),
     )
     .visible(false)
-    .data_directory(authorization_profile_directory(app, provider)?)
+    .workspace_data_directory(app, authorization_profile_directory(app, provider)?)
     .on_page_load(move |_, payload| {
         if payload.event() == PageLoadEvent::Finished {
             let _ = loaded.try_send(());
@@ -497,7 +478,7 @@ pub(crate) fn browser_password_login(
     if background_ui_test_visible {
         builder = builder.skip_taskbar(true).position(-10_000.0, -10_000.0);
     }
-    builder = builder.data_directory(password_webview_data_directory(app, provider)?);
+    builder = builder.workspace_data_directory(app, password_webview_data_directory(app, provider)?);
     if ProviderRegistry::global().get(provider).browser_context {
         builder = builder.initialization_script(include_str!("../tianyi-browser-context.js"));
     }

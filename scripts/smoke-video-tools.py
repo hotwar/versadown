@@ -13,10 +13,21 @@ import threading
 def check(tools):
     def tool(name):
         path = tools / (name + (".exe" if os.name == "nt" else ""))
+        if sys.platform == "darwin" and name == "yt-dlp":
+            path = tools / "yt-dlp-macos" / name
+            if not (path.parent / "_internal").is_dir():
+                raise FileNotFoundError(path.parent / "_internal")
         if not path.is_file():
             raise FileNotFoundError(path)
         return str(path)
 
+    # The release packages include QuickJS. Workspace quick apps bundle Node.
+    js_kind = "quickjs"
+    try:
+        javascript = tool("qjs")
+    except FileNotFoundError:
+        js_kind = "node"
+        javascript = tool("node")
     # Hide runner-installed FFmpeg, JS runtimes and Python from the child processes.
     environment = dict(os.environ, PATH="", NO_PROXY="127.0.0.1", no_proxy="127.0.0.1")
     fixtures = Path(__file__).resolve().parents[1] / "src-tauri/tests/fixtures"
@@ -41,20 +52,20 @@ def check(tools):
             try:
                 output = root / "merged.mp4"
                 command = [tool("yt-dlp"), "--ignore-config", "--no-plugin-dirs", "--no-cache-dir",
-                           "--verbose", "--no-js-runtimes", "--js-runtimes", "quickjs:" + tool("qjs"),
+                           "--verbose", "--no-js-runtimes", "--js-runtimes", js_kind + ":" + javascript,
                            "--ffmpeg-location", tool("ffmpeg"), "--downloader", "m3u8,dash:native",
                            "--proxy", "", "--no-playlist",
                            "-f", "bv[height=1080]+ba", "--merge-output-format", "mp4", "-o", str(output),
                            f"http://127.0.0.1:{server.server_port}/test.mpd"]
                 result = subprocess.run(command, cwd=root, env=environment, capture_output=True,
                                         text=True, timeout=100)
-                if result.returncode or not re.search(r"JS runtimes:.*quickjs", result.stderr, re.I):
+                if result.returncode or not re.search(r"JS runtimes:.*" + js_kind, result.stderr, re.I):
                     raise RuntimeError(result.stderr)
                 streams = subprocess.run([tool("ffmpeg"), "-hide_banner", "-i", str(output)],
                                          env=environment, capture_output=True, text=True, timeout=20).stderr
                 if not (re.search(r"Video: h264[^\n]*1920x1080", streams) and "Audio: aac" in streams):
                     raise RuntimeError(streams)
-                print("Bundled yt-dlp recognized QuickJS and merged H.264 1920x1080 + AAC with bundled FFmpeg.")
+                print(f"Bundled yt-dlp recognized {js_kind} and merged H.264 1920x1080 + AAC with bundled FFmpeg.")
             finally:
                 server.shutdown()
 

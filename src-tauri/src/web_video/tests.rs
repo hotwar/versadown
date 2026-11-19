@@ -433,6 +433,7 @@ fn confirmation_uses_only_the_source_and_formats_from_that_preview() {
         thumbnail: None,
         duration: None,
         formats: vec![format.clone()],
+        alternatives: Default::default(),
     };
     previews.remember(&video).unwrap();
     assert_eq!(

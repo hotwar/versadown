@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { macExtractor } from './prepare-video-extractor-macos.mjs';
 import { sourceDigest } from './video-tool-sources.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -11,7 +12,8 @@ export function installerResources(platform) {
   const config = JSON.parse(readFileSync(resolve(root, `src-tauri/tauri.${platform}.conf.json`), 'utf8'));
   const dir = `binaries/video-${platform}`;
   const ext = platform === 'windows' ? '.exe' : '';
-  return [...config.bundle.resources, ...['yt-dlp', 'ffmpeg', 'qjs'].map(name => `${dir}/${name}${ext}`), 'video-tool-notices'];
+  const extractor = platform === 'macos' ? `binaries/${macExtractor.resource}` : `${dir}/yt-dlp${ext}`;
+  return [...config.bundle.resources, extractor, `${dir}/ffmpeg${ext}`, `${dir}/qjs${ext}`, 'video-tool-notices'];
 }
 
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -54,7 +56,7 @@ function prepare(component, compiledTool, platform) {
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const platform = { darwin: 'macos', linux: 'linux', win32: 'windows' }[process.platform];
   if (!platform) throw new Error(`Unsupported installer platform: ${process.platform}`);
-  prepare('extractor', null, platform);
+  prepare(platform === 'macos' ? 'extractor-macos' : 'extractor', null, platform);
   // The Windows CI consumer verifies an independently produced PE on every run.
   const prebuiltFFmpeg = process.env.VD_WINDOWS_FFMPEG_SHA256 !== undefined;
   prepare('ffmpeg', prebuiltFFmpeg ? null : 'ffmpeg', platform);

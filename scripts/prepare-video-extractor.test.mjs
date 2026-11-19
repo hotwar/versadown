@@ -1,17 +1,39 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 
 import { assetFor, matchesAsset } from './prepare-video-extractor.mjs';
+import { digestDirectory, macExtractor } from './prepare-video-extractor-macos.mjs';
 
-test('each installer uses its native standalone yt-dlp; macOS uses a universal executable', () => {
+test('macOS installers use the official directory archive with a pinned tree digest', () => {
+  assert.equal(macExtractor.name, 'yt-dlp_macos.zip');
+  assert.match(macExtractor.sha256, /^[a-f0-9]{64}$/);
+  assert.match(macExtractor.treeSha256, /^[a-f0-9]{64}$/);
+});
+
+test('historical macOS and other platforms can still read the standalone asset metadata', () => {
   assert.equal(assetFor('darwin', 'arm64'), assetFor('darwin', 'x64'));
   assert.equal(assetFor('darwin', 'arm64').name, 'yt-dlp_macos');
   assert.equal(assetFor('win32', 'x64').resource, 'video-windows/yt-dlp.exe');
   assert.equal(assetFor('linux', 'x64').name, 'yt-dlp_linux');
   assert.throws(() => assetFor('linux', 'arm64'), /No pinned/);
+});
+
+test('directory integrity includes the launcher and its dependencies', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'vd-video-directory-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const internal = join(dir, '_internal');
+  await mkdir(internal);
+  await writeFile(join(dir, 'yt-dlp'), 'launcher');
+  const dependency = join(internal, 'library');
+  await writeFile(dependency, 'verified dependency');
+  const digest = await digestDirectory(dir);
+  await writeFile(dependency, 'different dependency');
+  assert.notEqual(await digestDirectory(dir), digest);
+  await rm(dependency);
+  assert.notEqual(await digestDirectory(dir), digest);
 });
 
 test('rejects missing, truncated and modified executables before use', async t => {

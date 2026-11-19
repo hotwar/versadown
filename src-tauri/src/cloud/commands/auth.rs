@@ -1,3 +1,4 @@
+use crate::workspace_runtime::WorkspaceWebviewProfile;
 use super::*;
 use crate::cloud::driver::{NativeLoginOutcome, ProviderAuth};
 
@@ -409,7 +410,7 @@ pub async fn cloud_begin_authorization(
         .inner_size(1024.0, 760.0)
         .visible(!background_ui_test)
         .incognito(false)
-        .data_directory(authorization_profile_directory(&app, provider)?)
+        .workspace_data_directory(&app, authorization_profile_directory(&app, provider)?)
         .on_new_window(|url, _features| {
             if allows_cloud_authorization_popup(&url) {
                 NewWindowResponse::Allow
@@ -430,7 +431,7 @@ pub async fn cloud_begin_authorization(
             }
         });
         if browser_login::supports_browser_password(provider) {
-            builder = builder.data_directory(password_webview_data_directory(&app, provider)?);
+            builder = builder.workspace_data_directory(&app, password_webview_data_directory(&app, provider)?);
         }
         if ProviderRegistry::global().get(provider).browser_context {
             builder = builder.initialization_script(include_str!("../tianyi-browser-context.js"));
@@ -1018,7 +1019,7 @@ pub async fn cloud_open_operation_verification(
         )
         .title(title)
         .inner_size(1024.0, 760.0)
-        .data_directory(authorization_profile_directory(&window_app, provider)?)
+        .workspace_data_directory(&window_app, authorization_profile_directory(&window_app, provider)?)
         .on_navigation(move |url| {
             if provider == CloudProvider::Baidu {
                 url.scheme() == "https"
@@ -1182,7 +1183,7 @@ pub async fn cloud_logout(app: AppHandle, provider: CloudProvider) -> Result<(),
                 ),
             )
             .visible(false)
-            .data_directory(authorization_profile_directory(&copy, provider)?)
+            .workspace_data_directory(&copy, authorization_profile_directory(&copy, provider)?)
             .build()
             .map_err(|_| QuarkError::Storage)?;
             let cleared = profile_window

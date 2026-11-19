@@ -10,6 +10,7 @@ const output = join(root, 'artifacts', 'video-sources');
 await mkdir(output, { recursive: true });
 execFileSync('tar', ['-czf', join(output, 'VersaDown-video-tool-sources.tar.gz'),
   '-C', root, 'scripts/video-tool-sources.mjs', 'scripts/prepare-video-extractor.mjs', 'scripts/prepare-video-ffmpeg.mjs',
-  'scripts/prepare-video-js.mjs', 'scripts/prepare-video-tools.mjs', 'src-tauri/video-tool-notices',
+  'scripts/prepare-video-extractor-macos.mjs', 'scripts/prepare-video-js.mjs', 'scripts/prepare-video-tools.mjs',
+  'src-tauri/video-tool-notices',
   'src-tauri/tests/fixtures/solid-1080p.mp4', 'src-tauri/tests/fixtures/silence.ts',
   '-C', sourceDirectory, ...archives.map(path => basename(path))], { stdio: 'inherit' });

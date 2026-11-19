@@ -1,3 +1,4 @@
+use crate::workspace_runtime::WorkspaceWebviewProfile;
 use tauri::{AppHandle, Manager, WebviewWindow, WebviewWindowBuilder};
 
 use crate::{launcher, launcher_input, LauncherVisibility};
@@ -40,6 +41,15 @@ pub fn ensure_launcher_window(
         .ok_or_else(|| "悬浮窗配置不存在".to_string())?;
     let builder =
         WebviewWindowBuilder::from_config(app, config).map_err(|error| error.to_string())?;
+    let builder = if crate::workspace_runtime::root(app).is_some() {
+        let directory = crate::workspace_runtime::data_dir(app)
+            .map_err(|error| error.to_string())?
+            .join("webviews")
+            .join(LAUNCHER_LABEL);
+        builder.workspace_data_directory(app, directory)
+    } else {
+        builder
+    };
     #[cfg(target_os = "linux")]
     let builder = match manager_web_view(app) {
         Some(manager) => builder.with_related_view(manager),

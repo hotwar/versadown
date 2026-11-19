@@ -373,6 +373,12 @@ pub fn validate_download_input(input: &str) -> Result<ValidatedCandidate, InputV
 }
 
 pub fn validate_task_source(kind: &str, source: &str) -> Result<(), InputValidationError> {
+    // Browser tasks keep the page for display. Their submitted URI is taken
+    // from the selected media plan and does not pass through playback-page routing.
+    if kind == "browser_media" {
+        return crate::browser_media::http_url(source)
+            .map(|_| ()).ok_or(InputValidationError::Unsupported);
+    }
     if kind == "cloud" {
         let valid = if source.starts_with("cloud-share://") {
             crate::cloud::share::parse_stable_cloud_share_source(source).is_ok()

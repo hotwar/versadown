@@ -445,6 +445,7 @@ impl crate::aria2::Aria2Api for SagaAria2 {
             connections: "0".into(),
             files: vec![],
             bittorrent: None,
+            media: None,
             followed_by: vec![],
             error_code: None,
             error_message: None,

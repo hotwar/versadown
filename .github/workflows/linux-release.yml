@@ -217,7 +217,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: src-tauri/binaries/video-macos
-          key: video-tools-${{ matrix.runner }}-${{ runner.arch }}-${{ hashFiles('scripts/prepare-video-extractor.mjs', 'scripts/prepare-video-ffmpeg.mjs', 'scripts/prepare-video-js.mjs', 'scripts/video-tool-sources.mjs') }}
+          key: video-tools-${{ matrix.runner }}-${{ runner.arch }}-${{ hashFiles('scripts/prepare-video-extractor.mjs', 'scripts/prepare-video-extractor-macos.mjs', 'scripts/prepare-video-ffmpeg.mjs', 'scripts/prepare-video-js.mjs', 'scripts/video-tool-sources.mjs') }}
           restore-keys: video-tools-${{ matrix.runner }}-${{ runner.arch }}-
       - name: Build macOS packages
         # Tauri uses Developer ID and notarization credentials when supplied.

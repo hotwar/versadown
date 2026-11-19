@@ -87,8 +87,9 @@ fn identity_filter(id: &str) -> Result<String, String> {
     Ok(format!(r#"id="{escaped}""#))
 }
 
+#[cfg(test)]
 pub(super) async fn download(
-    mut cmd: tokio::process::Command,
+    cmd: tokio::process::Command,
     page: &str,
     selector: &str,
     media_id: Option<&str>,
@@ -96,10 +97,26 @@ pub(super) async fn download(
     id: Uuid,
     output: &Path,
     mut stop: oneshot::Receiver<()>,
+    report: impl FnMut(&Progress),
+) -> Result<Option<u64>, String> {
+    download_attempt(
+        cmd, page, selector, media_id, engine, &staging(output, id), output, &mut stop, report,
+    )
+    .await
+}
+
+pub(super) async fn download_attempt(
+    mut cmd: tokio::process::Command,
+    page: &str,
+    selector: &str,
+    media_id: Option<&str>,
+    engine: VideoTransferEngine,
+    folder: &Path,
+    output: &Path,
+    stop: &mut oneshot::Receiver<()>,
     mut report: impl FnMut(&Progress),
 ) -> Result<Option<u64>, String> {
-    let folder = staging(output, id);
-    std::fs::create_dir_all(&folder).map_err(|_| "video.error.output")?;
+    std::fs::create_dir_all(folder).map_err(|_| "video.error.output")?;
     let ext = output
         .extension()
         .and_then(|e| e.to_str())
@@ -109,7 +126,7 @@ pub(super) async fn download(
     }
     let exact = super::extractor::exact_selector(selector)?;
     let aria2 = if engine == VideoTransferEngine::Aria2 {
-        super::aria2_checkpoint::validate(&folder)?;
+        super::aria2_checkpoint::validate(folder)?;
         Some(Aria2Transfer::prepare(&mut cmd, selector).await?)
     } else {
         None
@@ -126,7 +143,7 @@ pub(super) async fn download(
             "after_move:VD-DONE\t%(id)s",
         ]);
     }
-    cmd.current_dir(&folder)
+    cmd.current_dir(folder)
         .args([
             "--quiet",
             "--progress",
@@ -156,7 +173,7 @@ pub(super) async fn download(
     let mut errors = BufReader::new(child.stderr.take().unwrap()).lines();
     let mut diagnostics = Diagnostics::default();
     let mut progress = Progress::default();
-    if progress.samples(completed_tracks(&folder, selector)) {
+    if progress.samples(completed_tracks(folder, selector)) {
         report(&progress);
     }
     let mut poll = tokio::time::interval(Duration::from_millis(500));
@@ -166,8 +183,8 @@ pub(super) async fn download(
     while reading || reading_errors {
         tokio::select! {
             biased;
-            _ = &mut stop => {
-                let paused = if let Some(aria2) = &aria2 { aria2.pause(&folder).await } else { Ok(()) };
+            _ = &mut *stop => {
+                let paused = if let Some(aria2) = &aria2 { aria2.pause(folder).await } else { Ok(()) };
                 stop_child(&mut child).await;
                 paused?;
                 return Ok(None);
@@ -194,7 +211,7 @@ pub(super) async fn download(
                         if progress.samples(samples) { report(&progress); }
                     }
                     Err(error) => {
-                        let _ = aria2.as_ref().unwrap().pause(&folder).await;
+                        let _ = aria2.as_ref().unwrap().pause(folder).await;
                         stop_child(&mut child).await;
                         return Err(error.into());
                     }
@@ -208,7 +225,7 @@ pub(super) async fn download(
     }
     let status = tokio::select! {
         biased;
-        _ = &mut stop => { stop_child(&mut child).await; return Ok(None); }
+        _ = &mut *stop => { stop_child(&mut child).await; return Ok(None); }
         status = child.wait() => status.map_err(|_| "video.error.download")?,
     };
     if media_id.is_some() && status.code() == Some(101) {

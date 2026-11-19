@@ -402,6 +402,17 @@ impl TaskStore {
         migrate(&mut connection)?;
         connection.execute_batch("CREATE TABLE IF NOT EXISTS cloud_download_accounts (id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL, account_id TEXT NOT NULL);")?;
         let schema = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        schema.execute_batch("CREATE TABLE IF NOT EXISTS browser_media_plans (
+            task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+            request_id TEXT NOT NULL UNIQUE, selection TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS browser_media_receipts (request_id TEXT PRIMARY KEY NOT NULL);
+        CREATE TRIGGER IF NOT EXISTS acknowledge_browser_media AFTER UPDATE OF aria_gid ON tasks
+        WHEN NEW.kind='browser_media' AND NEW.aria_gid IS NOT NULL AND OLD.aria_gid IS NULL
+        BEGIN
+            INSERT OR IGNORE INTO browser_media_receipts(request_id)
+            SELECT request_id FROM browser_media_plans WHERE task_id=NEW.id;
+        END;")?;
         schema.execute_batch("CREATE TABLE IF NOT EXISTS video_task_formats (
             task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
             selector TEXT NOT NULL, media_id TEXT,
@@ -425,6 +436,44 @@ impl TaskStore {
     pub fn create(&self, new_task: NewTask) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         Self::create_with_connection(&connection, new_task)
+    }
+
+    pub(crate) fn create_browser_media(
+        &self,
+        task: NewTask,
+        request: Uuid,
+        selection: &str,
+    ) -> Result<(DownloadTask, bool), StoreError> {
+        let mut conn = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let tx = conn.transaction()?;
+        let previous: Option<String> = tx.query_row(
+            "SELECT task_id FROM browser_media_plans WHERE request_id=?1",
+            [request.to_string()], |row| row.get(0),
+        ).optional()?;
+        if let Some(previous) = previous {
+            let id = Uuid::parse_str(&previous).map_err(|_| StoreError::InvalidStoredStatus)?;
+            return Ok((find_with_connection(&tx, id)?, false));
+        }
+        let mut task = Self::create_with_connection(&tx, task)?;
+        tx.execute("INSERT INTO browser_media_plans(task_id,request_id,selection) VALUES (?1,?2,?3)",
+            params![task.id.to_string(), request.to_string(), selection])?;
+        // A crash before RPC admission leaves a resumable task with its full plan.
+        tx.execute("UPDATE tasks SET status='paused' WHERE id=?1", [task.id.to_string()])?;
+        task.status = TaskStatus::Paused;
+        tx.commit()?;
+        Ok((task, true))
+    }
+
+    pub(crate) fn browser_media_admitted(&self, request: Uuid) -> Result<bool, StoreError> {
+        let conn = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM browser_media_receipts WHERE request_id=?1)",
+            [request.to_string()], |row| row.get(0))?)
+    }
+
+    pub(crate) fn browser_media_plan(&self, id: Uuid) -> Result<String, StoreError> {
+        let conn = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok(conn.query_row("SELECT selection FROM browser_media_plans WHERE task_id=?1",
+            [id.to_string()], |row| row.get(0))?)
     }
 
     pub(crate) fn create_video(&self, task: NewTask, selector: &str, media_id: &str) -> Result<DownloadTask, StoreError> {

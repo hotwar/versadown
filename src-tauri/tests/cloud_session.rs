@@ -218,6 +218,7 @@ impl versadown_lib::aria2::Aria2Api for AuthorizationRetryEngine {
             connections: "1".into(),
             files: vec![],
             bittorrent: None,
+            media: None,
             followed_by: vec![],
             error_code: None,
             error_message: None,

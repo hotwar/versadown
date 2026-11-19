@@ -12,6 +12,20 @@ pub(crate) struct PlaybackPage {
 }
 
 impl PlaybackPage {
+    pub(crate) fn from_browser(url: Url) -> Self {
+        playback_url(&url).unwrap_or_else(|| Self {
+            site: url
+                .host_str()
+                .unwrap_or_default()
+                .trim_start_matches("www.")
+                .to_owned(),
+            url,
+            // The browser already identified this player. Do not redirect a
+            // generic extraction to a different embedded player on the page.
+            inspect_embeds: false,
+        })
+    }
+
     /// Keep explicit playback URLs (including Bilibili's part number). Only
     /// short links and manually inspected webpages can resolve to another page.
     pub(super) fn resolve(self, reported: Option<&str>) -> Option<Self> {
@@ -241,6 +255,18 @@ fn bilibili(url: &Url) -> Option<Url> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_keeps_an_explicit_media_url_and_does_not_follow_a_reported_embed() {
+        let url = Url::parse("http://localhost:8080/a/stream.m3u8?key=abc").unwrap();
+        let page = PlaybackPage::from_browser(url.clone());
+        assert_eq!(
+            page.resolve(Some("https://www.youtube.com/watch?v=62xlzGs8LXA"))
+                .unwrap()
+                .url,
+            url
+        );
+    }
 
     #[tokio::test]
     async fn matcher_errors_affect_only_media_shaped_candidates() {

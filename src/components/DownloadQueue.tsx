@@ -254,6 +254,7 @@ function taskSubtitle(task: QueueTask): string | undefined {
     return t('download.cloudTaskSvip', { name: t('cloud.provider.xunlei') });
   }
   if (task.statusMessage) return xunleiDownloadMessage(task.statusMessage);
+  if (task.kind === 'browser_media') return t('browserMedia.taskKind');
   const hasTransferData = task.progress > 0 || (task.completed_length ?? 0) > 0 || (task.total_length ?? 0) > 0;
   if (task.kind === 'magnet') return hasTransferData ? t('download.kind.magnet') : t('download.kind.magnetMetadata');
   if (task.kind === 'torrent') return hasTransferData ? t('download.kind.torrent') : t('download.kind.torrentMetadata');

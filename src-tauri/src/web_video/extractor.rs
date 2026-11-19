@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -36,6 +36,8 @@ pub struct VideoPreview {
     pub thumbnail: Option<String>,
     pub duration: Option<f64>,
     pub formats: Vec<VideoFormat>,
+    #[serde(skip)]
+    pub(super) alternatives: HashMap<String, Vec<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -194,7 +196,9 @@ fn quality(f: &Format, ext: &str, audio: Option<&Format>) -> VideoFormat {
     }
 }
 
-fn choices(raw: &Extracted, can_merge: bool) -> Result<Vec<VideoFormat>, String> {
+type Choices = (Vec<VideoFormat>, HashMap<String, Vec<String>>);
+
+fn choices(raw: &Extracted, can_merge: bool) -> Result<Choices, String> {
     let formats = raw.formats.as_deref().unwrap_or_default();
     let playable: Vec<_> = formats.iter().filter(|f| f.downloadable()).collect();
     let audio: Vec<_> = playable
@@ -204,7 +208,7 @@ fn choices(raw: &Extracted, can_merge: bool) -> Result<Vec<VideoFormat>, String>
         .collect();
     let mut qualities = BTreeMap::new();
     let mut needs_merge = false;
-    for f in playable {
+    for (order, f) in playable.into_iter().enumerate() {
         let Some(ext) = f.video_ext() else {
             continue;
         };
@@ -229,9 +233,13 @@ fn choices(raw: &Extracted, can_merge: bool) -> Result<Vec<VideoFormat>, String>
         let rank = (
             codec.starts_with("avc") || codec == "h264",
             f.fps.unwrap_or_default() as u32,
+            order,
         );
-        if choice.valid() && qualities.get(&key).is_none_or(|(old, _)| rank >= *old) {
-            qualities.insert(key, (rank, choice));
+        if choice.valid() {
+            qualities
+                .entry(key)
+                .or_insert_with(Vec::new)
+                .push((rank, choice));
         }
     }
 
@@ -264,11 +272,27 @@ fn choices(raw: &Extracted, can_merge: bool) -> Result<Vec<VideoFormat>, String>
         (height, 0) => !heights.contains(&height),
         _ => true,
     });
-    Ok(qualities
+    let mut alternatives = HashMap::new();
+    let formats = qualities
         .into_values()
         .rev()
-        .map(|(_, format)| format)
-        .collect())
+        .map(|mut variants| {
+            variants.sort_by_key(|(rank, _)| std::cmp::Reverse(*rank));
+            let mut variants = variants.into_iter().map(|(_, format)| format);
+            let first = variants.next().expect("resolution has at least one format");
+            let mut seen = HashSet::from([first.id.clone()]);
+            let backups: Vec<_> = variants
+                .filter(|f| f.ext == first.ext && seen.insert(f.id.clone()))
+                .take(3)
+                .map(|f| f.id)
+                .collect();
+            if !backups.is_empty() && first.width > 0 && first.height > 0 {
+                alternatives.insert(first.id.clone(), backups);
+            }
+            first
+        })
+        .collect();
+    Ok((formats, alternatives))
 }
 
 fn preview(page: PlaybackPage, raw: Extracted, can_merge: bool) -> Result<VideoPreview, String> {
@@ -287,7 +311,7 @@ fn preview(page: PlaybackPage, raw: Extracted, can_merge: bool) -> Result<VideoP
     {
         return Err("video.error.live".into());
     }
-    let formats = choices(&raw, can_merge)?;
+    let (formats, alternatives) = choices(&raw, can_merge)?;
     let page = page
         .resolve(raw.webpage_url.as_deref())
         .ok_or("video.error.unavailable")?;
@@ -314,6 +338,7 @@ fn preview(page: PlaybackPage, raw: Extracted, can_merge: bool) -> Result<VideoP
         thumbnail: raw.thumbnail.as_deref().and_then(secure_thumbnail),
         duration: raw.duration,
         formats,
+        alternatives,
     })
 }
 
@@ -357,9 +382,15 @@ pub(super) fn aria2_binary() -> Result<PathBuf, String> {
 }
 
 fn bundled_tool(name: &str) -> Option<PathBuf> {
-    let file = BUNDLED_TOOLS
-        .get()?
-        .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+    let tools = BUNDLED_TOOLS.get()?;
+    #[cfg(target_os = "macos")]
+    if name == "yt-dlp" {
+        let executable = tools.join("yt-dlp-macos/yt-dlp");
+        if executable.is_file() {
+            return Some(executable);
+        }
+    }
+    let file = tools.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
     file.is_file().then_some(file)
 }
 
@@ -369,6 +400,12 @@ pub(super) fn tool(name: &str) -> Option<PathBuf> {
     }
     let bin = format!("{name}{}", std::env::consts::EXE_SUFFIX);
     let mut paths = Vec::new();
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    if name == "yt-dlp" {
+        paths.push(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries/video-macos/yt-dlp-macos"),
+        );
+    }
     #[cfg(debug_assertions)]
     if name == "yt-dlp" {
         let bin_dir = if cfg!(windows) { "Scripts" } else { "bin" };
@@ -828,6 +865,22 @@ mod tests {
                 ("muxed-unknown", "mp4")
             ]
         );
+    }
+
+    #[test]
+    fn a_browser_quality_keeps_same_size_and_container_backups() {
+        let raw = data(json!([
+            {"format_id":"hls-720","vcodec":"avc1","acodec":"none","ext":"mp4","width":1280,"height":720},
+            {"format_id":"webm-720","vcodec":"vp9","acodec":"opus","ext":"webm","width":1280,"height":720},
+            {"format_id":"https-720","vcodec":"avc1","acodec":"none","ext":"mp4","width":1280,"height":720},
+            {"format_id":"https-480","vcodec":"avc1","acodec":"aac","ext":"mp4","width":854,"height":480},
+            {"format_id":"aac","vcodec":"none","acodec":"aac","ext":"m4a"}
+        ]));
+        let menu = preview(page(), raw, true).unwrap();
+        assert_eq!(menu.formats.len(), 2);
+        assert_eq!(menu.formats[0].id, "https-720+aac");
+        assert_eq!(menu.alternatives["https-720+aac"], ["hls-720+aac"]);
+        assert!(!serde_json::to_string(&menu).unwrap().contains("hls-720"));
     }
 
     #[test]

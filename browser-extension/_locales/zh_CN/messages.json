@@ -1,0 +1,156 @@
+{
+  "addonName": {
+    "message": "VD 万能下载+"
+  },
+  "addonDescription": {
+    "message": "在播放器右上角识别可用媒体并用 VersaDown 新建下载任务。"
+  },
+  "detectAllVideos": {
+    "message": "检测所有网站的视频"
+  },
+  "detectAllHelp": {
+    "message": "关闭时检测 B 站、YouTube 和 X。开启后，Chrome 会请求访问普通网页以识别更多视频。"
+  },
+  "detectAllDenied": {
+    "message": "未获得 Chrome 的网站访问权限。"
+  },
+  "detectAllEnabled": {
+    "message": "已开启。其他已打开的网页可刷新后检测。"
+  },
+  "detectAllError": {
+    "message": "检测设置未能应用，请重试。"
+  },
+  "downloadButton": {
+    "message": "万能下载+"
+  },
+  "buttonTitle": {
+    "message": "查看这个视频的下载选项"
+  },
+  "automatic": {
+    "message": "自动选轨"
+  },
+  "checking": {
+    "message": "VD 正在解析这个视频的可下载画质…"
+  },
+  "noVideoTarget": {
+    "message": "本页有多个视频或此播放器未提供可识别的视频地址。"
+  },
+  "noDownloadFormats": {
+    "message": "VD 暂未找到这个视频的可下载画质。"
+  },
+  "hostUpgrade": {
+    "message": "请更新并重新注册支持「万能下载+」的 VD。"
+  },
+  "videoRestricted": {
+    "message": "站点要求登录或限制了该视频的访问。请检查 VD 的视频下载设置。"
+  },
+  "videoNetwork": {
+    "message": "VD 未能读取该站点的视频数据，请检查网络或 VD 的代理设置。"
+  },
+  "videoDrm": {
+    "message": "站点只提供受保护的媒体。"
+  },
+  "videoUnknownQuality": {
+    "message": "原始画质"
+  },
+  "videoQualityFallback": {
+    "message": "$QUALITY$ · $FORMAT$",
+    "placeholders": {
+      "quality": {"content": "$1"},
+      "format": {"content": "$2"}
+    }
+  },
+  "noMedia": {
+    "message": "尚未找到能与这个视频匹配的文件、清单或音视频轨道。"
+  },
+  "playToIdentify": {
+    "message": "请先播放视频，让播放器加载媒体信息。"
+  },
+  "sabrPlayback": {
+    "message": "YouTube 为该视频提供了 SABR 播放会话，当前版本无法用这种会话下载。"
+  },
+  "currentVideoTrack": {
+    "message": "正在播放的视频轨"
+  },
+  "protectedMedia": {
+    "message": "此播放器正在使用受保护的媒体。"
+  },
+  "changedMedia": {
+    "message": "视频已切换，请再次点击。"
+  },
+  "hostUnavailable": {
+    "message": "无法连接 VD。请确认已安装并注册 Chrome 本地通信组件。"
+  },
+  "hostRejected": {
+    "message": "VD 未接受此任务，请检查来源是否有效。"
+  },
+  "extensionError": {
+    "message": "扩展通信失败，请刷新页面再试。"
+  },
+  "reportedOnly": {
+    "message": "播放器报告了 $HEIGHTS$。这些档位均未提供可交给 VD 的媒体地址，此次没有创建任务。",
+    "placeholders": {
+      "heights": {
+        "content": "$1"
+      }
+    }
+  },
+  "selectionExpired": {
+    "message": "选项已失效，请再次点击「万能下载+」查看当前视频。"
+  },
+  "chooseSource": {
+    "message": "选择要下载的视频源"
+  },
+  "openPublicEmbed": {
+    "message": "在 X 官方嵌入页查看这个帖子的视频"
+  },
+  "unboundManifest": {
+    "message": "页面请求了媒体清单，暂时无法确认它属于这个播放器。"
+  },
+  "currentSource": {
+    "message": "当前播放源"
+  },
+  "creating": {
+    "message": "正在准备下载…"
+  },
+  "sourceHttpError": {
+    "message": "媒体服务器返回 HTTP $STATUS$，无法读取所选文件。此次没有创建 VD 任务。",
+    "placeholders": {"status":{"content":"$1"}}
+  },
+  "sourceNotFile": {
+    "message": "所选地址没有返回可识别的音视频文件。此次没有创建 VD 任务。"
+  },
+  "sourceUnreachable": {
+    "message": "未能连接并读取所选媒体地址。此次没有创建 VD 任务。"
+  },
+  "taskCreated": {
+    "message": "已创建下载任务。"
+  },
+  "additionalHeights": {
+    "message": "播放器还列出了 $HEIGHTS$，未提供这些档位的独立地址。",
+    "placeholders": {
+      "heights": {
+        "content": "$1"
+      }
+    }
+  },
+  "numberedOption": {
+    "message": "选项 $NUMBER$ · $LABEL$",
+    "placeholders": {
+      "number": {
+        "content": "$1"
+      },
+      "label": {
+        "content": "$2"
+      }
+    }
+  },
+  "frameSize": {
+    "message": "当前画面 $SIZE$。",
+    "placeholders": {
+      "size": {
+        "content": "$1"
+      }
+    }
+  }
+}

@@ -1,9 +1,11 @@
 use crate::cloud::CredentialStore;
 use tauri::{Emitter, Manager};
+use crate::workspace_runtime::WorkspaceWebviewProfile;
 
 mod ai;
 pub mod aria2;
 mod bandwidth;
+mod browser_media;
 mod build_info;
 pub mod cloud;
 mod cloud_directory_events;
@@ -14,6 +16,8 @@ mod duplicates;
 pub mod engine_binary;
 mod engine_runtime;
 mod external_links;
+mod chrome_host;
+pub use chrome_host::run_if_chrome;
 mod ftp;
 mod launcher;
 mod launcher_drag;
@@ -43,6 +47,7 @@ mod window_icon;
 mod window_interaction;
 mod window_lifecycle;
 mod xunlei_native;
+mod workspace_runtime;
 
 pub use aria2::*;
 pub use commands::list_queue_tasks_for_scope;
@@ -221,17 +226,52 @@ async fn main_window_interaction_state(app: tauri::AppHandle) -> Result<serde_js
 }
 
 pub fn run() {
+    let args = std::env::args_os()
+        .filter_map(|arg| arg.into_string().ok())
+        .collect::<Vec<_>>();
+    let browser_background = chrome_host::background_start(&args);
+    let mut context = tauri::generate_context!();
+    let resources = tauri::utils::platform::resource_dir(context.package_info(), &Default::default())
+        .expect("Unable to resolve application resources");
+    let workspace = workspace_runtime::WorkspaceRuntime::initialize(&resources)
+        .expect("Unable to initialize workspace runtime");
+    // Absolute WebView paths must be supplied through the builder rather than
+    // config, whose data_directory only accepts paths relative to appDataDir.
+    let workspace_windows = if workspace.root.is_some() {
+        context
+            .config_mut()
+            .app
+            .windows
+            .iter_mut()
+            .filter_map(|window| {
+                if window.create {
+                    window.create = false;
+                    Some(window.clone())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     webview_memory::apply_process_defaults();
     // Managed before any plugin: the single-instance callback can queue links
     // while setup is still running.
-    let builder =
-        tauri::Builder::default().manage(external_links::PendingExternalLinks::default());
+    let builder = tauri::Builder::default()
+        .manage(workspace)
+        .manage(browser_media::BrowserMediaSubmissions::default())
+        .manage(browser_media::BrowserVideoSubmissions::default())
+        .manage(external_links::PendingExternalLinks::default());
     // A second launch, such as a link clicked in a browser, hands its arguments
     // to the running app and exits. Background UI tests run their own instance.
     let builder = if std::env::var("VERSADOWN_BACKGROUND_UI_TEST").as_deref() == Ok("1") {
         builder
     } else {
         builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if chrome_host::deliver(app, &args) {
+                return;
+            }
             let links = external_links::links_from_args(args.iter().skip(1));
             if links.is_empty() {
                 launcher::reveal_manager(app, None);
@@ -284,7 +324,7 @@ pub fn run() {
                 );
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
             #[cfg(target_os = "macos")]
             app.manage(std::sync::Arc::new(launcher_input::macos::InputMonitor::default()));
             app.manage(window_icon::TaskbarIconState::default());
@@ -292,13 +332,8 @@ pub fn run() {
             let lifecycle = std::sync::Arc::new(ApplicationLifecycle::new());
             app.manage(std::sync::Arc::clone(&lifecycle));
             let background_ui_test = std::env::var("VERSADOWN_BACKGROUND_UI_TEST").ok();
-            let data_dir = if background_ui_test.as_deref() == Some("1") {
-                std::env::var_os("VERSADOWN_TEST_DATA_DIR")
-                    .map(std::path::PathBuf::from)
-                    .ok_or("后台界面测试必须提供隔离的数据目录")?
-            } else {
-                app.path().app_data_dir()?
-            };
+            let run_root = workspace_runtime::root(app.handle());
+            let data_dir = workspace_runtime::data_dir(app.handle())?;
             std::fs::create_dir_all(&data_dir)?;
             if let Err(error) = aria2::migrate_legacy_ed2k_discovery_state(&data_dir) {
                 eprintln!("Unable to migrate legacy eD2K discovery state: {error}");
@@ -343,7 +378,9 @@ pub fn run() {
                     binary.resolve(std::path::Path::new(env!("CARGO_MANIFEST_DIR")), &resources)
                 })
                 .map_err(std::io::Error::other)?;
-            let default_destination = if background_ui_test.as_deref() == Some("1") {
+            let default_destination = if let Some(root) = &run_root {
+                root.join("downloads")
+            } else if background_ui_test.as_deref() == Some("1") {
                 std::env::var_os("VERSADOWN_TEST_DOWNLOAD_DIR")
                     .map(std::path::PathBuf::from)
                     .unwrap_or_else(|| data_dir.join("downloads"))
@@ -403,11 +440,15 @@ pub fn run() {
             if settings.download_directory.trim().is_empty() {
                 settings.download_directory = default_destination.to_string_lossy().into_owned();
             }
+            let allow_link_association = workspace_runtime::allows_link_association(app.handle());
+            if !allow_link_association {
+                settings.associate_download_links = false;
+            }
             settings.aria2.ensure_rpc_token();
             settings.aria2.validate().map_err(std::io::Error::other)?;
             std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings)?)?;
             let launcher_visibility = settings.launcher_visibility;
-            if background_ui_test.as_deref() != Some("1") {
+            if background_ui_test.as_deref() != Some("1") && allow_link_association {
                 let enabled = settings.associate_download_links;
                 let data_dir = data_dir.clone();
                 // xdg-mime can take a moment; startup does not wait for it.
@@ -469,6 +510,12 @@ pub fn run() {
                 baidu_range_gateway,
                 xunlei_native_backend,
             });
+            for window in &workspace_windows {
+                let profile = data_dir.join("webviews").join(&window.label);
+                tauri::WebviewWindowBuilder::from_config(app.handle(), window)?
+                    .workspace_data_directory(app.handle(), profile)
+                    .build()?;
+            }
             #[cfg(target_os = "macos")]
             app.set_menu(launcher::macos_application_menu(app.handle())?)?;
             app.manage(launcher::LauncherInteractionState::new(
@@ -490,6 +537,8 @@ pub fn run() {
             }
             if should_show_windows(background_ui_test.as_deref()) {
                 launcher::setup_manager_tray(app.handle()).map_err(std::io::Error::other)?;
+            }
+            if should_show_windows(background_ui_test.as_deref()) && !browser_background {
                 if let Some(main) = app.get_webview_window("main") {
                     main.set_min_size(Some(tauri::LogicalSize::new(960.0, 640.0)))?;
                     main.show()?;
@@ -569,6 +618,7 @@ pub fn run() {
                     }
                 }
             });
+            chrome_host::deliver(app.handle(), &args);
             // A link that started the app waits until the manager takes it.
             external_links::deliver(
                 app.handle(),
@@ -668,7 +718,7 @@ pub fn run() {
             window_lifecycle::foreground_window_handle_for_test,
             window_lifecycle::manager_close_request_count_for_test
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while building VersaDown")
         .run(|app, event| {
             #[cfg(target_os = "macos")]

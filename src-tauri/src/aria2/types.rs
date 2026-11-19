@@ -112,6 +112,8 @@ pub struct Aria2Peer {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct Aria2Status {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<Aria2MediaProgress>,
     pub gid: String,
     pub status: String,
     pub total_length: String,
@@ -129,6 +131,17 @@ pub struct Aria2Status {
     pub error_code: Option<String>,
     #[serde(default)]
     pub error_message: Option<String>,
+}
+
+/// aria2-next reports progress against presentation duration while the remuxed
+/// output size is still unknown. Retained network bytes are not a final size.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct Aria2MediaProgress {
+    #[serde(default)]
+    pub progress: Option<String>,
+    #[serde(default)]
+    pub downloaded_length: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -243,8 +256,21 @@ impl TryFrom<Aria2Status> for TransferSnapshot {
         let total_length = (total > 0).then_some(total);
         let completed_length = parse_u64("completedLength", &value.completed_length)?;
         let download_speed = parse_u64("downloadSpeed", &value.download_speed)?;
-        let progress_percent = total_length
-            .map(|total| ((u128::from(completed_length) * 100 / u128::from(total)).min(100)) as u8);
+        let media_progress = value.media.as_ref().and_then(|media| {
+            if value.status == "complete" {
+                return Some(100);
+            }
+            let fraction = media.progress.as_deref()?.parse::<f64>().ok()?;
+            fraction.is_finite().then(|| (fraction * 100.0).clamp(0.0, 99.0) as u8)
+        });
+        let progress_percent = media_progress.or_else(|| total_length
+            .map(|total| ((u128::from(completed_length) * 100 / u128::from(total)).min(100)) as u8));
+        let completed_length = if total_length.is_none() {
+            value.media.as_ref().and_then(|m| m.downloaded_length.as_deref()?.parse().ok())
+                .unwrap_or(completed_length)
+        } else {
+            completed_length
+        };
         let eta_seconds = total_length
             .filter(|_| download_speed > 0)
             .map(|total| total.saturating_sub(completed_length) / download_speed);
@@ -328,6 +354,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn media_progress_is_available_before_output_length_is_known() {
+        let mut status: Aria2Status = serde_json::from_value(serde_json::json!({
+            "gid":"1234","status":"active","totalLength":"0","completedLength":"0",
+            "downloadSpeed":"64","uploadSpeed":"0","connections":"1",
+            "media":{"progress":"0.375","downloadedLength":"128"}
+        })).unwrap();
+        let snapshot = TransferSnapshot::try_from(status.clone()).unwrap();
+        assert_eq!(snapshot.progress_percent, Some(37));
+        assert_eq!(snapshot.total_length, None);
+        assert_eq!(snapshot.completed_length, 128);
+        status.status = "complete".into();
+        assert_eq!(TransferSnapshot::try_from(status).unwrap().progress_percent, Some(100));
+    }
+
     fn error_snapshot(code: Option<&str>, message: Option<&str>) -> TransferSnapshot {
         TransferSnapshot::try_from(Aria2Status {
             gid: "fixture-gid".into(),
@@ -339,6 +380,7 @@ mod tests {
             connections: "0".into(),
             files: vec![],
             bittorrent: None,
+            media: None,
             followed_by: vec![],
             error_code: code.map(str::to_owned),
             error_message: message.map(str::to_owned),

@@ -64,9 +64,18 @@ sign_bundled_engines() {
   engine_backup="$(mktemp -d)"
   local tools=(
     src-tauri/binaries/aria2-next-*-apple-darwin
-    src-tauri/binaries/video-macos/{yt-dlp,ffmpeg,qjs}
+    src-tauri/binaries/video-macos/{ffmpeg,qjs}
   )
+  local extractor_dir=src-tauri/binaries/video-macos/yt-dlp-macos
   local tool rel
+  # Sign native dependencies before signing their loader. The Python libraries
+  # are now on disk next to yt-dlp rather than inside its executable archive.
+  while IFS= read -r -d '' tool; do
+    if [[ "$(file -b "$tool")" == Mach-O* ]]; then
+      tools+=("$tool")
+    fi
+  done < <(find "$extractor_dir/_internal" -type f -print0)
+  tools+=("$extractor_dir/yt-dlp")
   for tool in "${tools[@]}"; do
     rel="${tool#src-tauri/binaries/}"
     mkdir -p "$(dirname "$engine_backup/$rel")"
@@ -74,12 +83,7 @@ sign_bundled_engines() {
   done
   import_signing_certificate
   for tool in "${tools[@]}"; do
-    if [[ "$tool" == */yt-dlp ]]; then
-      codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
-        --entitlements src-tauri/macos/yt-dlp.entitlements.plist "$tool"
-    else
-      codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$tool"
-    fi
+    codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$tool"
     codesign --verify --strict "$tool"
   done
 }

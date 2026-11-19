@@ -20,7 +20,7 @@ use tokio::sync::{oneshot, Mutex, Semaphore};
 use uuid::Uuid;
 
 pub(crate) use extractor::{set_resource_dir, VideoPreview};
-use sites::PlaybackPage;
+pub(crate) use sites::PlaybackPage;
 pub(crate) use sites::{page_candidate, playback_url};
 
 type Listener = Arc<dyn Fn(DownloadTask) + Send + Sync>;
@@ -45,6 +45,7 @@ pub(crate) struct VideoDownloads {
     slots: Arc<Semaphore>,
     jobs: Mutex<HashMap<Uuid, Job>>,
     previews: previews::Previews,
+    browser_previews: previews::Previews,
 }
 
 impl VideoDownloads {
@@ -59,6 +60,7 @@ impl VideoDownloads {
             slots: Arc::new(Semaphore::new(usize::from(limit.clamp(1, 3)))),
             jobs: Mutex::default(),
             previews: Default::default(),
+            browser_previews: Default::default(),
         }
     }
 
@@ -77,10 +79,50 @@ impl VideoDownloads {
         Ok(preview)
     }
 
+    pub(crate) async fn prepare_browser(
+        &self,
+        url: url::Url,
+        options: &VideoOptions,
+    ) -> Result<VideoPreview, String> {
+        let preview = extractor::inspect(
+            PlaybackPage::from_browser(url),
+            options.proxy.as_deref(),
+            options.cookie_file.as_deref(),
+        )
+        .await?;
+        self.browser_previews.remember(&preview)?;
+        Ok(preview)
+    }
+
+    pub(crate) async fn submit_browser(
+        &self,
+        preview_id: Uuid,
+        format_id: &str,
+        directory: &Path,
+        options: VideoOptions,
+    ) -> Result<DownloadTask, String> {
+        let selected = self.browser_previews.select_recent(preview_id, format_id)?;
+        self.submit_selection(selected, directory, false, None, options)
+            .await
+    }
+
     async fn submit(
         &self,
         preview_id: Uuid,
         format_id: &str,
+        directory: &Path,
+        private_download: bool,
+        post_processing_note: Option<&str>,
+        options: VideoOptions,
+    ) -> Result<DownloadTask, String> {
+        let selected = self.previews.select(preview_id, format_id)?;
+        self.submit_selection(selected, directory, private_download, post_processing_note, options)
+            .await
+    }
+
+    async fn submit_selection(
+        &self,
+        selected: previews::SelectedVideo,
         directory: &Path,
         private_download: bool,
         post_processing_note: Option<&str>,
@@ -91,7 +133,8 @@ impl VideoDownloads {
             page,
             title,
             format,
-        } = self.previews.select(preview_id, format_id)?;
+            alternatives,
+        } = selected;
         let title: String = title
             .chars()
             .scan(0, |bytes, c| {
@@ -117,8 +160,14 @@ impl VideoDownloads {
             kind: "web_video".into(),
             is_private: private_download,
         };
+        let selector = if alternatives.is_empty() {
+            format.id.clone()
+        } else {
+            let ids: Vec<_> = std::iter::once(&format.id).chain(&alternatives).collect();
+            serde_json::to_string(&ids).map_err(|_| "video.error.formats")?
+        };
         let task = store
-            .create_video(new, &format.id, &media_id)
+            .create_video(new, &selector, &media_id)
             .map_err(|e| e.to_string())?;
         let preparation = (|| {
             let path = crate::output_path::reserve_unique_output_path(
@@ -184,6 +233,14 @@ impl VideoDownloads {
             .store
             .video_selector(task.id)
             .map_err(|e| e.to_string())?;
+        let selectors = if selector.starts_with('[') {
+            serde_json::from_str::<Vec<String>>(&selector).map_err(|_| "video.error.formats")?
+        } else {
+            vec![selector]
+        };
+        if selectors.is_empty() || selectors.len() > 4 {
+            return Err("video.error.formats".into());
+        }
         let engine = self.store.video_engine(task.id).map_err(|_| "video.error.state")?;
         let output = self
             .store
@@ -191,10 +248,13 @@ impl VideoDownloads {
             .map_err(|e| e.to_string())?
             .ok_or("video.error.output")?;
         let cookies = cookies::CookieFile::load(options.cookie_file.as_deref())?;
-        let mut cmd = transfer::transfer_command(options.proxy.as_deref(), options.rate)?;
-        if let Some(cookies) = &cookies {
-            cookies.apply(&mut cmd);
-        }
+        let commands = selectors.iter().map(|_| {
+            let mut cmd = transfer::transfer_command(options.proxy.as_deref(), options.rate)?;
+            if let Some(cookies) = &cookies {
+                cookies.apply(&mut cmd);
+            }
+            Ok(cmd)
+        }).collect::<Result<Vec<_>, String>>()?;
         task.status = TaskStatus::Queued;
         task.error = None;
         task.download_speed = 0;
@@ -223,28 +283,66 @@ impl VideoDownloads {
             };
             publish(&task);
             let page = task.source.clone();
-            let result = transfer::download(
-                cmd,
-                &page,
-                &selector,
-                media_id.as_deref(),
-                engine,
-                task.id,
-                &output,
-                stopped,
-                |p| {
-                    task.completed_length = p.downloaded;
-                    task.download_speed = p.speed;
-                    if let Some(total) = task.total_length.filter(|n| *n > 0) {
-                        task.progress = (p.downloaded.saturating_mul(100) / total).min(99) as u8;
-                    }
-                    publish(&task);
-                },
-            )
-            .await;
+            let root = transfer::staging(&output, task.id);
+            let multiple = selectors.len() > 1;
+            let mut attempts = selectors.into_iter().zip(commands).enumerate().peekable();
+            let mut result = Err("video.error.formats".to_owned());
+            while let Some((index, (selector, cmd))) = attempts.next() {
+                if !matches!(stopped.try_recv(), Err(oneshot::error::TryRecvError::Empty)) {
+                    return;
+                }
+                // Track layouts and saved byte ranges belong to one exact
+                // format. Never resume a different format into those files.
+                let folder = if multiple {
+                    root.join(format!("choice-{index}"))
+                } else {
+                    root.clone()
+                };
+                result = transfer::download_attempt(
+                    cmd,
+                    &page,
+                    &selector,
+                    media_id.as_deref(),
+                    engine,
+                    &folder,
+                    &output,
+                    &mut stopped,
+                    |p| {
+                        task.completed_length = p.downloaded;
+                        task.download_speed = p.speed;
+                        if let Some(total) = task.total_length.filter(|n| *n > 0) {
+                            task.progress =
+                                (p.downloaded.saturating_mul(100) / total).min(99) as u8;
+                        }
+                        publish(&task);
+                    },
+                )
+                .await;
+                let can_retry = matches!(
+                    result.as_ref().err().map(String::as_str),
+                    Some(
+                        "video.error.accessDenied"
+                            | "video.error.download"
+                            | "video.error.formats"
+                            | "video.error.unavailable"
+                            | "video.error.network"
+                    )
+                );
+                if !can_retry || attempts.peek().is_none() {
+                    break;
+                }
+                task.completed_length = 0;
+                task.total_length = None;
+                task.progress = 0;
+                task.download_speed = 0;
+                publish(&task);
+            }
             match result {
                 Ok(None) => (),
                 Ok(Some(bytes)) => {
+                    if multiple {
+                        let _ = std::fs::remove_dir_all(&root);
+                    }
                     task.status = TaskStatus::Completed;
                     task.download_speed = 0;
                     task.total_length = Some(bytes);
