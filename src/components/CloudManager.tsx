@@ -135,10 +135,19 @@ function isAuthorizationPending(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error && ['authorization_pending', 'waiting', 'not_ready'].includes(String((error as { code?: unknown }).code));
 }
 
+function baiduUploadMessageKey(code: unknown) {
+  switch (code) {
+    case 'baidu_upload_session_required': return 'cloud.upload.baiduSessionUnavailable';
+    case 'baidu_upload_verification_required': return 'cloud.upload.baiduVerificationRequired';
+    case 'baidu_upload_result_uncertain': return 'cloud.upload.baiduResultUncertain';
+    default: return undefined;
+  }
+}
+
 function requiresOfficialWebAuthorization(error: unknown) {
   if (typeof error !== 'object' || error === null) return false;
   const code = 'code' in error ? String((error as { code?: unknown }).code).toLowerCase() : '';
-  if (['pikpak_operation_verification_required', 'xunlei_verification_unavailable'].includes(code)) return false;
+  if (baiduUploadMessageKey(code) || ['pikpak_operation_verification_required', 'xunlei_verification_unavailable'].includes(code)) return false;
   const message = errorMessage(error, '').toLowerCase();
   return ['web_auth_required', 'captcha_required', 'captcha_invalid', 'verification_required', 'web_verification_required', 'risk_verification_required'].includes(code)
     || /captcha|verification required|网页验证|安全验证|风险验证/.test(message);
@@ -182,8 +191,10 @@ function isXunleiVerificationFailure(error: unknown, reason: 'metadata_expired' 
 
 function errorMessage(error: unknown, fallback: string) {
   if (hasXunleiVerificationCode(error)) return xunleiVerificationMessage((error as { message?: unknown }).message);
-  if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'baidu_transfer_pending') {
-    return t('cloud.error.baiduTransferPending');
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    if (error.code === 'baidu_transfer_pending') return t('cloud.error.baiduTransferPending');
+    const uploadKey = baiduUploadMessageKey(error.code);
+    if (uploadKey) return t(uploadKey);
   }
   if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as { message?: unknown }).message === 'string') {
     return xunleiDownloadMessage((error as { message: string }).message);

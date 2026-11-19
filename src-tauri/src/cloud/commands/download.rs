@@ -1027,6 +1027,7 @@ pub(crate) fn directory_download_failure_fields(
             "baidu_operation_verification_required",
             "baidu_operation_verification_required",
         ),
+        QuarkError::BaiduUploadAuthorizationRequired(stage) => (stage.code(), stage.message()),
         QuarkError::SourceFileMissing => (
             "source_file_missing",
             "网盘中的源文件已不存在，请刷新网盘列表后重新创建下载",
