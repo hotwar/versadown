@@ -1,8 +1,10 @@
 use super::{
+    common::load_provider_session,
     types::{encoded, required},
-    CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile, CloudFileKind, CloudHttpRequest,
-    CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudShare, CloudShareOptions,
-    CloudStorageCapacity, CloudUploadTransport, QuarkError, UploadHttpRequest, UploadHttpResponse,
+    BaiduUploadAuthStage, CloudAccount, CloudAuthMethod, CloudDirectory, CloudFile, CloudFileKind,
+    CloudHttpRequest, CloudHttpResponse, CloudHttpTransport, CloudProvider, CloudShare,
+    CloudShareOptions, CloudStorageCapacity, CloudUploadTransport, CredentialStore, QuarkError,
+    UploadHttpRequest, UploadHttpResponse,
 };
 use base64::{
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
@@ -62,6 +64,161 @@ mod tests {
             })
         }
     }
+
+    impl CloudUploadTransport for Http {
+        fn send_upload(&self, _: UploadHttpRequest) -> Result<UploadHttpResponse, QuarkError> {
+            panic!("authorization fixture must not send file bytes");
+        }
+    }
+
+    #[test]
+    fn baidu_upload_token_rejection_leaves_listed_account_and_never_starts_a_write() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"upload fixture").unwrap();
+        let http = Http::new(vec![json!({"errno":0,"list":[]}), json!({"errno":-6})]);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
+        assert!(client.directory("/").is_ok());
+        let error = client.upload_file("/", file.path(), &http).unwrap_err();
+        assert!(matches!(
+            error,
+            QuarkError::BaiduUploadAuthorizationRequired(BaiduUploadAuthStage::Token)
+        ));
+        assert!(error.is_session_level());
+        assert_eq!(
+            serde_json::to_value(error).unwrap()["code"],
+            "baidu_upload_session_required"
+        );
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| request.method == "GET"));
+        assert!(requests[1].url.contains("/api/gettemplatevariable?"));
+    }
+
+    #[test]
+    fn baidu_upload_keeps_precreate_verification_separate_from_uncertain_commit() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"upload fixture").unwrap();
+        let token = json!({"errno":0,"result":{"bdstoken":"token"}});
+        let http = Http::new(vec![token.clone(), json!({"errno":-20})]);
+        let error = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http)
+            .upload_file("/", file.path(), &http)
+            .unwrap_err();
+        assert!(!error.is_session_level());
+        assert_eq!(
+            serde_json::to_value(error).unwrap()["code"],
+            "baidu_upload_verification_required"
+        );
+        assert_eq!(http.requests.lock().unwrap().len(), 2);
+
+        let http = Http::new(vec![
+            token,
+            json!({"errno":0,"uploadid":"upload-fixture","block_list":[]}),
+            json!({"errno":-6}),
+        ]);
+        let error = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http)
+            .upload_file("/", file.path(), &http)
+            .unwrap_err();
+        assert!(!error.is_session_level());
+        assert_eq!(
+            serde_json::to_value(error).unwrap()["code"],
+            "baidu_upload_result_uncertain"
+        );
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[2].method, "POST");
+        assert!(requests[2].url.contains("/api/create?"));
+    }
+
+    #[test]
+    fn baidu_upload_session_probe_checks_only_the_token_and_preserves_non_auth_errors() {
+        let store = MemoryCredentialStore::default();
+        let session = serde_json::to_vec(&BaiduSession::cookie("BDUSS=fixture")).unwrap();
+        store.save("baidu", &session).unwrap();
+        let http = Http::new(vec![json!({"errno":0,"result":{"bdstoken":"token"}})]);
+        verify_baidu_upload_session(&store, &http).unwrap();
+        assert_eq!(
+            store.load("baidu").unwrap().as_deref(),
+            Some(session.as_slice())
+        );
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
+        assert!(requests[0].url.contains("/api/gettemplatevariable?"));
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"upload fixture").unwrap();
+        let http = Http::new(vec![json!({"errno":0,"result":{}})]);
+        let upload = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http)
+            .upload_file("/", file.path(), &http);
+        assert!(matches!(upload, Err(QuarkError::InvalidResponse)));
+        assert_eq!(http.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    #[ignore = "read-only probe using an explicitly selected saved Baidu account"]
+    fn live_baidu_upload_session_probe() {
+        struct ReadOnlyProbe(crate::cloud::ReqwestTransport);
+
+        impl CloudHttpTransport for ReadOnlyProbe {
+            fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+                let endpoint = url::Url::parse(&request.url).map_err(|_| QuarkError::InvalidResponse)?;
+                let stage = match (request.method, endpoint.scheme(), endpoint.host_str(), endpoint.path()) {
+                    ("GET", "https", Some("pan.baidu.com"), "/api/list") => "directory",
+                    ("GET", "https", Some("pan.baidu.com"), "/api/gettemplatevariable") => "upload_token",
+                    _ => return Err(QuarkError::InvalidInput("unexpected probe request".into())),
+                };
+                let response = self.0.send(request)?;
+                let errno = serde_json::from_str::<Value>(&response.body).ok().and_then(|value| {
+                    ["errno", "error_code", "err_no"].iter().find_map(|key| {
+                        value.get(key).and_then(baidu_error_number).filter(|code| *code != 0)
+                    })
+                });
+                eprintln!("[baidu-live-probe] stage={stage} http={} errno={errno:?}", response.status);
+                Ok(response)
+            }
+        }
+
+        fn safe_code(error: &QuarkError) -> String {
+            serde_json::to_value(error)
+                .ok()
+                .and_then(|value| value["code"].as_str().map(str::to_owned))
+                .unwrap_or_else(|| "unknown".into())
+        }
+
+        let root = std::path::PathBuf::from(
+            std::env::var_os("VERSADOWN_LIVE_BAIDU_UPLOAD_PROBE_DIR")
+                .expect("explicitly select a cloud-sessions directory for the probe"),
+        );
+        assert!(
+            root.is_absolute()
+                && root.file_name().is_some_and(|name| name == "cloud-sessions")
+                && root.is_dir(),
+            "the selected store must be an existing absolute cloud-sessions directory"
+        );
+        let persistent = crate::cloud::SystemCredentialStore::new(root)
+            .unwrap_or_else(|error| panic!("store open failed: {}", safe_code(&error)));
+        let store = MemoryCredentialStore::default();
+        let saved = Zeroizing::new(
+            persistent
+                .load("baidu")
+                .unwrap_or_else(|error| panic!("store read failed: {}", safe_code(&error)))
+                .expect("the selected profile has no saved Baidu session"),
+        );
+        store.save("baidu", &saved).expect("copy session to memory");
+        let http = ReadOnlyProbe(crate::cloud::ReqwestTransport::new()
+            .unwrap_or_else(|error| panic!("transport unavailable: {}", safe_code(&error))));
+        let session = load_provider_session(CloudProvider::Baidu, &store)
+            .unwrap_or_else(|error| panic!("session unavailable: {}", safe_code(&error)));
+        let directory = BaiduClient::new(session, &http).directory("/");
+        let upload_token = verify_baidu_upload_session(&store, &http);
+        for (stage, result) in [("directory", directory.map(|_| ())), ("upload_token", upload_token)] {
+            match result {
+                Ok(()) => eprintln!("[baidu-live-probe] {stage}=ok"),
+                Err(error) => eprintln!("[baidu-live-probe] {stage}={}", safe_code(&error)),
+            }
+        }
+    }
+
     fn candidate() -> crate::parser::CloudShareCandidate {
         crate::parser::CloudShareCandidate {
             provider: CloudProvider::Baidu,
@@ -1382,6 +1539,18 @@ impl BaiduSession {
     }
 }
 
+/// Verify that the saved candidate can obtain the upload token without
+/// changing cloud files. The caller binds the candidate to the existing account.
+pub(crate) fn verify_baidu_upload_session(
+    store: &impl CredentialStore,
+    http: &impl CloudHttpTransport,
+) -> Result<(), QuarkError> {
+    let session = load_provider_session(CloudProvider::Baidu, store)?;
+    BaiduClient::new(session, http)
+        .web_token_at_stage(Some(BaiduUploadAuthStage::Token))
+        .map(|_| ())
+}
+
 fn native_api_cookie(cookie: String) -> String {
     let mut has_legacy_bduss = false;
     let mut secure_webview_bduss = None;
@@ -1703,13 +1872,21 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         url: String,
         body: Option<Value>,
     ) -> Result<Value, QuarkError> {
-        let response = self.http.send(CloudHttpRequest {
+        baidu_json(&self.web_request_response(method, url, body)?)
+    }
+
+    fn web_request_response(
+        &self,
+        method: &'static str,
+        url: String,
+        body: Option<Value>,
+    ) -> Result<CloudHttpResponse, QuarkError> {
+        self.http.send(CloudHttpRequest {
             method,
             url,
             headers: self.web_headers(),
             body: body.map(|value| value.to_string()),
-        })?;
-        baidu_json(&response)
+        })
     }
 
     pub fn account(&self) -> Result<CloudAccount, QuarkError> {
@@ -2253,8 +2430,9 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         if content_md5.is_empty() {
             return Err(QuarkError::InvalidInput("文件校验值无效".into()));
         }
-        let token = self.web_token()?;
-        self.web_form(
+        let token = self.upload_web_token()?;
+        self.upload_form(
+            BaiduUploadAuthStage::Precreate,
             "/api/precreate",
             &write_query(&token, ""),
             form(&[
@@ -2282,8 +2460,9 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         let path = join_path(&parent.path, &name)?;
         let blocks = baidu_block_hashes(local_path, size)?;
         snapshot.validate()?;
-        let token = self.web_token()?;
-        let precreate = self.web_form(
+        let token = self.upload_web_token()?;
+        let precreate = self.upload_form(
+            BaiduUploadAuthStage::Precreate,
             "/api/precreate",
             &write_query(&token, ""),
             form(&[
@@ -2328,7 +2507,8 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             validate_slice_response(&response, &blocks[part])?;
         }
         snapshot.validate()?;
-        let committed = self.web_form(
+        let committed = self.upload_form(
+            BaiduUploadAuthStage::Commit,
             "/api/create",
             &write_query(&token, "a=commit"),
             form(&[
@@ -2492,13 +2672,24 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
     }
 
     fn web_token(&self) -> Result<String, QuarkError> {
-        let value = self.web_request(
+        self.web_token_at_stage(None)
+    }
+
+    fn upload_web_token(&self) -> Result<String, QuarkError> {
+        let stage = BaiduUploadAuthStage::Token;
+        self.web_token_at_stage(Some(stage))
+            .map_err(|error| baidu_upload_auth_error(stage, error))
+    }
+
+    fn web_token_at_stage(&self, stage: Option<BaiduUploadAuthStage>) -> Result<String, QuarkError> {
+        let response = self.web_request_response(
             "GET",
             format!(
                 "{PAN}/api/gettemplatevariable?clienttype=0&app_id=250528&web=1&fields=%5B%22bdstoken%22%5D"
             ),
             None,
         )?;
+        let value = baidu_json_at_stage(&response, stage)?;
         required(
             value.get("result").ok_or(QuarkError::InvalidResponse)?,
             "bdstoken",
@@ -2538,6 +2729,18 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
 
     fn web_form(&self, path: &str, query: &str, body: String) -> Result<Value, QuarkError> {
         baidu_json(&self.web_form_response(path, query, body)?)
+    }
+
+    fn upload_form(
+        &self,
+        stage: BaiduUploadAuthStage,
+        path: &str,
+        query: &str,
+        body: String,
+    ) -> Result<Value, QuarkError> {
+        self.web_form_response(path, query, body)
+            .and_then(|response| baidu_json_at_stage(&response, Some(stage)))
+            .map_err(|error| baidu_upload_auth_error(stage, error))
     }
 
     fn web_form_response(
@@ -2870,22 +3073,48 @@ fn upload_file_result(
 }
 
 fn baidu_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
+    baidu_json_at_stage(response, None)
+}
+
+fn baidu_upload_auth_error(stage: BaiduUploadAuthStage, error: QuarkError) -> QuarkError {
+    match error {
+        QuarkError::AuthorizationExpired
+        | QuarkError::NotAuthorized
+        | QuarkError::WebAuthorizationRequired
+        | QuarkError::CaptchaRequired => QuarkError::BaiduUploadAuthorizationRequired(stage),
+        other => other,
+    }
+}
+
+fn baidu_json_at_stage(
+    response: &CloudHttpResponse,
+    upload_stage: Option<BaiduUploadAuthStage>,
+) -> Result<Value, QuarkError> {
+    let diagnostic = std::env::var("VERSADOWN_BAIDU_DIAGNOSTIC").as_deref() == Ok("1");
+    let log_upload = |errno: Option<i64>| {
+        if let Some(stage) = upload_stage.filter(|_| diagnostic) {
+            eprintln!("[baidu-upload] stage={stage:?} http={} errno={errno:?}", response.status);
+        }
+    };
     if response.status == 401 {
+        log_upload(None);
         return Err(QuarkError::AuthorizationExpired);
     }
-    let value: Value =
-        serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
-    if challenge(&value) {
-        return Err(QuarkError::WebAuthorizationRequired);
-    }
+    let value: Value = serde_json::from_str(&response.body).map_err(|_| {
+        log_upload(None);
+        QuarkError::InvalidResponse
+    })?;
     let errno = ["errno", "error_code", "err_no"]
         .iter()
         .filter_map(|key| value.get(key).and_then(baidu_error_number))
-        .find(|code| *code != 0)
-        .unwrap_or(0);
-    if errno != 0 {
+        .find(|code| *code != 0);
+    log_upload(errno);
+    if challenge(&value) {
+        return Err(QuarkError::WebAuthorizationRequired);
+    }
+    if let Some(errno) = errno {
         if matches!(errno, -6 | -7 | 110 | 111 | 31045) {
-            if std::env::var("VERSADOWN_BAIDU_DIAGNOSTIC").as_deref() == Ok("1") {
+            if diagnostic && upload_stage.is_none() {
                 return Err(QuarkError::Provider(format!(
                     "百度授权拒绝（errno {errno}，HTTP {}）",
                     response.status

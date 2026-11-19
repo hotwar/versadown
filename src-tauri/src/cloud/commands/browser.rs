@@ -228,10 +228,7 @@ pub(crate) fn recover_authorization(
             .driver(provider, &state.store, http)
             .auth(),
         phase,
-        || capture_persistent_authorization(
-            app, state, provider, http,
-            phase == auth_supervisor::RecoveryPhase::OperationVerification,
-        ),
+        || capture_persistent_authorization(app, state, provider, http, phase),
     )
 }
 
@@ -263,7 +260,7 @@ fn capture_persistent_authorization(
     state: &CloudState,
     provider: CloudProvider,
     http: &impl CloudHttpTransport,
-    require_operation_verification: bool,
+    phase: auth_supervisor::RecoveryPhase,
 ) -> Result<bool, CloudError> {
     if auth_supervisor::is_manually_disconnected(&state.store, provider)? {
         return Err(CloudError::NotAuthorized);
@@ -368,6 +365,13 @@ fn capture_persistent_authorization(
         if account.id != expected {
             return Err(CloudError::WebAuthorizationRequired);
         }
+        if provider == CloudProvider::Baidu
+            && phase == auth_supervisor::RecoveryPhase::BaiduUploadToken
+        {
+            // A root listing only proves read access, so do not replace a
+            // working read session with an unverified upload session.
+            baidu::verify_baidu_upload_session(&temporary, http)?;
+        }
         let mut verified = temporary.load(provider.key())?.ok_or(CloudError::Storage)?;
         if provider == CloudProvider::Tianyi {
             let mut candidate: tianyi::TianyiSession =
@@ -384,7 +388,9 @@ fn capture_persistent_authorization(
         if provider == CloudProvider::Xunlei {
             let candidate: xunlei::XunleiSession =
                 serde_json::from_slice(&verified).map_err(|_| CloudError::Storage)?;
-            if require_operation_verification && !candidate.can_prepare_operation_verification() {
+            if phase == auth_supervisor::RecoveryPhase::OperationVerification
+                && !candidate.can_prepare_operation_verification()
+            {
                 return Ok(false);
             }
             if let Some(existing) = state

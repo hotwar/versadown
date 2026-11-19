@@ -2433,6 +2433,29 @@ it('treats closing the upload picker as a cancellation instead of a success', as
   expect(screen.queryByText(/上传成功|已上传/)).not.toBeInTheDocument();
 });
 
+it.each([
+  ['baidu_upload_session_required', /百度上传会话未能自动恢复/],
+  ['baidu_upload_verification_required', /百度未接受上传请求/],
+  ['baidu_upload_result_uncertain', /百度未确认上传结果/],
+])('keeps the Baidu account and directory available after %s', async (code, notice) => {
+  const user = userEvent.setup();
+  const client = createCloudFake({
+    uploadCloudFiles: vi.fn().mockResolvedValue({
+      uploaded: [], failures: [{ inputIndex: 0, itemName: 'a.txt', code, message: '需要网页验证' }],
+    }),
+  });
+  render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'web' }} restoreOnMount={false} />);
+
+  await screen.findByRole('tree');
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await confirmAllLocalUploads(user);
+  expect((await screen.findAllByText(notice))[0]).toBeVisible();
+  expect(screen.getByRole('tree')).toBeVisible();
+  expect(screen.queryByRole('button', { name: /授权并继续上传|重新网页授权/ })).not.toBeInTheDocument();
+  expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
+  expect(client.uploadCloudFiles).toHaveBeenCalledTimes(1);
+});
+
 it('keeps selected upload paths and retries only authorization-failed files after reauthorization', async () => {
   const user = userEvent.setup();
   const uploadCloudFiles = vi.fn()

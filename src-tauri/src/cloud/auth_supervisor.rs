@@ -53,6 +53,8 @@ pub struct AuthSupervisor {
     // This short lock is never held while contacting a provider.
     published: std::sync::Mutex<HashMap<CloudProvider, PublishedSession>>,
     persistence_warning: std::sync::OnceLock<Box<dyn Fn(SessionPersistenceWarning) + Send + Sync>>,
+    // Upload-token recovery is independent of the account's read health.
+    baidu_upload_retry: std::sync::Mutex<Option<(uuid::Uuid, i64)>>,
 }
 
 /// A local persistence failure must not change the outcome of completed work.
@@ -78,6 +80,7 @@ pub enum RecoveryPhase {
     AuthFailure,
     ProfileOnly,
     OperationVerification,
+    BaiduUploadToken,
 }
 impl From<bool> for RecoveryPhase {
     fn from(genuine: bool) -> Self {
@@ -118,6 +121,7 @@ impl AuthSupervisor {
         Self {
             published: Default::default(),
             persistence_warning: Default::default(),
+            baidu_upload_retry: Default::default(),
             clock: Box::new(clock),
             jitter: Box::new(jitter),
             locks: ProviderRegistry::global()
@@ -559,6 +563,27 @@ impl AuthSupervisor {
             }
         }
         match result {
+            Err(CloudError::BaiduUploadAuthorizationRequired(
+                BaiduUploadAuthStage::Token,
+            )) if provider == CloudProvider::Baidu && kind == SessionWorkKind::Mutation => {
+                let next = self.recover_baidu_upload_token(
+                    store,
+                    revision,
+                    &snapshot,
+                    || recover(RecoveryPhase::BaiduUploadToken),
+                    &check,
+                )?;
+                check()?;
+                let result = work(&next);
+                if let Err(CloudError::Storage) =
+                    self.persist_snapshot(store, provider, next.revision, &next, &check)
+                {
+                    self.warn_persistence_failure(provider, result.is_ok());
+                }
+                // The second invocation may have dispatched a mutation.
+                // Preserve its outcome and do not enter recovery again.
+                result
+            }
             Err(error @ CloudError::CaptchaRequired) => {
                 self.with_provider(provider, || {
                     let mut record = self.record(store, provider)?;
@@ -713,6 +738,65 @@ impl AuthSupervisor {
             result => result,
         }
     }
+    fn recover_baidu_upload_token(
+        &self,
+        store: &impl CredentialStore,
+        revision: u64,
+        original: &SessionSnapshot,
+        recover: impl FnOnce() -> Result<(), CloudError>,
+        check: &impl Fn() -> Result<(), CloudError>,
+    ) -> Result<SessionSnapshot, CloudError> {
+        let provider = CloudProvider::Baidu;
+        let upload_token_error =
+            || CloudError::BaiduUploadAuthorizationRequired(BaiduUploadAuthStage::Token);
+        self.with_provider(provider, || {
+            let current = self.snapshot(store, provider)?;
+            let mut record = self.record(store, provider)?;
+            if current.account_id != original.account_id || current.binding != original.binding {
+                return Err(CloudError::AccountMismatch);
+            }
+            if current.revision != revision
+                || record.session_revision != revision
+                || record.account_id != current.account_id
+                || current.initial != store.load(provider.key())?
+                || current.account_id.is_none()
+                || matches!(record.health, AuthHealth::Disconnected | AuthHealth::RiskBlocked)
+            {
+                return Err(upload_token_error());
+            }
+            let previous = current.initial.as_deref().ok_or_else(upload_token_error)?;
+            check()?;
+            {
+                let mut attempt = self.baidu_upload_retry.lock().map_err(|_| CloudError::Storage)?;
+                let now = (self.clock)();
+                if attempt.is_some_and(|(binding, until)| binding == current.binding && now < until) {
+                    return Err(upload_token_error());
+                }
+                *attempt = Some((current.binding, now.saturating_add(300)));
+            }
+
+            // The browser validates the captured account and write token in
+            // isolation before publishing credentials to the store.
+            let recovered = recover();
+            let checked = check();
+            let verified = store.load(provider.key())?;
+            if recovered.is_err() || checked.is_err() || verified.is_none() {
+                // A completed provider callback may have published just
+                // before cancellation. Restore the original credentials
+                // before releasing this provider's lock.
+                if verified.as_deref() != Some(previous) {
+                    store.save(provider.key(), previous)?;
+                }
+                checked?;
+                return Err(upload_token_error());
+            }
+            record.session_revision = record.session_revision.saturating_add(1);
+            self.save(store, &record)?;
+            self.publish_locked(store, &record, false)?;
+            self.snapshot(store, provider)
+        })
+    }
+
     fn persist_snapshot(
         &self,
         store: &impl CredentialStore,
@@ -780,7 +864,12 @@ pub fn recover_in_order(
                 | CloudError::WebAuthorizationRequired
         )
     }
-    if !matches!(phase, RecoveryPhase::ProfileOnly | RecoveryPhase::OperationVerification) {
+    if !matches!(
+        phase,
+        RecoveryPhase::ProfileOnly
+            | RecoveryPhase::OperationVerification
+            | RecoveryPhase::BaiduUploadToken
+    ) {
         match auth.refresh_session() {
             Ok(true) => return Ok(()),
             Ok(false) => {}

@@ -364,6 +364,31 @@ impl XunleiNativeDownloadFailure {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BaiduUploadAuthStage {
+    Token,
+    Precreate,
+    Commit,
+}
+
+impl BaiduUploadAuthStage {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::Token => "baidu_upload_session_required",
+            Self::Precreate => "baidu_upload_verification_required",
+            Self::Commit => "baidu_upload_result_uncertain",
+        }
+    }
+
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::Token => "暂时无法验证百度网盘上传会话，请在百度网盘官方网页确认上传权限后重试",
+            Self::Precreate => "百度网盘要求完成上传验证，请在官方网页处理后重试",
+            Self::Commit => "百度网盘上传结果未确认，请先刷新目标目录核对文件",
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum CloudError {
     #[error("尚未授权此网盘，请登录后使用")]
@@ -384,6 +409,8 @@ pub enum CloudError {
     PikpakOperationVerificationRequired(&'static str),
     #[error("baidu_operation_verification_required")]
     BaiduOperationVerificationRequired,
+    #[error("{}", .0.message())]
+    BaiduUploadAuthorizationRequired(BaiduUploadAuthStage),
     #[error("区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员")]
     PikpakRegionalMembershipRestricted,
     #[error("正在等待网页登录，请在授权窗口完成登录")]
@@ -483,6 +510,7 @@ impl CloudError {
                 | Self::SessionRenewedRetryOperation
                 | Self::WebAuthorizationRequired
                 | Self::CaptchaRequired
+                | Self::BaiduUploadAuthorizationRequired(BaiduUploadAuthStage::Token)
                 | Self::XunleiVerificationUnavailable(_)
                 | Self::Storage
         )
@@ -503,6 +531,7 @@ impl Serialize for CloudError {
                 "pikpak_operation_verification_required"
             }
             Self::BaiduOperationVerificationRequired => "baidu_operation_verification_required",
+            Self::BaiduUploadAuthorizationRequired(stage) => stage.code(),
             Self::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
             Self::AuthorizationPending => "authorization_pending",
             Self::SourceFileMissing => "source_file_missing",

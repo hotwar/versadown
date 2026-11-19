@@ -354,7 +354,9 @@ fn rotated_operation_continues_profile(kind: SessionWorkKind) {
             match phase {
                 RecoveryPhase::Proactive => Err(CloudError::WebAuthorizationRequired),
                 RecoveryPhase::ProfileOnly => store.save(provider.key(), b"profile-session"),
-                RecoveryPhase::AuthFailure | RecoveryPhase::OperationVerification => {
+                RecoveryPhase::AuthFailure
+                | RecoveryPhase::OperationVerification
+                | RecoveryPhase::BaiduUploadToken => {
                     panic!("the same attempt must continue at profile only")
                 }
             }
@@ -646,6 +648,121 @@ fn mutation_is_invoked_once_and_requires_explicit_retry_after_renewal() {
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(store.load("pikpak").unwrap(), Some(b"renewed".to_vec()));
+}
+
+#[test]
+fn baidu_upload_only_retries_write_token_failure_with_a_verified_profile() {
+    let (supervisor, _, store) = fixture(1000, 30);
+    let provider = CloudProvider::Baidu;
+    store.save("baidu", b"old-session").unwrap();
+    supervisor.ready(&store, provider, Some("A".into()), None, None).unwrap();
+    let mut calls = 0;
+    let mut recoveries = 0;
+    let result: Result<(), _> = supervisor.run(
+        &store, provider, SessionWorkKind::Mutation,
+        |snapshot| {
+            calls += 1;
+            if calls == 1 {
+                assert_eq!(snapshot.load("baidu")?.as_deref(), Some(&b"old-session"[..]));
+                Err(CloudError::BaiduUploadAuthorizationRequired(BaiduUploadAuthStage::Token))
+            } else {
+                assert_eq!(snapshot.load("baidu")?.as_deref(), Some(&b"usable-session"[..]));
+                // A second authorization error after dispatch never starts a
+                // second recovery or sends the upload request again.
+                Err(CloudError::BaiduUploadAuthorizationRequired(BaiduUploadAuthStage::Commit))
+            }
+        },
+        |phase| {
+            assert!(phase == RecoveryPhase::BaiduUploadToken);
+            recoveries += 1;
+            store.save("baidu", b"usable-session")
+        },
+    );
+    assert!(matches!(result, Err(CloudError::BaiduUploadAuthorizationRequired(
+        BaiduUploadAuthStage::Commit
+    ))));
+    assert_eq!(calls, 2);
+    assert_eq!(recoveries, 1);
+}
+
+#[test]
+fn baidu_write_token_probe_failure_preserves_reads_and_is_cooled_down() {
+    let (supervisor, _, store) = fixture(1000, 30);
+    let provider = CloudProvider::Baidu;
+    store.save("baidu", b"read-only-session").unwrap();
+    supervisor.ready(&store, provider, Some("A".into()), None, None).unwrap();
+    let mut recoveries = 0;
+    for _ in 0..2 {
+        let result: Result<(), _> = supervisor.run(
+            &store, provider, SessionWorkKind::Mutation,
+            |_| Err(CloudError::BaiduUploadAuthorizationRequired(BaiduUploadAuthStage::Token)),
+            |phase| {
+                assert!(phase == RecoveryPhase::BaiduUploadToken);
+                recoveries += 1;
+                Err(CloudError::AuthorizationPending)
+            },
+        );
+        assert!(matches!(result, Err(CloudError::BaiduUploadAuthorizationRequired(
+            BaiduUploadAuthStage::Token
+        ))));
+    }
+    assert_eq!(recoveries, 1);
+    let record = supervisor.record(&store, provider).unwrap();
+    assert_eq!(record.health, AuthHealth::Ready);
+    assert_eq!(record.consecutive_failures, 0);
+    let read = supervisor.run(
+        &store, provider, SessionWorkKind::Read,
+        |snapshot| snapshot.load(provider.key()),
+        |_| panic!("upload-token failure must not require read authentication"),
+    ).unwrap();
+    assert_eq!(read.as_deref(), Some(&b"read-only-session"[..]));
+}
+
+#[test]
+fn baidu_rejected_upload_after_dispatch_does_not_attempt_recovery() {
+    for stage in [BaiduUploadAuthStage::Precreate, BaiduUploadAuthStage::Commit] {
+        let (supervisor, _, store) = fixture(1000, 30);
+        let provider = CloudProvider::Baidu;
+        store.save("baidu", b"fixture").unwrap();
+        supervisor.ready(&store, provider, Some("A".into()), None, None).unwrap();
+        let mut calls = 0;
+        let result: Result<(), _> = supervisor.run(
+            &store, provider, SessionWorkKind::Mutation,
+            |_| { calls += 1; Err(CloudError::BaiduUploadAuthorizationRequired(stage)) },
+            |_| panic!("cannot recover an upload that already dispatched a write"),
+        );
+        assert!(matches!(result, Err(CloudError::BaiduUploadAuthorizationRequired(s)) if s == stage));
+        assert_eq!(calls, 1);
+    }
+}
+
+#[test]
+fn baidu_upload_cancellation_during_recovery_rejects_the_candidate() {
+    let (supervisor, _, store) = fixture(1000, 30);
+    let provider = CloudProvider::Baidu;
+    store.save("baidu", b"old").unwrap();
+    supervisor.ready(&store, provider, Some("A".into()), None, None).unwrap();
+    let cancelled = std::cell::Cell::new(false);
+    let mut calls = 0;
+    let result: Result<(), _> = supervisor.run_checked(
+        &store, provider, SessionWorkKind::Mutation,
+        |_| {
+            calls += 1;
+            Err(CloudError::BaiduUploadAuthorizationRequired(BaiduUploadAuthStage::Token))
+        },
+        |_| {
+            store.save("baidu", b"candidate")?;
+            cancelled.set(true);
+            Ok(())
+        },
+        || {
+            if cancelled.get() { Err(CloudError::InvalidInput("cancelled".into())) }
+            else { Ok(()) }
+        },
+    );
+    assert!(matches!(result, Err(CloudError::InvalidInput(_))));
+    assert_eq!(calls, 1);
+    assert_eq!(store.load("baidu").unwrap().as_deref(), Some(&b"old"[..]));
 }
 
 fn xunlei_web_session(ticket: &str, expires_at: u64) -> Vec<u8> {
