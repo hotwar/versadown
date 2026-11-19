@@ -370,30 +370,33 @@ pub(crate) async fn prepare_agent_video(
 ) -> Result<Vec<AgentPreparedVideo>, String> {
     let page = routing::resolve(input, true).await?.ok_or("video.error.unsupported")?;
     let options = network_options(state)?;
-    let preview = extractor::inspect(page, options.proxy.as_deref(), options.cookie_file.as_deref()).await?;
-    Ok(agent_video_formats(preview))
+    let previews = extractor::inspect(page, options.proxy.as_deref(), options.cookie_file.as_deref()).await?;
+    Ok(agent_video_formats(previews))
 }
 
-fn agent_video_formats(preview:VideoPreview)->Vec<AgentPreparedVideo> {
-    let title: String = preview.title.chars().scan(0, |bytes, c| {
-        *bytes += c.len_utf8();
-        (*bytes <= 160).then_some(c)
-    }).collect();
-    preview.formats.into_iter().map(|format| {
-        let quality = match (format.width, format.height) {
-            (0, 0) => String::new(),
-            (0, height) => format!(" [{height}p]"),
-            (width, 0) => format!(" [w{width}]"),
-            (width, height) => format!(" [{width}x{height}]"),
-        };
-        AgentPreparedVideo {
-            page: preview.page_url.clone(), selector: format.id,
-            media_id: preview.media_id.clone(),
-            name: crate::cloud::commands::safe_filename(&format!("{}{quality}.{}", title.trim(), format.ext)),
-            size_bytes: format.bytes,
-            detail: format!("{}x{} {}{}", format.width, format.height, format.ext,
-                if format.estimated { " estimated_size" } else { "" }),
-        }
+fn agent_video_formats(previews: Vec<VideoPreview>) -> Vec<AgentPreparedVideo> {
+    previews.into_iter().flat_map(|preview| {
+        let title: String = preview.title.chars().scan(0, |bytes, c| {
+            *bytes += c.len_utf8();
+            (*bytes <= 160).then_some(c)
+        }).collect();
+        preview.formats.into_iter().map(move |format| {
+            let quality = match (format.width, format.height) {
+                (0, 0) => String::new(),
+                (0, height) => format!(" [{height}p]"),
+                (width, 0) => format!(" [w{width}]"),
+                (width, height) => format!(" [{width}x{height}]"),
+            };
+            AgentPreparedVideo {
+                page: preview.page_url.clone(),
+                selector: format.id,
+                media_id: preview.media_id.clone(),
+                name: crate::cloud::commands::safe_filename(&format!("{}{quality}.{}", title.trim(), format.ext)),
+                size_bytes: format.bytes,
+                detail: format!("{}x{} {}{}", format.width, format.height, format.ext,
+                    if format.estimated { " estimated_size" } else { "" }),
+            }
+        })
     }).collect()
 }
 
@@ -404,10 +407,18 @@ mod agent_tests {
     fn agent_resource_video_metadata_preserves_the_exact_format_without_creating_tasks() {
         let preview=VideoPreview{preview_id:Uuid::new_v4(),media_id:"media-1".into(),page_url:"https://example.test/watch".into(),site:"fixture".into(),title:"Example / clip".into(),thumbnail:Some("https://signed.example/secret".into()),duration:Some(60.0),
             formats:vec![extractor::VideoFormat{id:"137+140".into(),width:1920,height:1080,ext:"mp4".into(),bytes:Some(99),estimated:false}]};
-        let formats=agent_video_formats(preview);assert_eq!(formats.len(),1);
+        let second = VideoPreview {
+            media_id: "media-2".into(),
+            page_url: "https://example.test/watch/second".into(),
+            ..preview.clone()
+        };
+        let formats = agent_video_formats(vec![preview, second]);
+        assert_eq!(formats.len(), 2);
         assert_eq!(formats[0].selector,"137+140");assert_eq!(formats[0].media_id,"media-1");
         assert_eq!(formats[0].size_bytes,Some(99));assert!(!formats[0].name.contains('/'));
         assert!(!formats[0].detail.contains("secret"));assert!(formats[0].name.ends_with(" [1920x1080].mp4"));
+        assert_eq!(formats[1].media_id, "media-2");
+        assert_eq!(formats[1].page, "https://example.test/watch/second");
     }
 }
 
