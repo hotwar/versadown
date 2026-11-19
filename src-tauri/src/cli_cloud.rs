@@ -1,4 +1,5 @@
 //! Agent cloud operations. The host owns scopes, provider sessions and receipts.
+use crate::cloud::BaiduUploadAuthStage;
 use crate::{cli_cloud_protocol::*,cli_protocol::{ApiError,Response},cli_resources::{ResourceTarget,ResourcePlan,ResourceSelection},commands::AppState,cloud::{CloudProvider,CloudShareOptions,QuarkError}};
 use serde::{Deserialize,Serialize};
 use sha2::{Digest,Sha256};
@@ -22,6 +23,11 @@ pub(crate) fn cloud_code(e:QuarkError)->&'static str {
         QuarkError::InvalidInput(s) if s=="agent.error.fileConflict"=>"FILE_CONFLICT",
         QuarkError::InvalidInput(_)=>"INVALID_ARGUMENT",
         QuarkError::SourceFileMissing=>"SOURCE_CHANGED",
+        QuarkError::BaiduUploadAuthorizationRequired(stage) => match stage {
+            BaiduUploadAuthStage::Token => "CLOUD_UPLOAD_SESSION_REQUIRED",
+            BaiduUploadAuthStage::Precreate => "CLOUD_UPLOAD_VERIFICATION_REQUIRED",
+            BaiduUploadAuthStage::Commit => "CLOUD_RESULT_UNCERTAIN",
+        },
         _=>crate::cli_resources::cloud_error(e),
     }
 }
@@ -208,7 +214,14 @@ async fn perform(app:&AppHandle,plan:&CloudPlan,dto:&mut CloudOperationDto)->Cod
                         AgentUploadError::SourceChanged=>"SOURCE_CHANGED",
                     };
                     dto.failures.push(CloudItemErrorDto{index,name:file.name.clone(),error:ApiError::new(code,"en")});
-                    if matches!(code,"CLOUD_RESULT_UNCERTAIN"|"ACTION_FAILED"){dto.status="needs_review".into();break;}
+                    match code {
+                        "CLOUD_RESULT_UNCERTAIN" | "ACTION_FAILED" => {
+                            dto.status = "needs_review".into();
+                            break;
+                        }
+                        "CLOUD_UPLOAD_SESSION_REQUIRED" | "CLOUD_UPLOAD_VERIFICATION_REQUIRED" => break,
+                        _ => {}
+                    }
                 }
             }
             app.state::<AppState>().store.update_agent_cloud(dto,&["running"])?;
@@ -240,4 +253,19 @@ mod tests{
     use super::*;
     #[test]fn cloud_upload_snapshot_detects_changes_and_rejects_directories(){let dir=tempfile::tempdir().unwrap();assert!(matches!(snapshot(dir.path()),Err("UNSUPPORTED")));let p=dir.path().join("sample.txt");std::fs::write(&p,b"one").unwrap();let a=snapshot(&p).unwrap();std::fs::write(&p,b"longer").unwrap();let b=snapshot(&p).unwrap();assert_ne!(a.size,b.size);}
     #[test]fn cloud_write_errors_do_not_turn_account_changes_or_uncertain_mutations_into_login(){assert_eq!(cloud_code(QuarkError::AccountMismatch),"ACCOUNT_MISMATCH");assert_eq!(cloud_code(QuarkError::SessionRenewedRetryOperation),"CLOUD_RESULT_UNCERTAIN");assert_eq!(cloud_code(QuarkError::InvalidInput("agent.error.fileConflict".into())),"FILE_CONFLICT");}
+
+    #[test]
+    fn baidu_upload_errors_preserve_verification_and_uncertain_commit() {
+        for (stage, code, next_action) in [
+            (BaiduUploadAuthStage::Token, "CLOUD_UPLOAD_SESSION_REQUIRED", "verify_cloud_upload_in_browser"),
+            (BaiduUploadAuthStage::Precreate, "CLOUD_UPLOAD_VERIFICATION_REQUIRED", "verify_cloud_upload_in_browser"),
+            (BaiduUploadAuthStage::Commit, "CLOUD_RESULT_UNCERTAIN", "inspect_desktop"),
+        ] {
+            let actual = cloud_code(QuarkError::BaiduUploadAuthorizationRequired(stage));
+            assert_eq!(actual, code);
+            let error = ApiError::new(actual, "en");
+            assert_eq!(error.next_action.as_deref(), Some(next_action));
+            assert!(!error.retryable);
+        }
+    }
 }
