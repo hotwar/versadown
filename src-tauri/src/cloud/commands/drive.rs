@@ -14,18 +14,18 @@ pub fn restore_account(
 /// single authorization slot. Startup recovery and later downloads can then
 /// compare task ownership without querying the provider again.
 fn record_restored_account(
-    state: &CloudState,
+    context: &SessionWorkContext<'_>,
     provider: CloudProvider,
     account: &CloudAccount,
 ) -> Result<(), QuarkError> {
-    state.auth_supervisor.ready(
-        &state.store,
-        provider,
-        Some(account.id.clone()),
-        Some(account.auth_method),
-        auth_supervisor::session_expiry(&state.store, provider)?,
-    )?;
-    Ok(())
+    if account.provider != provider {
+        return Err(CloudError::AccountMismatch);
+    }
+    context.auth_supervisor.observe_account(
+        &context.state.store,
+        context.snapshot.ok_or(CloudError::Storage)?,
+        account,
+    )
 }
 
 pub(crate) fn list_cloud_directory(
@@ -609,6 +609,31 @@ mod tests {
     }
 
     #[test]
+    fn delayed_account_read_cannot_publish_after_logout_or_switch() {
+        let store = MemoryCredentialStore::default();
+        let supervisor = auth_supervisor::AuthSupervisor::default();
+        let provider = CloudProvider::Baidu;
+        let account = CloudAccount {
+            provider, id: "first".into(), display_name: "fixture".into(), auth_method: CloudAuthMethod::Web,
+        };
+        for switch in [false, true] {
+            store.save(provider.key(), b"first").unwrap();
+            supervisor.ready(&store, provider, Some(account.id.clone()), Some(account.auth_method), None).unwrap();
+            let result = supervisor.run_with_snapshot(&store, provider, SessionWorkKind::Read, |_, observed| {
+                store.remove(provider.key())?;
+                supervisor.disconnect(&store, provider)?;
+                if switch {
+                    store.save(provider.key(), b"second")?;
+                    supervisor.ready(&store, provider, Some("second".into()), Some(CloudAuthMethod::Web), None)?;
+                }
+                supervisor.observe_account(&store, observed.unwrap(), &account)
+            }, |_| panic!("cannot recover an obsolete read"), || Ok(()));
+            assert!(matches!(result, Err(CloudError::AccountMismatch | CloudError::NotAuthorized)));
+            assert_eq!(supervisor.record(&store, provider).unwrap().account_id.as_deref(), switch.then_some("second"));
+        }
+    }
+
+    #[test]
     fn startup_reconnect_replaces_the_persisted_account_owner() {
         let root = tempfile::tempdir().unwrap();
         let state = CloudState::new(root.path().join("sessions")).unwrap();
@@ -630,7 +655,11 @@ mod tests {
             auth_method: CloudAuthMethod::Web,
         };
 
-        record_restored_account(&state, CloudProvider::Uc, &account).unwrap();
+        state.auth_supervisor.run_with_snapshot(
+            &state.store, CloudProvider::Uc, SessionWorkKind::Read,
+            |_, snapshot| state.auth_supervisor.observe_account(&state.store, snapshot.unwrap(), &account),
+            |_| panic!("unexpected recovery"), || Ok(()),
+        ).unwrap();
 
         let record = state
             .auth_supervisor

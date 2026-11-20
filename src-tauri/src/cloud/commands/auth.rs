@@ -525,7 +525,7 @@ pub(crate) async fn validate_current_provider_session(
             return Err(QuarkError::NotAuthorized);
         }
         let account = restore_account(provider, &state.store, http)?;
-        record_provider_account_locked(state, provider, &account)?;
+        state.auth_supervisor.record_verified_account_locked(&state.store, &account)?;
         Ok(account)
     })
     .await
@@ -535,6 +535,10 @@ pub(crate) async fn silently_recover_provider_session(
     app: AppHandle,
     provider: CloudProvider,
 ) -> Result<CloudAccount, QuarkError> {
+    if provider == CloudProvider::Baidu {
+        // Startup and explicit task recovery share the foreground revision and backoff.
+        return cloud_account(app, provider).await;
+    }
     let recovery_app = app.clone();
     run(app, provider, move |state, http| {
         if auth_supervisor::is_manually_disconnected(&state.store, provider)? {
@@ -579,6 +583,9 @@ pub(crate) async fn restore_provider_session(
     app: AppHandle,
     provider: CloudProvider,
 ) -> Result<CloudAccount, QuarkError> {
+    if provider == CloudProvider::Baidu {
+        return cloud_account(app, provider).await;
+    }
     match validate_current_provider_session(app.clone(), provider).await {
         Ok(account) => Ok(account),
         Err(error) if should_attempt_silent_provider_recovery(&error) => {

@@ -1023,6 +1023,10 @@ pub(crate) fn directory_download_failure_fields(
             "pikpak_operation_verification_required",
             "PikPak 需要官方操作验证，请在我的网盘中完成验证后重试",
         ),
+        QuarkError::BaiduDriveVerificationRequired => (
+            "baidu_drive_verification_required",
+            "cloud.verification.baidu.drive",
+        ),
         QuarkError::BaiduOperationVerificationRequired => (
             "baidu_operation_verification_required",
             "baidu_operation_verification_required",

@@ -686,6 +686,26 @@ fn baidu_upload_only_retries_write_token_failure_with_a_verified_profile() {
 }
 
 #[test]
+fn concurrent_baidu_upload_reuses_only_a_verified_revision() {
+    let (supervisor, _, store) = fixture(1000, 30);
+    let provider = CloudProvider::Baidu;
+    store.save("baidu", b"old").unwrap();
+    supervisor.ready(&store, provider, Some("A".into()), None, None).unwrap();
+    let token_error = || CloudError::BaiduUploadAuthorizationRequired(BaiduUploadAuthStage::Token);
+    let mut calls = 0;
+    supervisor.run(&store, provider, SessionWorkKind::Mutation, |snapshot| {
+        calls += 1;
+        if snapshot.load("baidu")?.as_deref() == Some(b"verified") { return Ok(()); }
+        supervisor.run(&store, provider, SessionWorkKind::Mutation,
+            |inner| if inner.load("baidu")?.as_deref() == Some(b"verified") { Ok(()) } else { Err(token_error()) },
+            |_| store.save("baidu", b"verified"),
+        )?;
+        Err(token_error())
+    }, |_| panic!("a second profile recovery should not be needed")).unwrap();
+    assert_eq!(calls, 2);
+}
+
+#[test]
 fn baidu_write_token_probe_failure_preserves_reads_and_is_cooled_down() {
     let (supervisor, _, store) = fixture(1000, 30);
     let provider = CloudProvider::Baidu;
@@ -1019,6 +1039,23 @@ fn recovery_tries_refresh_then_saved_password_then_profile_only_for_real_auth_er
             assert_eq!(*calls.lock().unwrap(), vec!["refresh", "password"]);
         }
     }
+}
+
+#[test]
+fn baidu_uses_existing_profile_before_attempting_another_login() {
+    struct Unused;
+    impl versadown_lib::cloud::driver::ProviderAuth for Unused {
+        fn refresh_session(&mut self) -> Result<bool, CloudError> { panic!("profile already resolved the account") }
+    }
+    let store = MemoryCredentialStore::default();
+    let mut called = 0;
+    recover_in_order(CloudProvider::Baidu, &store, &mut Unused, true, || {
+        called += 1; Ok(true)
+    }).unwrap();
+    assert_eq!(called, 1);
+    assert!(matches!(recover_in_order(CloudProvider::Baidu, &store, &mut Unused, true, || {
+        Err(CloudError::AccountMismatch)
+    }), Err(CloudError::AccountMismatch)));
 }
 
 #[test]

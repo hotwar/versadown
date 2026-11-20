@@ -409,6 +409,8 @@ pub enum CloudError {
     PikpakOperationVerificationRequired(&'static str),
     #[error("baidu_operation_verification_required")]
     BaiduOperationVerificationRequired,
+    #[error("cloud.verification.baidu.drive")]
+    BaiduDriveVerificationRequired,
     #[error("{}", .0.message())]
     BaiduUploadAuthorizationRequired(BaiduUploadAuthStage),
     #[error("区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员")]
@@ -530,6 +532,7 @@ impl Serialize for CloudError {
             Self::PikpakOperationVerificationRequired(_) => {
                 "pikpak_operation_verification_required"
             }
+            Self::BaiduDriveVerificationRequired => "baidu_drive_verification_required",
             Self::BaiduOperationVerificationRequired => "baidu_operation_verification_required",
             Self::BaiduUploadAuthorizationRequired(stage) => stage.code(),
             Self::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",

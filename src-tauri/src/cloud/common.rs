@@ -308,7 +308,7 @@ pub(crate) fn finalize_baidu_web_authorization(
     // Authentication and verification failures map to AuthorizationPending,
     // so frontend polling keeps the window open for the user to finish the
     // official flow instead of creating an immediately-expired tab.
-    authorization_result(client.directory(descriptor.root_directory_id))?;
+    authorization_result(client.validate_login_directory(descriptor.root_directory_id))?;
     select_password_credential_account(store, CloudProvider::Baidu, &account.id)?;
     save_provider_session(CloudProvider::Baidu, store, &session)?;
     Ok(account)

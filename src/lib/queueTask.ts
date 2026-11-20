@@ -19,7 +19,8 @@ export function normalizeQueueTasks(tasks: readonly QueueTaskInput[]): QueueTask
 }
 
 export function downloadErrorMessage(message: string): string {
-  return message === 'download.error.transferredFileUnavailable' ? t(message) : xunleiDownloadMessage(message);
+  return message === 'download.error.transferredFileUnavailable' || message === 'cloud.verification.baidu.drive'
+    ? t(message) : xunleiDownloadMessage(message);
 }
 
 export function isPrivateTask(task: QueueTask): boolean {
