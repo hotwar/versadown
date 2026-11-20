@@ -54,7 +54,7 @@ pub struct AuthSupervisor {
     published: std::sync::Mutex<HashMap<CloudProvider, PublishedSession>>,
     persistence_warning: std::sync::OnceLock<Box<dyn Fn(SessionPersistenceWarning) + Send + Sync>>,
     // Upload-token recovery is independent of the account's read health.
-    baidu_upload_retry: std::sync::Mutex<Option<(uuid::Uuid, i64)>>,
+    baidu_upload_retry: std::sync::Mutex<Option<BaiduUploadRecovery>>,
 }
 
 /// A local persistence failure must not change the outcome of completed work.
@@ -64,6 +64,12 @@ pub struct AuthSupervisor {
 pub struct SessionPersistenceWarning {
     pub provider: CloudProvider,
     pub operation_succeeded: bool,
+}
+
+struct BaiduUploadRecovery {
+    binding: uuid::Uuid,
+    next_attempt_at: i64,
+    verified_revision: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -351,6 +357,58 @@ impl AuthSupervisor {
         self.save(store, &record)?;
         self.publish_locked(store, &record, true)
     }
+    /// Publish a read-side owner observation only for the session that produced it.
+    /// In particular, ordinary account reads do not renew the recovery budget.
+    pub(crate) fn observe_account(
+        &self,
+        store: &impl CredentialStore,
+        observed: &SessionSnapshot,
+        account: &CloudAccount,
+    ) -> Result<(), CloudError> {
+        let provider = observed.provider;
+        self.with_provider(provider, || {
+            let current = self.snapshot(store, provider)?;
+            if current.initial.is_none() || is_manually_disconnected(store, provider)? {
+                return Err(CloudError::NotAuthorized);
+            }
+            if current.binding != observed.binding || account.provider != provider {
+                return Err(CloudError::AccountMismatch);
+            }
+            if (current.revision != observed.revision || store.load(provider.key())? != observed.initial)
+                && current.account_id.as_ref() != Some(&account.id)
+            {
+                return Err(CloudError::AccountMismatch);
+            }
+            self.record_verified_account_locked(store, account)
+        })
+    }
+
+    pub(crate) fn record_verified_account_locked(
+        &self,
+        store: &impl CredentialStore,
+        account: &CloudAccount,
+    ) -> Result<(), CloudError> {
+        let provider = account.provider;
+        let mut record = self.record(store, provider)?;
+        if record.account_id.as_ref() == Some(&account.id)
+            && record.auth_method == Some(account.auth_method)
+        {
+            // The account is usable again. Reads do not grant a new credential
+            // revision or reset the attempt budget for an unrelated operation.
+            if record.health != AuthHealth::Ready {
+                record.health = AuthHealth::Ready;
+                self.save(store, &record)?;
+            }
+            return Ok(());
+        }
+        let replaces_owner = record.account_id.is_some() && record.account_id.as_ref() != Some(&account.id);
+        record.account_id = Some(account.id.clone());
+        record.auth_method = Some(account.auth_method);
+        self.mark_ready(&mut record, session_expiry(store, provider)?);
+        self.save(store, &record)?;
+        self.publish_locked(store, &record, replaces_owner)
+    }
+
     pub fn disconnect(
         &self,
         store: &impl CredentialStore,
@@ -503,12 +561,24 @@ impl AuthSupervisor {
         provider: CloudProvider,
         kind: SessionWorkKind,
         mut work: impl FnMut(&dyn CredentialStore) -> Result<T, CloudError>,
+        recover: impl FnMut(RecoveryPhase) -> Result<(), CloudError>,
+        check: impl Fn() -> Result<(), CloudError>,
+    ) -> Result<T, CloudError> {
+        self.run_with_snapshot(store, provider, kind, |credentials, _| work(credentials), recover, check)
+    }
+
+    pub(crate) fn run_with_snapshot<T>(
+        &self,
+        store: &impl CredentialStore,
+        provider: CloudProvider,
+        kind: SessionWorkKind,
+        mut work: impl FnMut(&dyn CredentialStore, Option<&SessionSnapshot>) -> Result<T, CloudError>,
         mut recover: impl FnMut(RecoveryPhase) -> Result<(), CloudError>,
         check: impl Fn() -> Result<(), CloudError>,
     ) -> Result<T, CloudError> {
         check()?;
         if kind == SessionWorkKind::Logout {
-            return self.with_provider(provider, || work(store));
+            return self.with_provider(provider, || work(store, None));
         }
         if is_manually_disconnected(store, provider)? {
             return Err(CloudError::NotAuthorized);
@@ -537,7 +607,7 @@ impl AuthSupervisor {
         let snapshot = self.snapshot(store, provider)?;
         let revision = snapshot.revision;
         check()?;
-        let result = work(&snapshot);
+        let result = work(&snapshot, Some(&snapshot));
         check()?;
         let revision = match self.persist_snapshot(store, provider, revision, &snapshot, &check) {
             Ok(revision) => revision,
@@ -574,7 +644,7 @@ impl AuthSupervisor {
                     &check,
                 )?;
                 check()?;
-                let result = work(&next);
+                let result = work(&next, Some(&next));
                 if let Err(CloudError::Storage) =
                     self.persist_snapshot(store, provider, next.revision, &next, &check)
                 {
@@ -713,7 +783,7 @@ impl AuthSupervisor {
                 }
                 let revision = next.revision;
                 check()?;
-                let result = work(&next);
+                let result = work(&next, Some(&next));
                 check()?;
                 let revision = match self.persist_snapshot(store, provider, revision, &next, &check) {
                     Ok(revision) => revision,
@@ -755,8 +825,7 @@ impl AuthSupervisor {
             if current.account_id != original.account_id || current.binding != original.binding {
                 return Err(CloudError::AccountMismatch);
             }
-            if current.revision != revision
-                || record.session_revision != revision
+            if record.session_revision != current.revision
                 || record.account_id != current.account_id
                 || current.initial != store.load(provider.key())?
                 || current.account_id.is_none()
@@ -764,15 +833,30 @@ impl AuthSupervisor {
             {
                 return Err(upload_token_error());
             }
+            if current.revision != revision && current.initial.is_some()
+                && self.baidu_upload_retry.lock().map_err(|_| CloudError::Storage)?
+                    .as_ref().is_some_and(|attempt| attempt.binding == current.binding
+                        && attempt.verified_revision == Some(current.revision))
+            {
+                // Another upload already verified and published this exact revision.
+                return Ok(current);
+            }
+            if current.revision != revision {
+                return Err(upload_token_error());
+            }
             let previous = current.initial.as_deref().ok_or_else(upload_token_error)?;
             check()?;
             {
                 let mut attempt = self.baidu_upload_retry.lock().map_err(|_| CloudError::Storage)?;
                 let now = (self.clock)();
-                if attempt.is_some_and(|(binding, until)| binding == current.binding && now < until) {
+                if attempt.as_ref().is_some_and(|attempt| attempt.binding == current.binding && now < attempt.next_attempt_at) {
                     return Err(upload_token_error());
                 }
-                *attempt = Some((current.binding, now.saturating_add(300)));
+                *attempt = Some(BaiduUploadRecovery {
+                    binding: current.binding,
+                    next_attempt_at: now.saturating_add(300),
+                    verified_revision: None,
+                });
             }
 
             // The browser validates the captured account and write token in
@@ -788,11 +872,18 @@ impl AuthSupervisor {
                     store.save(provider.key(), previous)?;
                 }
                 checked?;
-                return Err(upload_token_error());
+                return match recovered {
+                    Err(error @ (CloudError::Transport(_) | CloudError::Storage | CloudError::AccountMismatch
+                        | CloudError::BaiduDriveVerificationRequired)) => Err(error),
+                    _ => Err(upload_token_error()),
+                };
             }
             record.session_revision = record.session_revision.saturating_add(1);
             self.save(store, &record)?;
             self.publish_locked(store, &record, false)?;
+            if let Some(attempt) = self.baidu_upload_retry.lock().map_err(|_| CloudError::Storage)?.as_mut() {
+                attempt.verified_revision = Some(record.session_revision);
+            }
             self.snapshot(store, provider)
         })
     }
@@ -864,6 +955,14 @@ pub fn recover_in_order(
                 | CloudError::WebAuthorizationRequired
         )
     }
+    let prefer_existing_profile = provider == CloudProvider::Baidu && phase == RecoveryPhase::AuthFailure;
+    if prefer_existing_profile {
+        match profile() {
+            Ok(true) => return Ok(()),
+            Ok(false) | Err(CloudError::AuthorizationPending) => {}
+            Err(error) => return Err(error),
+        }
+    }
     if !matches!(
         phase,
         RecoveryPhase::ProfileOnly
@@ -895,7 +994,7 @@ pub fn recover_in_order(
             }
         }
     }
-    if phase != RecoveryPhase::Proactive {
+    if !prefer_existing_profile && phase != RecoveryPhase::Proactive {
         match profile() {
             Ok(true) => return Ok(()),
             Ok(false) | Err(CloudError::AuthorizationPending) => {}

@@ -460,6 +460,9 @@ fn execute_directory_upload_plan(
     match operation {
         Ok(()) => Ok(results),
         Err(error) if crate::cloud::is_upload_cancelled(&error) => Ok(results),
+        // The final write may already exist. Keep the directory so the user
+        // can reconcile its contents before choosing to retry or remove it.
+        Err(error @ QuarkError::BaiduUploadAuthorizationRequired(BaiduUploadAuthStage::Commit)) => Err(error),
         Err(error) => match trash_root(&root_id) {
             Ok(()) => Err(error),
             Err(error) if crate::cloud::is_upload_cancelled(&error) => Ok(results),
@@ -478,9 +481,16 @@ fn upload_selected_path(
     control: crate::cloud::UploadControl,
 ) -> Result<Vec<CloudFile>, QuarkError> {
     control.wait_ready_blocking()?;
-    let transport = ReqwestTransport::new()?;
+    // Keep Baidu's account, directory and upload requests on the same cookie jar.
+    let isolated;
+    let transport = if provider == CloudProvider::Baidu {
+        &state.http
+    } else {
+        isolated = ReqwestTransport::new()?;
+        &isolated
+    };
     let http = crate::cloud::http::ControlledUploadHttp {
-        inner: &transport,
+        inner: transport,
         control: control.clone(),
     };
     match prepared {
@@ -508,6 +518,7 @@ fn upload_error_code(error: &QuarkError) -> &'static str {
         QuarkError::PikpakOperationVerificationRequired(_) => {
             "pikpak_operation_verification_required"
         }
+        QuarkError::BaiduDriveVerificationRequired => "baidu_drive_verification_required",
         QuarkError::BaiduOperationVerificationRequired => "baidu_operation_verification_required",
         QuarkError::BaiduUploadAuthorizationRequired(stage) => stage.code(),
         QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => "web_auth_required",
@@ -1125,6 +1136,22 @@ mod directory_tests {
             ),
             Err(QuarkError::InvalidInput(message)) if message == "百度网盘暂不支持上传空文件"
         ));
+    }
+
+    #[test]
+    fn baidu_directory_upload_keeps_root_for_uncertain_commit() {
+        let plan = DirectoryUploadPlan {
+            root_name: "fixture".into(),
+            entries: vec![DirectoryUploadEntry::File {
+                relative_path: "leaf".into(), source: "leaf".into(), size: 1,
+            }],
+        };
+        let result = execute_directory_upload_plan("parent", plan, || Ok(()),
+            |parent, name| Ok(file("root", parent, name, CloudFileKind::Folder)),
+            |_, _| Err(QuarkError::BaiduUploadAuthorizationRequired(BaiduUploadAuthStage::Commit)),
+            |_| panic!("must preserve possibly committed files"),
+        );
+        assert!(matches!(result, Err(QuarkError::BaiduUploadAuthorizationRequired(BaiduUploadAuthStage::Commit))));
     }
 
     #[test]

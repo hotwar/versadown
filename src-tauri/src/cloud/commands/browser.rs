@@ -363,7 +363,7 @@ fn capture_persistent_authorization(
             driver.auth().complete_web(&input)?
         };
         if account.id != expected {
-            return Err(CloudError::WebAuthorizationRequired);
+            return Err(CloudError::AccountMismatch);
         }
         if provider == CloudProvider::Baidu
             && phase == auth_supervisor::RecoveryPhase::BaiduUploadToken

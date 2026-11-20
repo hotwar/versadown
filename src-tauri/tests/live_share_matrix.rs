@@ -347,7 +347,7 @@ fn error_state(error: &QuarkError) -> &'static str {
         QuarkError::XunleiVerificationUnavailable(_) => "xunlei-verification-unavailable",
         QuarkError::CaptchaRequired => "captcha-required",
         QuarkError::PikpakOperationVerificationRequired(_) => "operation-verification-required",
-        QuarkError::BaiduOperationVerificationRequired => "operation-verification-required",
+        QuarkError::BaiduDriveVerificationRequired | QuarkError::BaiduOperationVerificationRequired => "operation-verification-required",
         QuarkError::BaiduUploadAuthorizationRequired(_) => "baidu-upload-authorization-required",
         QuarkError::PikpakRegionalMembershipRestricted => "regional-membership-restricted",
         QuarkError::AuthorizationPending => "authorization-pending",

@@ -94,7 +94,7 @@ fn error_kind(error: &CloudError) -> &'static str {
         CloudError::AccountMismatch => "account-mismatch",
         CloudError::AuthorizationExpired => "authorization-expired",
         CloudError::WebAuthorizationRequired => "web-authorization-required",
-        CloudError::BaiduOperationVerificationRequired => "baidu-operation-verification-required",
+        CloudError::BaiduDriveVerificationRequired | CloudError::BaiduOperationVerificationRequired => "baidu-operation-verification-required",
         CloudError::CaptchaRequired => "captcha-required",
         CloudError::PikpakRegionalMembershipRestricted => "regional-membership-restricted",
         CloudError::PikpakOperationVerificationRequired(_) => "operation-verification-required",
@@ -110,6 +110,11 @@ fn error_kind(error: &CloudError) -> &'static str {
         CloudError::Provider(_) => "provider",
         CloudError::InvalidInput(_) => "invalid-input",
         CloudError::UploadUnavailable => "upload-unavailable",
+        CloudError::XunleiVerificationUnavailable(_) => "xunlei-verification-unavailable",
+        CloudError::BaiduUploadAuthorizationRequired(_) => "baidu-upload-authorization-required",
+        CloudError::XunleiNativeDownload(_) => "xunlei-native-download-error",
+        CloudError::BaiduTransferPending => "baidu-transfer-pending",
+        CloudError::ShareTransferDownloadUnavailable => "transfer-saved-download-unavailable",
         CloudError::ProviderUnsupported => "provider-unsupported",
     }
 }

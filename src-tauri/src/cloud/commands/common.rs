@@ -49,6 +49,7 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
         QuarkError::PikpakOperationVerificationRequired(_) => {
             "PikPak 需要官方操作验证，请在我的网盘中完成验证后重试".into()
         }
+        QuarkError::BaiduDriveVerificationRequired => error.to_string(),
         QuarkError::BaiduOperationVerificationRequired => {
             "baidu_operation_verification_required".into()
         }
@@ -101,6 +102,7 @@ pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
         QuarkError::PikpakOperationVerificationRequired(_) => {
             "pikpak_operation_verification_required"
         }
+        QuarkError::BaiduDriveVerificationRequired => "baidu_drive_verification_required",
         QuarkError::BaiduOperationVerificationRequired => "baidu_operation_verification_required",
         QuarkError::BaiduUploadAuthorizationRequired(stage) => stage.code(),
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
@@ -201,7 +203,8 @@ async fn run_initialized<T: Send + 'static>(
 
 pub(crate) struct SessionWorkContext<'a> {
     pub store: crate::cloud::driver::StoreRef<'a>,
-    state: &'a CloudState,
+    pub(super) snapshot: Option<&'a auth_supervisor::SessionSnapshot>,
+    pub(super) state: &'a CloudState,
 }
 impl std::ops::Deref for SessionWorkContext<'_> {
     type Target = CloudState;
@@ -238,14 +241,15 @@ pub(crate) async fn run_session_work_checked<T: Send + 'static>(
         },
         provider,
         move |state, http| {
-            state.auth_supervisor.run_checked(
+            state.auth_supervisor.run_with_snapshot(
                 &state.store,
                 provider,
                 kind,
-                |snapshot| {
+                |credentials, snapshot| {
                     work(
                         &SessionWorkContext {
-                            store: crate::cloud::driver::StoreRef(snapshot),
+                            store: crate::cloud::driver::StoreRef(credentials),
+                            snapshot,
                             state,
                         },
                         http,

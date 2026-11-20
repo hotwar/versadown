@@ -2338,6 +2338,74 @@ it.each(['web_auth_required', 'credentials_expired'])('preserves the Xunlei dire
   expect(screen.getByRole('alert')).toHaveTextContent('读取目录需要网页验证');
 });
 
+it('keeps Baidu signed in and retries the same share listing after operation verification', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake();
+  client.listCloudShares.mockRejectedValueOnce({ code: 'baidu_drive_verification_required', message: '网页验证' });
+  render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'web' }} restoreOnMount={false} />);
+
+  await user.dblClick(await screen.findByText('我的分享'));
+  expect(await screen.findByRole('alert')).toHaveTextContent(t('cloud.verification.baidu.drive'));
+  expect(screen.getByRole('button', { name: '退出授权' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: /重新网页授权|打开百度网盘官方回收站验证/ })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: t('common.retryAction') }));
+  expect(await screen.findByText(t('cloud.empty.myShares.title'))).toBeVisible();
+  expect(client.listCloudShares).toHaveBeenCalledTimes(2);
+  expect(client.listCloudDirectory).toHaveBeenCalledTimes(1);
+  expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
+});
+
+it.each(['provider_error', 'network_error'])('keeps a typed %s separate from a login challenge', async code => {
+  const user = userEvent.setup();
+  const client = createCloudFake();
+  client.createCloudDirectory.mockRejectedValueOnce({ code, message: '网页验证服务连接中断' });
+  render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'web' }} restoreOnMount={false} />);
+  await screen.findByRole('tree');
+  await user.click(screen.getByRole('button', { name: '新建目录' }));
+  await user.type(screen.getByRole('textbox', { name: '目录名称' }), '资料');
+  await user.click(screen.getByRole('button', { name: '确认新建目录' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('网页验证服务连接中断');
+  expect(screen.queryByRole('button', { name: /重新网页授权|授权并继续/ })).not.toBeInTheDocument();
+  expect(client.createCloudDirectory).toHaveBeenCalledTimes(1);
+});
+
+it.each(['success', 'challenge'])('ignores a late share %s after the user returns to the root', async result => {
+  const user = userEvent.setup();
+  const client = createCloudFake();
+  render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'web' }} restoreOnMount={false} />);
+  await user.dblClick(await screen.findByText('我的分享'));
+  await screen.findByText(t('cloud.empty.myShares.title'));
+  let finish!: () => void;
+  client.listCloudShares.mockImplementationOnce(() => new Promise((resolve, reject) => {
+    finish = () => result === 'success' ? resolve([]) : reject({ code: 'credentials_expired' });
+  }));
+  await user.click(screen.getByRole('button', { name: '刷新' }));
+  await user.click(screen.getByRole('button', { name: t('cloud.root') }));
+  await screen.findByText('报告.pdf');
+  await act(async () => { finish(); });
+  expect(screen.getByText('报告.pdf')).toBeVisible();
+  expect(screen.queryByRole('button', { name: /重新网页授权|授权并继续/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+it('ignores an earlier account restore and directory challenge after logout', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake();
+  const account = { id: 'b-1', displayName: 'alice', provider: 'baidu' as const, authMethod: 'web' as const };
+  let finishRestore!: (value: typeof account) => void;
+  let rejectDirectory!: (reason: unknown) => void;
+  client.getCloudAccount.mockImplementationOnce(() => new Promise(resolve => { finishRestore = resolve; }));
+  client.listCloudDirectory.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectDirectory = reject; }));
+  render(<CloudManager provider="baidu" client={client} initialAccount={account} />);
+  await user.click(screen.getByRole('button', { name: '退出授权' }));
+  await user.click(screen.getByRole('button', { name: '确认退出授权' }));
+  await screen.findByRole('region', { name: '百度网盘账号授权' });
+  await act(async () => { finishRestore(account); rejectDirectory({ code: 'credentials_expired' }); });
+  expect(screen.getByRole('region', { name: '百度网盘账号授权' })).toBeVisible();
+  expect(screen.queryByText(/读取目录需要|凭据已过期/)).not.toBeInTheDocument();
+  expect(client.listCloudDirectory).toHaveBeenCalledTimes(1);
+});
+
 it('resumes loading the requested nested directory instead of returning to the root after authorization', async () => {
   const user = userEvent.setup();
   const listCloudDirectory = vi.fn()

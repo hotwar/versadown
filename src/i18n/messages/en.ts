@@ -466,6 +466,7 @@ const messages = {
   'cloud.upload.baiduSessionUnavailable': 'VD could not restore the Baidu upload session automatically. Your current sign-in is preserved. Check that uploads work on the Baidu Netdisk website before retrying.',
   'cloud.upload.baiduVerificationRequired': 'Baidu rejected the upload request. Check your upload permissions and complete any requested verification on the Baidu Netdisk website.',
   'cloud.upload.baiduResultUncertain': 'Baidu did not confirm the upload result. Check the destination for the file before retrying.',
+  'cloud.verification.baidu.drive': 'Baidu Netdisk requires verification for this operation. Complete the requested verification on the Baidu Netdisk website, then return and retry.',
   'cloud.verification.baidu.required': 'Baidu Netdisk requires security verification. Open its official recycle bin, complete verification, then return and retry permanent deletion.',
   'cloud.verification.baidu.open': 'Open Baidu recycle bin for verification',
   'cloud.verification.baidu.opened': 'Complete verification on Baidu Netdisk, then return and select “I have verified”. Files will not be permanently deleted automatically.',
