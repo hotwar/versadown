@@ -226,6 +226,19 @@ mod tests {
     }
 
     #[test]
+    fn baidu_upload_distinguishes_expired_account_and_operation_verification() {
+        let http = Http::new(vec![json!({"errno":-6}), json!({"errno":-6})]);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
+        assert!(matches!(client.upload_web_token(), Err(QuarkError::AuthorizationExpired)));
+        assert_eq!(http.requests.lock().unwrap().len(), 2);
+
+        let http = Http::new(vec![json!({"errno":-20})]);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
+        assert!(matches!(client.upload_web_token(), Err(QuarkError::BaiduDriveVerificationRequired)));
+        assert_eq!(http.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
     fn baidu_upload_propagates_malformed_account_response_without_requesting_login() {
         let http = Http::new(vec![json!({"errno":-6}), json!({"errno":0})]);
         let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
@@ -2099,9 +2112,10 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
                 self.account()?;
                 let response = self.http.send(request)?;
                 match baidu_personal_json(&response, stage) {
-                    Err(QuarkError::AuthorizationExpired) if stage.is_none() => {
-                        Err(baidu_request_rejected(&response))
-                    }
+                    Err(QuarkError::AuthorizationExpired) => match stage {
+                        Some(stage) => Err(QuarkError::BaiduUploadAuthorizationRequired(stage)),
+                        None => Err(baidu_request_rejected(&response)),
+                    },
                     result => result,
                 }
             }
@@ -2976,9 +2990,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
     }
 
     fn upload_web_token(&self) -> Result<String, QuarkError> {
-        let stage = BaiduUploadAuthStage::Token;
-        self.web_token_at_stage(Some(stage))
-            .map_err(|error| baidu_upload_auth_error(stage, error))
+        self.web_token_at_stage(Some(BaiduUploadAuthStage::Token))
     }
 
     fn web_token_at_stage(&self, stage: Option<BaiduUploadAuthStage>) -> Result<String, QuarkError> {
@@ -3376,7 +3388,7 @@ fn baidu_personal_json(
     stage: Option<BaiduUploadAuthStage>,
 ) -> Result<Value, QuarkError> {
     match baidu_json_at_stage(response, stage) {
-        Err(QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired) if stage.is_none() => {
+        Err(QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired) => {
             Err(QuarkError::BaiduDriveVerificationRequired)
         }
         result => result,
