@@ -166,7 +166,10 @@ fn desktop_baidu_upload() -> Result<(), String> {
     let id = uuid::Uuid::new_v4();
     let name = format!("VD-desktop-upload-{id}.bin");
     let source = tmp.path().join(&name);
-    let bytes = id.as_bytes().repeat(65_537);
+    let repeats = if std::env::var("VERSADOWN_LIVE_BAIDU_MULTIPART").as_deref() == Ok("1") {
+        524_289
+    } else { 65_537 };
+    let bytes = id.as_bytes().repeat(repeats);
     std::fs::write(&source, &bytes).map_err(|_| "write local fixture")?;
     // Opening Baidu's drive in the desktop UI displays the account and lists the parent.
     client.account().map_err(|_| "open account")?;
