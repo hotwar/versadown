@@ -334,7 +334,10 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
             }),
             Err(CloudError::WebAuthorizationRequired)
         ));
-        let expected = if direct {
+        let expected = if provider == Baidu {
+            // Reuse Baidu's existing browser session before another login attempt.
+            vec!["profile", "refresh", "password"]
+        } else if direct {
             vec!["refresh", "password", "profile"]
         } else {
             vec!["refresh", "profile"]
