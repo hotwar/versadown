@@ -63,6 +63,16 @@ jobs:
           pnpm exec vitest run src/lib/api.test.ts src/lib/downloadEvents.test.ts src/lib/launcherWindow.test.ts src/lib/mainWindow.test.ts src/lib/windowCapabilities.test.ts src/components/LauncherWindow.test.tsx src/components/FloatingLauncher.test.tsx src/components/StartupNotice.test.tsx src/components/SettingsPanel.test.tsx src/components/LocalUploadPicker.test.tsx src/components/CloudManager.test.tsx src/App.live.test.tsx src/i18n/index.test.ts --exclude '.worktrees/**'
           node --test scripts/bundle-resource-config.test.mjs scripts/prepare-video-extractor.test.mjs
           node --test scripts/test-xunlei-auth-plugin.cjs
+      - name: Check Agent CLI, MCP and task permissions
+        run: |
+          pnpm exec vitest run src/components/AgentAccessSettings.test.tsx src/components/AgentCloudGrants.test.tsx src/components/AgentConnect.test.tsx src/components/AgentInteractionWindow.test.tsx --exclude '.worktrees/**'
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cli_
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib agent_
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --bin vd-cli --bin vd-mcp-server
+      - name: Check cloud login completion and shared upload handling
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib browser_password
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib upload_commands
       - name: Check Thunder cloud download engine
         run: |
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib xunlei_native
