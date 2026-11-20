@@ -464,7 +464,7 @@ const messages = {
   'cloud.operation.listRefreshFailed': '{name} completed, but the list could not refresh. Refresh the list to verify the result.',
   'cloud.error.baiduTransferPending': 'The Baidu transfer is still running or its result is unknown. Check your Baidu Netdisk before retrying to avoid duplicate copies.',
   'cloud.upload.baiduSessionUnavailable': 'VD could not restore the Baidu upload session automatically. Your current sign-in is preserved. Check that uploads work on the Baidu Netdisk website before retrying.',
-  'cloud.upload.baiduPasswordUploadRejected': 'Baidu rejected the upload request from this password sign-in session. File transfer has not started.',
+  'cloud.upload.baiduLoginExpired': 'Your Baidu Netdisk sign-in has expired. File transfer has not started.',
   'cloud.upload.baiduUpgradeAuthorization': 'Sign in to the same Baidu account in the VD authorization window. VD will retry the affected files in their original destination.',
   'cloud.upload.baiduPrecreateRejected': 'Baidu rejected the request to start this upload. File transfer has not started.',
   'cloud.upload.baiduVerificationRequired': 'Baidu requires verification before this upload can start. Complete verification on the Baidu Netdisk website, then retry.',

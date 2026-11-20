@@ -141,7 +141,7 @@ function isAuthorizationPending(error: unknown) {
 
 function baiduUploadMessageKey(code: unknown) {
   switch (code) {
-    case 'baidu_upload_web_session_required': return 'cloud.upload.baiduPasswordUploadRejected';
+    case 'baidu_upload_web_session_required': return 'cloud.upload.baiduLoginExpired';
     case 'baidu_upload_session_required': return 'cloud.upload.baiduSessionUnavailable';
     case 'baidu_upload_precreate_rejected': return 'cloud.upload.baiduPrecreateRejected';
     case 'baidu_upload_verification_required': return 'cloud.upload.baiduVerificationRequired';
@@ -904,15 +904,22 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
 
   useEffect(() => () => { directoryRequestSequence.current += 1; }, [client, provider]);
 
-  async function loadDirectory(account: CloudAccount, parentId: string, nextBreadcrumbs: readonly Breadcrumb[]) {
+  async function loadDirectory(
+    account: CloudAccount,
+    parentId: string,
+    nextBreadcrumbs: readonly Breadcrumb[],
+    purpose: 'browse' | 'confirmUpload' = 'browse'
+  ) {
     const requestId = ++directoryRequestSequence.current;
-    if (pendingAuthorizationAction.current?.directoryRead) {
-      pendingAuthorizationAction.current = null;
-      setPendingAuthorizationName(null);
-      setReauthorizationRequired(false);
-      setOperation(current => current?.kind === 'error' ? null : current);
+    if (purpose === 'browse') {
+      if (pendingAuthorizationAction.current?.directoryRead) {
+        pendingAuthorizationAction.current = null;
+        setPendingAuthorizationName(null);
+        setReauthorizationRequired(false);
+        setOperation(current => current?.kind === 'error' ? null : current);
+      }
+      setDirectoryState('loading');
     }
-    setDirectoryState('loading');
     setSelectedIds([]);
     setContextMenu(null);
     selectionAnchor.current = null;
@@ -946,6 +953,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       return visibleDirectory;
     } catch (error) {
       if (requestId !== directoryRequestSequence.current) return null;
+      if (purpose === 'confirmUpload') throw error;
       if (provider === 'xunlei' && (
         isXunleiVerificationFailure(error, 'metadata_expired')
         || isXunleiVerificationFailure(error, 'metadata_missing')
@@ -1017,7 +1025,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     const destinations = [...new Set(topLevel.map((file) => file.parentId))];
     let destinationName: string | undefined;
     if (destinations.length === 1 && destinations[0] !== parentId) {
-      const original = await loadDirectory(account, parentId, nextBreadcrumbs);
+      const original = await loadDirectory(account, parentId, nextBreadcrumbs, 'confirmUpload');
       if (!original) return { loaded: false, confirmed: false };
       const targetId = destinations[0];
       const target = original.items.find((file) => file.id === targetId && file.kind === 'folder');
@@ -1031,21 +1039,15 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     }
     for (const delay of DIRECTORY_INDEX_CONFIRMATION_DELAYS_MS) {
       if (delay > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
-      const refreshed = await loadDirectory(account, parentId, nextBreadcrumbs);
+      const refreshed = await loadDirectory(account, parentId, nextBreadcrumbs, 'confirmUpload');
       if (!refreshed) return { loaded: false, confirmed: false };
       // Mixed file/directory batches may have more than one actual destination.
       // Confirm each one without navigating repeatedly between directories.
       const listings = new Map([[parentId, refreshed]]);
-      let lookupFailed = false;
       for (const targetId of destinations) {
-        if (listings.has(targetId)) continue;
-        try {
-          listings.set(targetId, await client.listCloudDirectory(provider, targetId));
-        } catch {
-          lookupFailed = true;
-        }
+        if (!listings.has(targetId)) listings.set(targetId, await client.listCloudDirectory(provider, targetId));
       }
-      if (!lookupFailed && topLevel.every((file) => listings.get(file.parentId)?.items.some((item) => item.id === file.id))) {
+      if (topLevel.every((file) => listings.get(file.parentId)?.items.some((item) => item.id === file.id))) {
         return { loaded: true, confirmed: true, destinationName };
       }
     }
@@ -1306,16 +1308,18 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         // The upload result is authoritative even when the follow-up listing fails.
         setUploadResult(report);
         setOperation(report);
-        const directoryRefresh = refresh
-          ? await refreshUploadedDirectory(activeAccount, currentDirectoryId, breadcrumbs, result.uploaded)
-          : { loaded: true, confirmed: true, destinationName: undefined };
-        if (!directoryRefresh.loaded) return;
-        const destinationMessage = directoryRefresh.destinationName
-          ? t('cloud.upload.destination', { name: directoryRefresh.destinationName }) : '';
-        const finalReport = {
-          ...report,
-          message: `${report.message}${destinationMessage}${directoryRefresh.confirmed ? '' : t('cloud.directoryNotSynced')}`,
-        };
+        let directoryNotice = '';
+        if (refresh && result.uploaded.length > 0) {
+          try {
+            const confirmation = await refreshUploadedDirectory(activeAccount, currentDirectoryId, breadcrumbs, result.uploaded);
+            if (confirmation.destinationName) directoryNotice = t('cloud.upload.destination', { name: confirmation.destinationName });
+            if (!confirmation.confirmed) directoryNotice += t('cloud.directoryNotSynced');
+          } catch (error) {
+            const detail = errorMessage(error, '');
+            directoryNotice = ` ${t('cloud.operation.listRefreshFailed', { name: operationLabel })}${detail ? ` ${detail}` : ''}`;
+          }
+        }
+        const finalReport = { ...report, message: report.message + directoryNotice };
         setUploadResult(finalReport);
         if (result.cancelled) {
           setOperation(finalReport);

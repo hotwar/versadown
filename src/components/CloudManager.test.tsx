@@ -181,8 +181,8 @@ it('retains the upload outcome even if refreshing the remote directory fails', a
   client.listCloudDirectory.mockRejectedValue(new Error('列表请求超时'));
   await user.click(screen.getByRole('button', { name: '上传', exact: true }));
   await confirmAllLocalUploads(user);
-  expect(await screen.findByText('已上传 1 项')).toBeVisible();
-  expect(screen.getByText('列表请求超时')).toBeVisible();
+  expect(await screen.findByText(/已上传 1 项.*列表刷新失败.*列表请求超时/)).toBeVisible();
+  expect(screen.getByRole('tree')).toBeVisible();
 });
 
 it('consumes external authorization received during upload after a delayed directory refresh settles', async () => {
@@ -2501,6 +2501,37 @@ it('treats closing the upload picker as a cancellation instead of a success', as
   expect(screen.queryByText(/上传成功|已上传/)).not.toBeInTheDocument();
 });
 
+it.each([false, true])('preserves the upload receipt when directory confirmation asks for authorization (partial=%s)', async (partial) => {
+  const user = userEvent.setup();
+  const uploaded = [{ id: 'uploaded', parentId: '/', name: 'a.txt', kind: 'file' as const }];
+  const failures = partial
+    ? [{ inputIndex: 1, itemName: 'b.txt', code: 'baidu_upload_precreate_rejected', message: 'HTTP 200, errno -6' }]
+    : [];
+  const listCloudDirectory = vi.fn()
+    .mockResolvedValueOnce({ id: '/', items: [{ id: 'existing', parentId: '/', name: '现有文件.txt', kind: 'file' }] })
+    .mockRejectedValue({ code: 'credentials_expired', message: '会话失效' });
+  const client = createCloudFake({
+    listCloudDirectory,
+    uploadCloudFiles: vi.fn().mockResolvedValue({ uploaded, failures }),
+  });
+  render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'web' }} restoreOnMount={false} />);
+
+  await screen.findByText('现有文件.txt');
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await confirmAllLocalUploads(user);
+  const receipt = partial ? /成功 1 项，失败 1 项.*HTTP 200, errno -6/ : /已上传 1 项/;
+  expect((await screen.findAllByText(text => receipt.test(text) && text.includes('列表刷新失败')))[0]).toBeVisible();
+  expect(screen.getByText('现有文件.txt')).toBeVisible();
+  expect(listCloudDirectory).toHaveBeenCalledTimes(2);
+  expect(screen.queryByRole('button', { name: /授权并继续/ })).not.toBeInTheDocument();
+  expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
+  expect(client.uploadCloudFiles).toHaveBeenCalledTimes(1);
+
+  await user.click(screen.getByRole('button', { name: '刷新', exact: true }));
+  expect(await screen.findByRole('button', { name: /授权并继续加载目录/ })).toBeVisible();
+  expect(listCloudDirectory).toHaveBeenCalledTimes(3);
+});
+
 it.each([
   ['baidu_upload_session_required', '', /百度上传会话未能自动恢复/],
   ['baidu_upload_precreate_rejected', 'HTTP 200, errno -6', /百度拒绝创建上传任务，文件尚未开始传输。 HTTP 200, errno -6/],
@@ -2559,6 +2590,7 @@ it('resumes a Baidu password upload once after the user authorizes the same acco
   await waitFor(() => expect(uploadCloudFiles).toHaveBeenCalledTimes(2));
   expect(uploadCloudFiles).toHaveBeenNthCalledWith(2, 'baidu', 'folder-1', ['C:/b.txt'], expect.any(Function), 'b-1');
   expect(client.listLocalUploadEntries).toHaveBeenCalledTimes(1);
+  expect(client.listCloudDirectory).toHaveBeenCalledTimes(2);
   expect(screen.queryByRole('button', authorize)).not.toBeInTheDocument();
   expect(client.beginCloudAuthorization).toHaveBeenCalledTimes(2);
 });
@@ -2592,7 +2624,7 @@ it.each([[undefined], [2], [0, 0]])('keeps a Baidu upload with unmatchable faile
   await screen.findByRole('tree');
   await user.click(screen.getByRole('button', { name: '上传', exact: true }));
   await confirmAllLocalUploads(user);
-  expect((await screen.findAllByText(/百度拒绝使用当前密码登录会话/))[0]).toBeVisible();
+  expect((await screen.findAllByText(/百度网盘登录已失效/))[0]).toBeVisible();
   expect(screen.queryByRole('button', { name: /授权并继续上传/ })).not.toBeInTheDocument();
   expect(client.uploadCloudFiles).toHaveBeenCalledTimes(1);
 });
@@ -2632,7 +2664,7 @@ it('keeps selected upload paths and retries only authorization-failed files afte
 it.each([
   ['部分成功', [{ id: 'uploaded', parentId: '0', name: '成功.txt', kind: 'file' as const }]],
   ['全部失败', []]
-])('refreshes after an upload %s and reports the retained failures', async (_label, uploaded) => {
+])('refreshes only confirmed uploads after %s and reports the retained failures', async (_label, uploaded) => {
   const user = userEvent.setup();
   const listCloudDirectory = vi.fn()
     .mockResolvedValueOnce({ id: '0', items: [] })
@@ -2651,7 +2683,7 @@ it.each([
 
   await confirmAllLocalUploads(user);
   expect(await screen.findByRole('alert')).toHaveTextContent(`成功 ${uploaded.length} 项，失败 1 项：失败.txt：网络中断`);
-  expect(listCloudDirectory).toHaveBeenCalledTimes(2);
+  expect(listCloudDirectory).toHaveBeenCalledTimes(uploaded.length ? 2 : 1);
 });
 
 it('opens Baidu recycle-bin verification and waits for an explicit retry of permanent deletion', async () => {

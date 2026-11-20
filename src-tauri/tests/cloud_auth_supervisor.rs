@@ -757,6 +757,33 @@ fn baidu_rejected_upload_after_dispatch_does_not_attempt_recovery() {
 }
 
 #[test]
+fn baidu_upload_confirmed_account_expiry_maintains_once_without_replaying_the_write() {
+    for silent_renewal in [true, false] {
+        let (supervisor, _, store) = fixture(1000, 30);
+        let provider = CloudProvider::Baidu;
+        store.save("baidu", b"old").unwrap();
+        supervisor.ready(&store, provider, Some("A".into()), None, None).unwrap();
+        let mut writes = 0;
+        let mut recoveries = 0;
+        let result: Result<(), _> = supervisor.run(
+            &store, provider, SessionWorkKind::Mutation,
+            |_| { writes += 1; Err(CloudError::BaiduUploadWebSessionRequired) },
+            |phase| {
+                assert!(phase == RecoveryPhase::AuthFailure);
+                recoveries += 1;
+                if silent_renewal { store.save("baidu", b"renewed") } else { Err(CloudError::WebAuthorizationRequired) }
+            },
+        );
+        if silent_renewal {
+            assert!(matches!(result, Err(CloudError::SessionRenewedRetryOperation)));
+        } else {
+            assert!(matches!(result, Err(CloudError::BaiduUploadWebSessionRequired)));
+        }
+        assert_eq!((writes, recoveries), (1, 1));
+    }
+}
+
+#[test]
 fn baidu_upload_cancellation_during_recovery_rejects_the_candidate() {
     let (supervisor, _, store) = fixture(1000, 30);
     let provider = CloudProvider::Baidu;

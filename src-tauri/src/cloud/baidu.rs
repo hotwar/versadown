@@ -293,11 +293,15 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), b"upload fixture").unwrap();
         for errno in [-6, 6, -20, 110, 31045] {
-            let http = Http::new(vec![
+            let mut responses = vec![
                 json!({"errno":0,"result":{"bdstoken":"fixture"}}),
                 json!({"errno":errno,"vcode":"0","errmsg":"untrusted response"}),
-                json!({"errno":0,"list":[]}),
-            ]);
+            ];
+            if errno == -6 {
+                responses.push(json!({"errno":0,"user":{"uk":7}}));
+            }
+            responses.push(json!({"errno":0,"list":[]}));
+            let http = Http::new(responses);
             let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
             let error = client.upload_file("/", file.path(), &http).unwrap_err();
             assert!(!error.is_session_level());
@@ -307,26 +311,41 @@ mod tests {
             );
             client.directory("/").unwrap();
             let requests = http.requests.lock().unwrap();
-            assert_eq!(requests.len(), 3);
+            assert_eq!(requests.len(), if errno == -6 { 4 } else { 3 });
             assert_eq!(requests.iter().filter(|r| r.method == "POST").count(), 1);
             assert!(requests[1].url.contains("/api/precreate?"));
         }
     }
 
     #[test]
-    fn baidu_upload_password_session_rejected_before_transfer_can_renew_in_vd() {
+    fn baidu_upload_checks_account_before_requesting_login_for_a_rejected_precreate() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), b"upload fixture").unwrap();
-        let mut session = BaiduSession::cookie("BDUSS=fixture");
-        session.auth_method = CloudAuthMethod::Password;
-        let http = Http::new(vec![
-            json!({"errno":0, "result":{"bdstoken":"fixture"}}),
-            json!({"errno":-6}),
-        ]);
-        let error = BaiduClient::new(session, &http).upload_file("/", file.path(), &http).unwrap_err();
-        assert!(matches!(error, QuarkError::BaiduUploadWebSessionRequired));
-        assert!(!error.is_session_level());
-        assert_eq!(http.requests.lock().unwrap().len(), 2);
+        for method in [CloudAuthMethod::Password, CloudAuthMethod::Web] {
+            for (account_response, expired) in [
+                (json!({"errno":0,"user":{"uk":7}}), false),
+                (json!({"errno":0}), false),
+                (json!({"errno":-6}), true),
+            ] {
+                let session = BaiduSession { auth_method: method, ..BaiduSession::cookie("BDUSS=fixture") };
+                let http = Http::new(vec![
+                    json!({"errno":0,"result":{"bdstoken":"fixture"}}),
+                    json!({"errno":-6}),
+                    account_response,
+                ]);
+                let error = BaiduClient::new(session, &http).upload_file("/", file.path(), &http).unwrap_err();
+                if expired {
+                    assert!(matches!(error, QuarkError::BaiduUploadWebSessionRequired));
+                } else {
+                    assert!(matches!(error, QuarkError::BaiduUploadPrecreateRejected { status: 200, errno: Some(-6) }));
+                }
+                let requests = http.requests.lock().unwrap();
+                assert_eq!(requests.len(), 3);
+                assert_eq!(requests.iter().filter(|r| r.method == "POST").count(), 1);
+                assert!(requests[1].url.contains("/api/precreate?"));
+                assert!(requests[2].method == "GET" && requests[2].url.contains("method=uinfo"));
+            }
+        }
     }
 
     #[test]
@@ -2851,11 +2870,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
                 ("rtype", "3".into()),
                 ("block_list", json!(blocks).to_string()),
             ]),
-        ).map_err(|error| match error {
-            QuarkError::BaiduUploadPrecreateRejected { status: 200, errno: Some(-6) }
-                if self.session.auth_method == CloudAuthMethod::Password => QuarkError::BaiduUploadWebSessionRequired,
-            other => other,
-        })?;
+        )?;
         // A zero-slice/rapid-upload response still needs the normal create
         // commit unless the service has already returned a concrete file.
         // Treating precreate itself as a completed file loses valid rapid
@@ -3119,14 +3134,23 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         query: &str,
         body: String,
     ) -> Result<Value, QuarkError> {
-        self.web_form_response(path, query, body)
+        let result = self.web_form_response(path, query, body)
             .and_then(|response| {
                 if stage == BaiduUploadAuthStage::Commit && response.status >= 500 {
                     return Err(QuarkError::BaiduUploadAuthorizationRequired(stage));
                 }
                 baidu_json_at_stage(&response, Some(stage))
             })
-            .map_err(|error| baidu_upload_auth_error(stage, error))
+            .map_err(|error| baidu_upload_auth_error(stage, error));
+        if matches!(result, Err(QuarkError::BaiduUploadPrecreateRejected { status: 200, errno: Some(-6) })) {
+            // A rejected write can coexist with a valid login. Only the account
+            // endpoint can confirm expiry. Never replay the POST to diagnose it.
+            let identity = self.account();
+            if matches!(identity, Err(QuarkError::AuthorizationExpired | QuarkError::NotAuthorized)) {
+                return Err(QuarkError::BaiduUploadWebSessionRequired);
+            }
+        }
+        result
     }
 
     fn web_form_response(

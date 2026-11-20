@@ -456,7 +456,7 @@ const messages = {
   'cloud.credentialsExpiredWithPeriod': '登录凭据已过期。',
   'cloud.upload.recoveredRetryFailures': '已自动恢复登录；成功 {succeeded} 项，失败 {failed} 项，请重试失败项目',
   'cloud.upload.baiduSessionUnavailable': '百度上传会话未能自动恢复。VD 已保留当前登录，请在百度网盘网页版确认上传可用后重试。',
-  'cloud.upload.baiduPasswordUploadRejected': '百度拒绝使用当前密码登录会话创建上传任务，文件尚未开始传输。',
+  'cloud.upload.baiduLoginExpired': '百度网盘登录已失效，文件尚未开始传输。',
   'cloud.upload.baiduUpgradeAuthorization': '请在 VD 授权窗口中使用原百度账号登录。授权完成后，VD 会在原目录重试尚未开始传输的文件。',
   'cloud.upload.baiduPrecreateRejected': '百度拒绝创建上传任务，文件尚未开始传输。',
   'cloud.upload.baiduVerificationRequired': '百度要求在上传前完成网页验证。请到百度网盘网页版完成验证后重试。',
