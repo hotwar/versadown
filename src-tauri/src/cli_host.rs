@@ -260,8 +260,10 @@ mod tests {
         use std::os::windows::ffi::OsStrExt;
         use windows::{core::{PCWSTR, PWSTR}, Win32::{
             Foundation::{HLOCAL, LocalFree},
-            Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-                Authorization::{GetNamedSecurityInfoW, ConvertSecurityDescriptorToStringSecurityDescriptorW, SE_FILE_OBJECT, SDDL_REVISION_1}},
+            Security::{ACCESS_ALLOWED_ACE, CONTAINER_INHERIT_ACE, DACL_SECURITY_INFORMATION,
+                GetAce, INHERITED_ACE, OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID,
+                Authorization::{GetNamedSecurityInfoW, ConvertSidToStringSidW, SE_FILE_OBJECT}},
+            Storage::FileSystem::FILE_ALL_ACCESS,
         }};
         let temp = tempfile::tempdir().unwrap();
         let directory = temp.path().join("cli");
@@ -281,16 +283,29 @@ mod tests {
                 GetNamedSecurityInfoW(PCWSTR(wide.as_ptr()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
                     None, None, Some(&mut dacl), None, &mut descriptor).ok().unwrap();
                 assert!(!dacl.is_null());
-                let count = (*dacl).AceCount;
+                assert_eq!((*dacl).AceCount, 1, "only the current user may access discovery");
+                let mut raw_ace = std::ptr::null_mut();
+                GetAce(dacl, 0, &mut raw_ace).unwrap();
+                let ace = raw_ace.cast::<ACCESS_ALLOWED_ACE>();
+                assert_eq!((*ace).Header.AceType, 0, "expected ACCESS_ALLOWED_ACE_TYPE");
+                let access_mask = (*ace).Mask;
+                let inheritance = (*ace).Header.AceFlags;
+                // SDDL may abbreviate the current user to LA on administrator
+                // runners. Compare the ACE's numeric SID, not its display alias.
+                let trustee = PSID(std::ptr::addr_of_mut!((*ace).SidStart).cast());
                 let mut text = PWSTR::null();
-                ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, SDDL_REVISION_1,
-                    DACL_SECURITY_INFORMATION, &mut text, None).unwrap();
-                let text_value = text.to_string().unwrap();
+                ConvertSidToStringSidW(trustee, &mut text).unwrap();
+                let trustee_sid = text.to_string().unwrap();
                 let _ = LocalFree(Some(HLOCAL(text.0.cast())));
                 let _ = LocalFree(Some(HLOCAL(descriptor.0)));
-                assert_eq!(count, 1, "unexpected ACL: {text_value}");
-                assert!(text_value.contains(&format!(";;;{sid})")), "wrong owner: {text_value}");
-                assert!(!text_value.contains(";;;WD)"));
+                assert_eq!(trustee_sid, sid, "wrong discovery trustee");
+                assert_eq!(access_mask, FILE_ALL_ACCESS.0, "current user requires full control");
+                let expected_flags = if path == &directory {
+                    (OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE).0 as u8
+                } else {
+                    INHERITED_ACE.0 as u8
+                };
+                assert_eq!(inheritance, expected_flags, "discovery file must inherit the owner ACL");
             }
         }
     }

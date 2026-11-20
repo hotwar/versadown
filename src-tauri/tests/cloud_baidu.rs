@@ -219,16 +219,19 @@ impl CloudHttpTransport for RecordingHttp {
 struct IsolatedState {
     replies: Mutex<Vec<CloudHttpResponse>>,
     requests: Mutex<Vec<CloudHttpRequest>>,
+    snapshot_requests: Mutex<Vec<CloudHttpRequest>>,
 }
 
 struct IsolationRequiredHttp(Arc<IsolatedState>);
 struct IsolatedDelegate(Arc<IsolatedState>);
+struct SnapshotValidationHttp(Arc<IsolatedState>);
 
 impl IsolationRequiredHttp {
     fn new(replies: Vec<CloudHttpResponse>) -> Self {
         Self(Arc::new(IsolatedState {
             replies: Mutex::new(replies.into_iter().rev().collect()),
             requests: Mutex::new(Vec::new()),
+            snapshot_requests: Mutex::new(Vec::new()),
         }))
     }
 }
@@ -246,6 +249,11 @@ impl CloudHttpTransport for IsolationRequiredHttp {
 }
 
 impl CloudHttpTransport for IsolatedDelegate {
+    fn isolated_session(&self) -> Result<Option<Box<dyn CloudHttpTransport>>, QuarkError> {
+        // Persisted cookies must also work without the managed login jar.
+        Ok(Some(Box::new(SnapshotValidationHttp(Arc::clone(&self.0)))))
+    }
+
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
         self.0.requests.lock().unwrap().push(request);
         self.0
@@ -270,6 +278,18 @@ impl CloudHttpTransport for IsolatedDelegate {
             cookies.push("PANPSC=validation-cookie".into());
         }
         Ok(cookies)
+    }
+}
+
+impl CloudHttpTransport for SnapshotValidationHttp {
+    fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+        self.0.snapshot_requests.lock().unwrap().push(request);
+        self.0
+            .replies
+            .lock()
+            .unwrap()
+            .pop()
+            .ok_or_else(|| QuarkError::Transport("unexpected snapshot request".into()))
     }
 }
 
@@ -1295,9 +1315,15 @@ fn baidu_password_login_uses_an_isolated_transport_session() {
     assert!(session.cookie.contains("BDUSS=session"));
     assert!(session.cookie.contains("PANPSC=validation-cookie"));
     let requests = http.0.requests.lock().unwrap();
-    assert_eq!(requests.len(), 9);
+    assert_eq!(requests.len(), 7);
     assert!(!requests[5].headers.contains_key("Cookie"));
     assert!(!requests[6].headers.contains_key("Cookie"));
+    let snapshot_requests = http.0.snapshot_requests.lock().unwrap();
+    assert_eq!(snapshot_requests.len(), 2);
+    for request in snapshot_requests.iter() {
+        assert_eq!(request.headers["Cookie"], session.cookie);
+    }
+    assert!(http.0.replies.lock().unwrap().is_empty());
 }
 
 #[test]
