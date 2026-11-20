@@ -301,14 +301,9 @@ pub(crate) fn finalize_baidu_web_authorization(
     http: &impl CloudHttpTransport,
 ) -> Result<CloudAccount, QuarkError> {
     let client = baidu::BaiduClient::new(session.clone(), http);
-    let account = authorization_result(client.account())?;
-    // The UI loads the root directory immediately after it accepts this
-    // account. Do not close the official browser window or replace a saved
-    // session until that exact request accepts the candidate cookie jar.
-    // Authentication and verification failures map to AuthorizationPending,
-    // so frontend polling keeps the window open for the user to finish the
-    // official flow instead of creating an immediately-expired tab.
-    authorization_result(client.validate_login_directory(descriptor.root_directory_id))?;
+    let account = authorization_result(
+        client.validate_login_candidate(descriptor.root_directory_id, |_| {}),
+    )?;
     select_password_credential_account(store, CloudProvider::Baidu, &account.id)?;
     save_provider_session(CloudProvider::Baidu, store, &session)?;
     Ok(account)

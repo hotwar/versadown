@@ -2502,14 +2502,17 @@ it('treats closing the upload picker as a cancellation instead of a success', as
 });
 
 it.each([
-  ['baidu_upload_session_required', /百度上传会话未能自动恢复/],
-  ['baidu_upload_verification_required', /百度未接受上传请求/],
-  ['baidu_upload_result_uncertain', /百度未确认上传结果/],
-])('keeps the Baidu account and directory available after %s', async (code, notice) => {
+  ['baidu_upload_session_required', '', /百度上传会话未能自动恢复/],
+  ['baidu_upload_precreate_rejected', 'HTTP 200, errno -6', /百度拒绝创建上传任务，文件尚未开始传输。 HTTP 200, errno -6/],
+  ['baidu_upload_precreate_rejected', 'HTTP 401', /百度拒绝创建上传任务，文件尚未开始传输。 HTTP 401/],
+  ['baidu_upload_precreate_rejected', 'HTTP 401, unexpected response body', /百度拒绝创建上传任务，文件尚未开始传输。$/],
+  ['baidu_upload_verification_required', '', /百度要求在上传前完成网页验证/],
+  ['baidu_upload_result_uncertain', '', /百度未确认上传结果/],
+])('keeps the Baidu account and directory available after %s %s', async (code, message, notice) => {
   const user = userEvent.setup();
   const client = createCloudFake({
     uploadCloudFiles: vi.fn().mockResolvedValue({
-      uploaded: [], failures: [{ inputIndex: 0, itemName: 'a.txt', code, message: '需要网页验证' }],
+      uploaded: [], failures: [{ inputIndex: 0, itemName: 'a.txt', code, message }],
     }),
   });
   render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'web' }} restoreOnMount={false} />);
@@ -2521,6 +2524,76 @@ it.each([
   expect(screen.getByRole('tree')).toBeVisible();
   expect(screen.queryByRole('button', { name: /授权并继续上传|重新网页授权/ })).not.toBeInTheDocument();
   expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
+  expect(client.uploadCloudFiles).toHaveBeenCalledTimes(1);
+});
+
+it('resumes a Baidu password upload once after the user authorizes the same account, keeping only its original failed files and directory', async () => {
+  const user = userEvent.setup();
+  const failure = { inputIndex: 1, itemName: 'b.txt', code: 'baidu_upload_web_session_required', message: '' };
+  const uploadCloudFiles = vi.fn()
+    .mockResolvedValueOnce({ uploaded: [], failures: [
+      { inputIndex: 0, itemName: 'a.txt', code: 'baidu_upload_result_uncertain', message: '' }, failure,
+    ] })
+    .mockResolvedValueOnce({ uploaded: [], failures: [{ ...failure, inputIndex: 0 }] });
+  const client = createCloudFake({ uploadCloudFiles });
+  const account = { id: 'b-1', displayName: 'alice', provider: 'baidu' as const, authMethod: 'password' as const };
+  render(<CloudManager provider="baidu" client={client} initialAccount={account} restoreOnMount={false} />);
+  await user.dblClick(await screen.findByText('归档'));
+  await screen.findByText('说明.txt');
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await confirmAllLocalUploads(user);
+
+  const authorize = { name: /授权并继续上传/ };
+  expect(await screen.findByRole('button', authorize)).toBeVisible();
+  expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
+  expect(uploadCloudFiles).toHaveBeenNthCalledWith(1, 'baidu', 'folder-1', ['C:/a.txt', 'C:/b.txt'], expect.any(Function));
+  await user.click(screen.getByRole('button', authorize));
+  expect(client.beginCloudAuthorization).toHaveBeenCalledWith('baidu', 'b-1');
+  await act(async () => { client.emitAuthorization(account); });
+  expect(uploadCloudFiles).toHaveBeenCalledTimes(1);
+  await act(async () => { client.emitAuthorization({ ...account, id: 'another', authMethod: 'web' }); });
+  expect(await screen.findByText(/授权账号与当前会话不一致/)).toBeVisible();
+  expect(uploadCloudFiles).toHaveBeenCalledTimes(1);
+  await user.click(screen.getByRole('button', authorize));
+  await act(async () => { client.emitAuthorization({ ...account, authMethod: 'web' }); });
+  await waitFor(() => expect(uploadCloudFiles).toHaveBeenCalledTimes(2));
+  expect(uploadCloudFiles).toHaveBeenNthCalledWith(2, 'baidu', 'folder-1', ['C:/b.txt'], expect.any(Function), 'b-1');
+  expect(client.listLocalUploadEntries).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole('button', authorize)).not.toBeInTheDocument();
+  expect(client.beginCloudAuthorization).toHaveBeenCalledTimes(2);
+});
+
+it('preserves the Baidu upload receipt when the account changes before the authorization window opens', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake({
+    uploadCloudFiles: vi.fn().mockResolvedValue({
+      uploaded: [], failures: [{ inputIndex: 0, itemName: 'a.txt', code: 'baidu_upload_web_session_required', message: '' }],
+    }),
+    beginCloudAuthorization: vi.fn().mockRejectedValue({ code: 'account_mismatch' }),
+  });
+  render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'password' }} restoreOnMount={false} />);
+  await screen.findByRole('tree');
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await confirmAllLocalUploads(user);
+  await user.click(await screen.findByRole('button', { name: /授权并继续上传/ }));
+  expect(await screen.findByText(/授权账号与当前会话不一致/)).toBeVisible();
+  expect(screen.getByText(/成功 0 项，失败 1 项/)).toBeVisible();
+  expect(client.uploadCloudFiles).toHaveBeenCalledTimes(1);
+});
+
+it.each([[undefined], [2], [0, 0]])('keeps a Baidu upload with unmatchable failed indexes out of the authorization continuation', async (...indexes) => {
+  const user = userEvent.setup();
+  const client = createCloudFake({
+    uploadCloudFiles: vi.fn().mockResolvedValue({ uploaded: [], failures: indexes.map(inputIndex => ({
+      inputIndex, itemName: 'fixture.txt', code: 'baidu_upload_web_session_required', message: '',
+    })) }),
+  });
+  render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'password' }} restoreOnMount={false} />);
+  await screen.findByRole('tree');
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await confirmAllLocalUploads(user);
+  expect((await screen.findAllByText(/百度拒绝使用当前密码登录会话/))[0]).toBeVisible();
+  expect(screen.queryByRole('button', { name: /授权并继续上传/ })).not.toBeInTheDocument();
   expect(client.uploadCloudFiles).toHaveBeenCalledTimes(1);
 });
 

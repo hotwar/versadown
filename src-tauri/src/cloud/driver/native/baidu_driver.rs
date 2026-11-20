@@ -207,8 +207,10 @@ impl ProviderAuth for BaiduDriver<'_> {
         };
         complete_native_password_login(native_result, |session| {
             let client = baidu::BaiduClient::new(session.clone(), http);
-            let account = client.account()?;
-            client.directory(ProviderRegistry::global().get(provider).root_directory_id)?;
+            let account = client.validate_login_candidate(
+                ProviderRegistry::global().get(provider).root_directory_id,
+                |_| {},
+            )?;
             save_provider_session(CloudProvider::Baidu, store, &session)?;
             set_browser_password_login_preferred(store, provider, false)?;
             Ok(account)
@@ -257,10 +259,10 @@ impl ProviderAuth for BaiduDriver<'_> {
             let mut session = baidu::parse_baidu_web_session(cookies)?;
             session.auth_method = CloudAuthMethod::Password;
             let client = baidu::BaiduClient::new(session.clone(), http);
-            report_stage("账号信息校验");
-            let account = client.account()?;
-            report_stage("目录访问校验");
-            client.directory(ProviderRegistry::global().get(provider).root_directory_id)?;
+            let account = client.validate_login_candidate(
+                ProviderRegistry::global().get(provider).root_directory_id,
+                report_stage,
+            )?;
             (
                 account,
                 serde_json::to_vec(&session).map_err(|_| QuarkError::Storage)?,

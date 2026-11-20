@@ -8,7 +8,8 @@ import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthori
 export const getCloudProviderCatalog = () => invoke<ProviderDescriptor[]>('cloud_provider_catalog');
 
 export const getCloudAuthorizationCapabilities = (provider: CloudProvider) => invoke<CloudAuthorizationCapabilities>('cloud_provider_capabilities', { provider });
-export const beginCloudAuthorization = (provider: CloudProvider) => invoke<CloudAuthorization>('cloud_begin_authorization', { provider });
+export const beginCloudAuthorization = (provider: CloudProvider, expectedAccountId?: string) =>
+  invoke<CloudAuthorization>('cloud_begin_authorization', { provider, ...(expectedAccountId ? { expectedAccountId } : {}) });
 export const openCloudOperationVerification = (provider: CloudProvider, expectedAccountId: string, locale?: string) => invoke<void>('cloud_open_operation_verification', { provider, expectedAccountId, locale });
 export const completeCloudOperationVerification = (provider: CloudProvider, expectedAccountId: string) => invoke<CloudAccount>('cloud_complete_operation_verification', { provider, expectedAccountId });
 export const completeCloudAuthorization = (provider: CloudProvider) => invoke<CloudAccount>('cloud_complete_authorization', { provider });
@@ -130,7 +131,8 @@ async function invokeCloudUpload(command: string, args: Record<string, unknown>,
   }
 }
 export const controlCloudUpload = (provider: CloudProvider, uploadId: string, action: CloudUploadAction) => invoke<void>('cloud_control_upload', { provider, uploadId, action });
-export const uploadCloudFiles = (provider: CloudProvider, parentId: string, paths?: string[], onProgress?: (progress: CloudUploadProgress) => void) => invokeCloudUpload('cloud_upload_files', { provider, parentId, paths: paths ?? null }, onProgress);
+export const uploadCloudFiles = (provider: CloudProvider, parentId: string, paths?: string[], onProgress?: (progress: CloudUploadProgress) => void, expectedAccountId?: string) =>
+  invokeCloudUpload('cloud_upload_files', { provider, parentId, paths: paths ?? null, ...(expectedAccountId ? { expectedAccountId } : {}) }, onProgress);
 export const listLocalUploadEntries = (path?: string) => invoke<LocalUploadListing>('local_upload_entries', { path: path ?? null });
 export const pickAndUploadFiles = (provider: CloudProvider, parentId: string) => uploadCloudFiles(provider, parentId);
 export const uploadCloudDirectory = (provider: CloudProvider, parentId: string, path?: string, onProgress?: (progress: CloudUploadProgress) => void) => invokeCloudUpload('cloud_upload_directory', { provider, parentId, path: path ?? null }, onProgress);
