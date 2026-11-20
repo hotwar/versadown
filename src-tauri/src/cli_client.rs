@@ -164,7 +164,8 @@ fn project<T: serde::de::DeserializeOwned + serde::Serialize>(data: serde_json::
 
 fn known_error(code: &str) -> bool {
     matches!(code, "INVALID_ARGUMENT" | "HOST_UNAVAILABLE" | "UNAUTHORIZED" | "NOT_FOUND" | "REQUEST_CONFLICT" | "DUPLICATE" | "INTERNAL_ERROR" | "TASK_FAILED" | "TASK_CANCELLED" | "TIMEOUT" | "INTERRUPTED" | "PROTOCOL_ERROR" | "UNSUPPORTED" | "ENGINE_UNAVAILABLE" | "ACTION_FAILED" | "FORBIDDEN" | "HOST_DISABLED" | "TASK_NOT_READY" | "BUSY" | "AUTH_REQUIRED" | "CLI_RECOVERY_REQUIRED" | "PREPARATION_EXPIRED" | "CLOUD_WRITE_REQUIRED" | "METADATA_UNAVAILABLE" | "RESOURCE_LIMIT" | "ACCESS_CODE_REQUIRED"
-        | "CLOUD_PERMISSION_REQUIRED" | "ACCOUNT_MISMATCH" | "CLOUD_RESULT_UNCERTAIN" | "FILE_CONFLICT" | "SOURCE_CHANGED" | "USER_ACTION_REQUIRED")
+        | "CLOUD_UPLOAD_SESSION_REQUIRED" | "CLOUD_UPLOAD_VERIFICATION_REQUIRED" | "CLOUD_OPERATION_VERIFICATION_REQUIRED"
+        | "CLOUD_AUTHORIZATION_PENDING" | "INTERACTION_EXPIRED" | "CLOUD_PERMISSION_REQUIRED" | "ACCOUNT_MISMATCH" | "CLOUD_RESULT_UNCERTAIN" | "FILE_CONFLICT" | "SOURCE_CHANGED" | "USER_ACTION_REQUIRED")
 }
 
 fn known_provider(value: &str) -> bool { matches!(value, "quark" | "pikpak" | "baidu" | "aliyun" | "xunlei" | "uc") }
@@ -178,7 +179,8 @@ fn sanitize_error(error: &ApiError, lang: &str) -> ApiError {
     safe.provider = error.provider.as_ref().filter(|value| known_provider(value)).cloned();
     safe.reason = error.reason.as_ref().filter(|value| matches!(value.as_str(),
         "not_authorized" | "expired" | "verification_required" | "cancelled" | "window_closed"
-        | "session_expired" | "window_unavailable" | "unavailable" | "account_changed")).cloned();
+        | "session_expired" | "window_unavailable" | "unavailable" | "account_changed" | "account_mismatch"
+        | "authorization_pending" | "operation_verification_required")).cloned();
     safe
 }
 
@@ -202,7 +204,7 @@ fn project_cloud_action(data: serde_json::Value, action: &str, lang: &str) -> Re
             let mut data: CloudAccountsDto = serde_json::from_value(data).map_err(|_| ())?;
             if data.accounts.len() > 6 || data.accounts.iter().any(|account| !known_provider(&account.provider)) { return Err(()); }
             for account in &mut data.accounts {
-                if !matches!(account.authorization_state.as_str(), "ready" | "disconnected" | "expired" | "verification_required" | "account_mismatch" | "interactive_required" | "unavailable") { return Err(()); }
+                if !matches!(account.authorization_state.as_str(), "ready" | "disconnected" | "expired" | "verification_required" | "account_mismatch" | "interactive_required" | "pending" | "unavailable") { return Err(()); }
                 if account.account_ref.as_deref().is_some_and(|value| !cloud_text(value, 256))
                     || account.display_name.as_deref().is_some_and(|value| value.len() > 1024) { return Err(()); }
                 account.capabilities.retain(|capability| matches!(capability.as_str(), "list" | "download" | "upload" | "create_share" | "inspect_share" | "transfer_share"));
@@ -217,10 +219,15 @@ fn project_cloud_action(data: serde_json::Value, action: &str, lang: &str) -> Re
             if !cloud_text(&data.authorization_id, 128) || data.account_ref.as_deref().is_some_and(|value| !cloud_text(value, 256)) { return Err(()); }
             data.error = data.error.as_ref().map(|error| sanitize_error(error, lang));
             data.poll_interval_ms = if data.status == "pending" { data.poll_interval_ms.clamp(1000, 30_000) } else { 0 };
-            if data.next_action.as_deref().is_some_and(|action| !matches!(action,
-                "complete_desktop_authorization" | "query_cloud_authorization" | "begin_cloud_authorization"
-                | "prepare_again" | "review_account" | "inspect_desktop" | "continue_request" | "await_user_request")) {
-                data.next_action = Some("inspect_desktop".into());
+            data.next_action = match data.status.as_str() {
+                "pending" => Some("complete_desktop_authorization"),
+                "account_mismatch" => Some("review_account"),
+                "failed" => Some("inspect_desktop"),
+                "closed" | "cancelled" | "expired" => Some("await_user_request"),
+                _ => None,
+            }.map(str::to_owned);
+            if let Some(error) = &mut data.error {
+                error.next_action.clone_from(&data.next_action);
             }
             serde_json::to_value(data).map_err(|_| ())
         }
@@ -476,7 +483,7 @@ mod tests {
         }), Ok(&request), "en").unwrap();
         assert_eq!(result["error"]["provider"], "quark");
         assert_eq!(result["error"]["reason"], "verification_required");
-        assert_eq!(result["error"]["next_action"], "begin_cloud_authorization");
+        assert_eq!(result["error"]["next_action"], "inspect_desktop");
         assert_eq!(result["poll_interval_ms"], 0);
         assert!(!result.to_string().contains("secret"));
         let malicious: ApiError = serde_json::from_value(serde_json::json!({"code":"ACCOUNT_MISMATCH",
@@ -484,6 +491,27 @@ mod tests {
         let error = sanitize_error(&malicious, "en");
         assert_eq!(error.code, "ACCOUNT_MISMATCH");
         assert!(error.provider.is_none() && error.reason.is_none());
+    }
+
+    #[test]
+    fn cloud_projection_preserves_baidu_challenges_and_current_authorization() {
+        for (code, action) in [
+            ("CLOUD_UPLOAD_SESSION_REQUIRED", "verify_cloud_upload_in_browser"),
+            ("CLOUD_UPLOAD_VERIFICATION_REQUIRED", "verify_cloud_upload_in_browser"),
+            ("CLOUD_OPERATION_VERIFICATION_REQUIRED", "complete_cloud_operation_verification"),
+            ("CLOUD_AUTHORIZATION_PENDING", "wait_for_current_cloud_authorization"),
+            ("INTERACTION_EXPIRED", "await_user_request"),
+        ] {
+            let error = sanitize_error(&ApiError::new(code, "zh-CN"), "zh-CN");
+            assert_eq!(error.code, code);
+            assert_eq!(error.next_action.as_deref(), Some(action));
+        }
+        let result = project_cloud_action(json!({"accounts":[{
+            "provider":"baidu","authorization_state":"pending","capabilities":[],"permitted_operations":[],
+            "error":{"code":"CLOUD_AUTHORIZATION_PENDING","message":"secret","reason":"authorization_pending"}
+        }]}), "accounts", "en").unwrap();
+        assert_eq!(result["accounts"][0]["error"]["reason"], "authorization_pending");
+        assert!(!result.to_string().contains("secret"));
     }
 
     #[test]

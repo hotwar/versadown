@@ -39,9 +39,13 @@ impl PendingInteraction {
             needs_directory:self.needs_directory,expires_at:self.expires_at,
             error_code:self.result.as_ref().and_then(|r|r.error.as_ref()).map(|e|e.code.clone()) }
     }
+    fn is_pending(&self) -> bool {
+        matches!(self.status.as_str(), "awaiting_user" | "awaiting_login" | "resuming")
+    }
+
     fn dto(&self) -> InteractionDto {
         InteractionDto {id:self.id.clone(),status:self.status.clone(),kind:self.kind.clone(),provider:self.provider.map(|p|p.key().into()),
-            expires_at:self.expires_at,poll_interval_ms:1000,command:self.request.command.clone(),
+            expires_at:self.expires_at,poll_interval_ms:if self.is_pending() { 1000 } else { 0 },command:self.request.command.clone(),
             cloud_action:self.request.cloud.as_ref().and_then(|r|serde_json::to_value(r).ok()?.get("action")?.as_str().map(str::to_owned)),result:self.result.clone()}
     }
 }
@@ -169,8 +173,20 @@ fn pending_response(record:&PendingInteraction,lang:&str)->Response {
         if let Some(error)=&mut result.error {error.interaction_id=Some(record.id.clone());}
         return result
     }
-    let mut response=Response::failure("USER_ACTION_REQUIRED",lang);
-    if let Some(error)=response.error.as_mut(){error.interaction_id=Some(record.id.clone());error.retry_after_ms=Some(1000);}
+    let code = match record.status.as_str() {
+        "cancelled" => "TASK_CANCELLED",
+        "expired" => "INTERACTION_EXPIRED",
+        "interrupted" => "INTERRUPTED",
+        _ if record.is_pending() => "USER_ACTION_REQUIRED",
+        _ => "INTERNAL_ERROR",
+    };
+    let mut response = Response::failure(code, lang);
+    if let Some(error) = &mut response.error {
+        error.interaction_id = Some(record.id.clone());
+        if record.is_pending() {
+            error.retry_after_ms = Some(1000);
+        }
+    }
     response
 }
 pub(crate) async fn execute(app:AppHandle,request:Request)->Response {
@@ -327,6 +343,12 @@ fn finish(app:&AppHandle,mut record:PendingInteraction,response:Response,previou
     record.status=if response.ok{"succeeded"}else{"failed"}.into();record.result=Some(response);
     let _=app.state::<AppState>().store.update_agent_interaction(&mut record,previous);
 }
+fn authorization_result(response: Response, lang: &str) -> Result<CloudAuthorizationDto, Response> {
+    if !response.ok { return Err(response); }
+    response.data.and_then(|value| serde_json::from_value(value).ok())
+        .ok_or_else(|| Response::failure("PROTOCOL_ERROR", lang))
+}
+
 async fn approve_and_continue(app:AppHandle,mut record:PendingInteraction){
     let lang=record.request.lang.as_deref().unwrap_or("en").to_owned();
     let mut login_attempted=false;
@@ -335,21 +357,33 @@ async fn approve_and_continue(app:AppHandle,mut record:PendingInteraction){
         login_attempted=true;
         let provider=record.provider.expect("cloud interaction provider");
         let response=crate::cli_cloud_auth::execute(app.clone(),&CloudRequest::AuthBegin{provider:provider.key().into(),account_ref:record.account_id.as_deref().map(|id|crate::cli_cloud_auth::account_ref(provider,id))},&lang).await;
-        let Some(dto)=response.data.and_then(|v|serde_json::from_value::<CloudAuthorizationDto>(v).ok()) else{finish(&app,record,Response::failure("AUTH_REQUIRED",&lang),"resuming");return};
+        let dto = match authorization_result(response, &lang) {
+            Ok(dto) => dto,
+            Err(failure) => { finish(&app, record, failure, "resuming"); return; }
+        };
         record.status="awaiting_login".into();record.authorization_id=Some(dto.authorization_id);
         if app.state::<AppState>().store.update_agent_interaction(&mut record,"resuming").is_err(){return}
         loop {
             tokio::time::sleep(Duration::from_secs(1)).await;
             if !app.state::<AppState>().store.agent_interaction(&record.id).is_ok_and(|r|r.status=="awaiting_login"){return}
             let response=crate::cli_cloud_auth::execute(app.clone(),&CloudRequest::AuthStatus{authorization_id:record.authorization_id.clone().unwrap()},&lang).await;
-            let Some(dto)=response.data.and_then(|v|serde_json::from_value::<CloudAuthorizationDto>(v).ok()) else{finish(&app,record,Response::failure("AUTH_REQUIRED",&lang),"awaiting_login");return};
+            let dto = match authorization_result(response, &lang) {
+                Ok(dto) => dto,
+                Err(failure) => { finish(&app, record, failure, "awaiting_login"); return; }
+            };
             if dto.status=="pending"{continue}
             if dto.status!="succeeded"{
                 if matches!(dto.status.as_str(),"closed"|"cancelled"|"expired") {
                     record.status=if dto.status=="expired"{"expired"}else{"cancelled"}.into();
                     record.result=None;
                     let _=app.state::<AppState>().store.update_agent_interaction(&mut record,"awaiting_login");
-                }else{finish(&app,record,Response::failure(if dto.status=="account_mismatch"{"ACCOUNT_MISMATCH"}else{"AUTH_REQUIRED"},&lang),"awaiting_login");}
+                } else {
+                    let failure = match dto.error {
+                        Some(error) => Response { ok: false, data: None, error: Some(error) },
+                        None => Response::failure("PROTOCOL_ERROR", &lang),
+                    };
+                    finish(&app, record, failure, "awaiting_login");
+                }
                 return
             }
             record.status="resuming".into();
@@ -359,7 +393,13 @@ async fn approve_and_continue(app:AppHandle,mut record:PendingInteraction){
     }
     if matches!(record.kind.as_str(),"cloud_account"|"cloud_login") {
         let provider=record.provider.unwrap();
-        let account=match crate::cloud::commands::cloud_account(app.clone(),provider).await {Ok(account)=>account,Err(_)=>{finish(&app,record,Response::failure("AUTH_REQUIRED",&lang),"resuming");return}};
+        let account = match crate::cloud::commands::cloud_account(app.clone(), provider).await {
+            Ok(account) => account,
+            Err(error) => {
+                finish(&app, record, Response::failure(crate::cli_cloud::cloud_code(error), &lang), "resuming");
+                return;
+            }
+        };
         if record.account_id.as_deref().is_some_and(|id|id!=account.id){finish(&app,record,Response::failure("ACCOUNT_MISMATCH",&lang),"resuming");return}
         if let Err(code)=crate::agent_access::approve_cloud_account(&app,provider.key(),&account.id,Some(account.display_name)) {finish(&app,record,Response::failure(code,&lang),"resuming");return}
     }
@@ -459,6 +499,20 @@ mod tests {
         assert!(store.pending_agent_interactions().unwrap().is_empty());
         assert_eq!(store.update_agent_interaction(&mut record,"awaiting_user"),Err("REQUEST_CONFLICT"));
     }
+    #[test]
+    fn agent_interaction_terminal_login_receipts_stop_polling() {
+        let mut record = record();
+        for (status, code) in [("cancelled", "TASK_CANCELLED"), ("expired", "INTERACTION_EXPIRED"), ("interrupted", "INTERRUPTED")] {
+            record.status = status.into();
+            let error = pending_response(&record, "en").error.unwrap();
+            assert_eq!(error.code, code);
+            assert!(error.retry_after_ms.is_none());
+            assert_eq!(record.dto().poll_interval_ms, 0);
+        }
+        assert_eq!(authorization_result(Response::failure("BUSY", "en"), "en").unwrap_err().error.unwrap().code, "BUSY");
+        assert_eq!(authorization_result(Response::success(serde_json::Value::Null), "en").unwrap_err().error.unwrap().code, "PROTOCOL_ERROR");
+    }
+
     #[test]
     fn agent_interaction_concurrent_approve_cancel_has_one_winner(){
         let store=std::sync::Arc::new(crate::TaskStore::open_in_memory().unwrap());let record=record();

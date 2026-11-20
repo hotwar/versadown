@@ -377,6 +377,14 @@ pub async fn cloud_begin_authorization(
     app: AppHandle,
     provider: CloudProvider,
 ) -> Result<CloudAuthorization, QuarkError> {
+    begin_authorization_for(app, provider, crate::cli_cloud_auth::AuthorizationWindowSource::Desktop).await
+}
+
+pub(crate) async fn begin_authorization_for(
+    app: AppHandle,
+    provider: CloudProvider,
+    source: crate::cli_cloud_auth::AuthorizationWindowSource,
+) -> Result<CloudAuthorization, QuarkError> {
     require_connected_provider(provider)?;
     let cloud = app
         .try_state::<Arc<CloudState>>()
@@ -387,7 +395,7 @@ pub async fn cloud_begin_authorization(
         .await?;
     let label = format!("cloud-auth-{}", provider.key());
     if let Some(window) = app.get_webview_window(&label) {
-        crate::cli_cloud_auth::authorization_window_opened(&app, provider, false);
+        crate::cli_cloud_auth::authorization_window_opened(&app, provider, false, source);
         window
             .show()
             .map_err(|_| QuarkError::WebAuthorizationRequired)?;
@@ -445,7 +453,7 @@ pub async fn cloud_begin_authorization(
         let window = builder
             .build()
             .map_err(|_| QuarkError::WebAuthorizationRequired)?;
-        let generation = crate::cli_cloud_auth::authorization_window_opened(&app, provider, true);
+        let generation = crate::cli_cloud_auth::authorization_window_opened(&app, provider, true, source);
         if let Some(generation) = generation.clone() {
             let close_app = app.clone();
             window.on_window_event(move |event| {

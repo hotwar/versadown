@@ -219,7 +219,9 @@ async fn perform(app:&AppHandle,plan:&CloudPlan,dto:&mut CloudOperationDto)->Cod
                             dto.status = "needs_review".into();
                             break;
                         }
-                        "CLOUD_UPLOAD_SESSION_REQUIRED" | "CLOUD_UPLOAD_VERIFICATION_REQUIRED" => break,
+                        "CLOUD_UPLOAD_SESSION_REQUIRED" | "CLOUD_UPLOAD_VERIFICATION_REQUIRED"
+                        | "CLOUD_OPERATION_VERIFICATION_REQUIRED" | "CLOUD_AUTHORIZATION_PENDING"
+                        | "AUTH_REQUIRED" | "ACCOUNT_MISMATCH" => break,
                         _ => {}
                     }
                 }

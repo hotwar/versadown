@@ -63,10 +63,19 @@ struct Session {
     opening: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AuthorizationWindowSource { Desktop, Agent }
+
+#[derive(Clone)]
+struct AuthorizationWindow {
+    generation: String,
+    used_by_desktop: bool,
+}
+
 #[derive(Default)]
 struct Sessions {
     sessions: HashMap<String, Session>,
-    windows: HashMap<CloudProvider, String>,
+    windows: HashMap<CloudProvider, AuthorizationWindow>,
 }
 
 impl Sessions {
@@ -126,16 +135,21 @@ impl Sessions {
         Ok((session, true))
     }
 
-    fn opened(&mut self, provider: CloudProvider, new_window: bool) -> String {
-        let generation = if new_window {
-            let generation = Uuid::new_v4().to_string();
-            if let Some(previous) = self.windows.insert(provider, generation.clone()) {
-                self.finish_window(provider, &previous, Status::Closed, None);
+    fn opened(&mut self, provider: CloudProvider, new_window: bool, source: AuthorizationWindowSource) -> String {
+        if new_window {
+            if let Some(previous) = self.windows.remove(&provider) {
+                self.finish_window(provider, &previous.generation, Status::Closed, None);
             }
-            generation
-        } else {
-            self.windows.entry(provider).or_insert_with(|| Uuid::new_v4().to_string()).clone()
-        };
+        }
+        let window = self.windows.entry(provider).or_insert_with(|| AuthorizationWindow {
+            generation: Uuid::new_v4().to_string(),
+            // A native window created before Agent tracking may belong to a desktop login.
+            used_by_desktop: !new_window,
+        });
+        if source == AuthorizationWindowSource::Desktop {
+            window.used_by_desktop = true;
+        }
+        let generation = window.generation.clone();
         for session in self.sessions.values_mut().filter(|session| {
             session.provider == provider && (session.status == Status::Pending || session.opening)
                 && session.window_generation.is_none()
@@ -169,9 +183,15 @@ impl Sessions {
 
     fn closed(&mut self, provider: CloudProvider, generation: &str) {
         self.finish_window(provider, generation, Status::Closed, None);
-        if self.windows.get(&provider).is_some_and(|current| current == generation) {
+        if self.windows.get(&provider).is_some_and(|window| window.generation == generation) {
             self.windows.remove(&provider);
         }
+    }
+
+    fn agent_can_close(&self, provider: CloudProvider, generation: &str) -> bool {
+        self.windows.get(&provider).is_some_and(|window| window.generation == generation && !window.used_by_desktop)
+            && !self.sessions.values().any(|session| session.provider == provider
+                && session.status == Status::Pending && session.window_generation.as_deref() == Some(generation))
     }
 
     fn finished_opening(&mut self, id: &str) -> Option<(CloudProvider, String)> {
@@ -206,9 +226,9 @@ async fn expire_sessions(app: &AppHandle) {
         .unwrap_or_default();
     // Also observe windows that existed before Agent state was registered, or
     // closed between native window construction and event-handler attachment.
-    for (provider, generation) in windows {
+    for (provider, window) in windows {
         if app.get_webview_window(&format!("cloud-auth-{}", provider.key())).is_none() {
-            authorization_window_closed(app, provider, &generation);
+            authorization_window_closed(app, provider, &window.generation);
         }
     }
     for (provider, generation) in expired {
@@ -224,12 +244,12 @@ async fn expire_sessions(app: &AppHandle) {
 /// Called under the connector's authorization gate, for a newly created or
 /// reused window. The generation identifies the actual window, not its label.
 pub(crate) fn authorization_window_opened(
-    app: &AppHandle, provider: CloudProvider, new_window: bool,
+    app: &AppHandle, provider: CloudProvider, new_window: bool, source: AuthorizationWindowSource,
 ) -> Option<String> {
     app.try_state::<AuthorizationSessions>()
         .and_then(|state| {
             let mut sessions = state.0.lock().ok()?;
-            Some(sessions.opened(provider, new_window))
+            Some(sessions.opened(provider, new_window, source))
         })
 }
 
@@ -237,7 +257,7 @@ pub(crate) fn authorization_window_generation(app: &AppHandle, provider: CloudPr
     app.try_state::<AuthorizationSessions>()
         .and_then(|state| {
             let sessions = state.0.lock().ok()?;
-            sessions.windows.get(&provider).cloned()
+            sessions.windows.get(&provider).map(|window| window.generation.clone())
         })
 }
 
@@ -245,11 +265,7 @@ pub(crate) fn authorization_window_can_close(app: &AppHandle, provider: CloudPro
     app.try_state::<AuthorizationSessions>()
         .and_then(|state| {
             let sessions = state.0.lock().ok()?;
-            Some(sessions.windows.get(&provider).is_some_and(|current| current == generation)
-                && !sessions.sessions.values().any(|session| {
-                    session.provider == provider && session.status == Status::Pending
-                        && session.window_generation.as_deref() == Some(generation)
-                }))
+            Some(sessions.agent_can_close(provider, generation))
         }).unwrap_or(false)
 }
 
@@ -288,20 +304,17 @@ fn error(code: &str, lang: &str, provider: CloudProvider, reason: &str) -> ApiEr
 }
 
 fn session_dto(session: &Session, lang: &str) -> CloudAuthorizationDto {
-    let (status, next_action, reason) = match session.status {
+    let (status, next_action, failure) = match session.status {
         Status::Pending => ("pending", Some("complete_desktop_authorization"), None),
         Status::Succeeded => ("succeeded", None, None),
-        Status::AccountMismatch => ("account_mismatch", Some("review_account"), Some("account_mismatch")),
-        Status::Cancelled => ("cancelled", Some("await_user_request"), Some("cancelled")),
-        Status::Closed => ("closed", Some("await_user_request"), Some("window_closed")),
-        Status::Expired => ("expired", Some("await_user_request"), Some("session_expired")),
-        Status::Failed => ("failed", Some("inspect_desktop"), Some(session.failure_reason.as_deref().unwrap_or("window_unavailable"))),
+        Status::AccountMismatch => ("account_mismatch", Some("review_account"), Some(("ACCOUNT_MISMATCH", "account_mismatch"))),
+        Status::Cancelled => ("cancelled", Some("await_user_request"), Some(("TASK_CANCELLED", "cancelled"))),
+        Status::Closed => ("closed", Some("await_user_request"), Some(("TASK_CANCELLED", "window_closed"))),
+        Status::Expired => ("expired", Some("await_user_request"), Some(("INTERACTION_EXPIRED", "session_expired"))),
+        Status::Failed => ("failed", Some("inspect_desktop"), Some(("ACTION_FAILED", session.failure_reason.as_deref().unwrap_or("window_unavailable")))),
     };
-    let error = reason.map(|reason| {
-        let mut error = error(
-            if session.status == Status::AccountMismatch { "ACCOUNT_MISMATCH" } else { "AUTH_REQUIRED" },
-            lang, session.provider, reason,
-        );
+    let error = failure.map(|(code, reason)| {
+        let mut error = error(code, lang, session.provider, reason);
         error.next_action = next_action.map(str::to_owned);
         error
     });
@@ -371,7 +384,7 @@ async fn open_authorization(app: AppHandle, provider: CloudProvider, authorizati
     // enter the UI initialization path. WebView creation runs off the UI thread.
     // The host owns this worker even if the CLI/MCP request disconnects.
     if current_session(&app, &authorization_id).is_ok_and(|session| session.status == Status::Pending) {
-        if crate::cloud::commands::cloud_begin_authorization(app.clone(), provider).await.is_err()
+        if crate::cloud::commands::begin_authorization_for(app.clone(), provider, AuthorizationWindowSource::Agent).await.is_err()
         {
             fail_session(&app, &authorization_id);
         }
@@ -416,10 +429,13 @@ fn account_failure(error: &QuarkError) -> (&'static str, &'static str, &'static 
     match error {
         QuarkError::NotAuthorized => ("disconnected", "AUTH_REQUIRED", "not_authorized"),
         QuarkError::AuthorizationExpired => ("expired", "AUTH_REQUIRED", "expired"),
-        QuarkError::CaptchaRequired | QuarkError::PikpakOperationVerificationRequired(_)
-            | QuarkError::BaiduOperationVerificationRequired => ("verification_required", "AUTH_REQUIRED", "verification_required"),
+        QuarkError::CaptchaRequired => ("verification_required", "AUTH_REQUIRED", "verification_required"),
+        QuarkError::PikpakOperationVerificationRequired(_) | QuarkError::BaiduOperationVerificationRequired
+            | QuarkError::BaiduDriveVerificationRequired =>
+            ("verification_required", "CLOUD_OPERATION_VERIFICATION_REQUIRED", "operation_verification_required"),
+        QuarkError::AuthorizationPending => ("pending", "CLOUD_AUTHORIZATION_PENDING", "authorization_pending"),
         QuarkError::AccountMismatch => ("account_mismatch", "ACCOUNT_MISMATCH", "account_mismatch"),
-        QuarkError::WebAuthorizationRequired | QuarkError::AuthorizationPending => ("interactive_required", "AUTH_REQUIRED", "not_authorized"),
+        QuarkError::WebAuthorizationRequired => ("interactive_required", "AUTH_REQUIRED", "not_authorized"),
         _ => ("unavailable", "ACTION_FAILED", "unavailable"),
     }
 }
@@ -510,7 +526,7 @@ mod tests {
     fn opened(sessions: &mut Sessions, expected: Option<String>, timestamp: i64) -> (String, String) {
         let (session, created) = sessions.begin(CloudProvider::Quark, expected, timestamp).unwrap();
         assert!(created);
-        let generation = sessions.opened(CloudProvider::Quark, true);
+        let generation = sessions.opened(CloudProvider::Quark, true, AuthorizationWindowSource::Agent);
         assert!(sessions.finished_opening(&session.session_id).is_none());
         (session.session_id, generation)
     }
@@ -554,10 +570,29 @@ mod tests {
         sessions.closed(CloudProvider::Quark, &old_generation);
         assert_eq!(sessions.sessions[&old_id].status, Status::Closed);
         assert_eq!(sessions.sessions[&new_id].status, Status::Pending);
-        assert_eq!(sessions.windows[&CloudProvider::Quark], new_generation);
+        assert_eq!(sessions.windows[&CloudProvider::Quark].generation, new_generation);
         sessions.finish_window(CloudProvider::Quark, &new_generation, Status::Succeeded, Some(&account));
         sessions.closed(CloudProvider::Quark, &new_generation);
         assert_eq!(sessions.sessions[&new_id].status, Status::Succeeded);
+    }
+
+    #[test]
+    fn cli_cloud_auth_expiry_closes_only_exclusively_agent_opened_windows() {
+        use AuthorizationWindowSource::{Agent, Desktop};
+        let provider = CloudProvider::Baidu;
+        for (initial, reused, may_close) in [(Agent, Agent, true), (Desktop, Agent, false), (Agent, Desktop, false)] {
+            let mut sessions = Sessions::default();
+            let (session, _) = sessions.begin(provider, None, 0).unwrap();
+            let generation = sessions.opened(provider, true, initial);
+            sessions.finished_opening(&session.session_id);
+            assert_eq!(sessions.opened(provider, false, reused), generation);
+            assert!(!sessions.agent_can_close(provider, &generation));
+            sessions.expire(SESSION_SECONDS);
+            assert_eq!(sessions.agent_can_close(provider, &generation), may_close);
+            let next = sessions.opened(provider, true, Agent);
+            assert!(!sessions.agent_can_close(provider, &generation));
+            assert!(sessions.agent_can_close(provider, &next));
+        }
     }
 
     #[test]
@@ -579,7 +614,7 @@ mod tests {
         let (session, _) = sessions.begin(CloudProvider::Quark, None, 0).unwrap();
         sessions.sessions.get_mut(&session.session_id).unwrap().status = Status::Cancelled;
         assert_eq!(sessions.begin(CloudProvider::Quark, None, 1).unwrap_err(), "BUSY");
-        let generation = sessions.opened(CloudProvider::Quark, true);
+        let generation = sessions.opened(CloudProvider::Quark, true, AuthorizationWindowSource::Agent);
         assert_eq!(sessions.finished_opening(&session.session_id), Some((CloudProvider::Quark, generation.clone())));
         sessions.finish_window(CloudProvider::Quark, &generation, Status::Succeeded, Some("already-logged-in"));
         assert_eq!(sessions.sessions[&session.session_id].status, Status::Cancelled);
@@ -611,6 +646,8 @@ mod tests {
         assert_eq!(account_failure(&QuarkError::NotAuthorized), ("disconnected", "AUTH_REQUIRED", "not_authorized"));
         assert_eq!(account_failure(&QuarkError::AuthorizationExpired), ("expired", "AUTH_REQUIRED", "expired"));
         assert_eq!(account_failure(&QuarkError::CaptchaRequired), ("verification_required", "AUTH_REQUIRED", "verification_required"));
+        assert_eq!(account_failure(&QuarkError::BaiduOperationVerificationRequired), ("verification_required", "CLOUD_OPERATION_VERIFICATION_REQUIRED", "operation_verification_required"));
+        assert_eq!(account_failure(&QuarkError::AuthorizationPending), ("pending", "CLOUD_AUTHORIZATION_PENDING", "authorization_pending"));
         assert_eq!(account_failure(&QuarkError::Storage), ("unavailable", "ACTION_FAILED", "unavailable"));
     }
 }

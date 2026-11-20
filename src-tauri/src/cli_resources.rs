@@ -72,9 +72,11 @@ fn choice(name:String,kind:&str,size_bytes:Option<u64>,detail:Option<String>,tar
 fn safe_name(name:&str)->String {crate::cloud::commands::safe_filename(&name.chars().filter(|c|!c.is_control()).take(256).collect::<String>())}
 pub(crate) fn cloud_error(error:QuarkError)->&'static str {match error {
     QuarkError::NotAuthorized|QuarkError::AuthorizationExpired|QuarkError::WebAuthorizationRequired|
-    QuarkError::CaptchaRequired|
-    QuarkError::PikpakOperationVerificationRequired(_)|QuarkError::AuthorizationPending|
-    QuarkError::BaiduOperationVerificationRequired=>"AUTH_REQUIRED",
+    QuarkError::CaptchaRequired=>"AUTH_REQUIRED",
+    QuarkError::PikpakOperationVerificationRequired(_)|QuarkError::BaiduOperationVerificationRequired|
+    QuarkError::BaiduDriveVerificationRequired=>
+        "CLOUD_OPERATION_VERIFICATION_REQUIRED",
+    QuarkError::AuthorizationPending=>"CLOUD_AUTHORIZATION_PENDING",
     QuarkError::AccountMismatch=>"ACCOUNT_MISMATCH",
     QuarkError::SessionRenewedRetryOperation=>"CLOUD_RESULT_UNCERTAIN",
     QuarkError::ProviderUnsupported=>"UNSUPPORTED",
@@ -420,6 +422,16 @@ mod tests {
         assert!(validate_url("https://example.test/watch?v=1").is_ok());
         for value in ["file:///tmp/secret","https://user:secret@example.test/video","https://example.test/\nvideo"] {assert_eq!(validate_url(value),Err("INVALID_ARGUMENT"));}
         assert_eq!(cloud_error(QuarkError::AuthorizationExpired),"AUTH_REQUIRED");
+        for (error, code, next_action) in [
+            (QuarkError::BaiduOperationVerificationRequired, "CLOUD_OPERATION_VERIFICATION_REQUIRED", "complete_cloud_operation_verification"),
+            (QuarkError::BaiduDriveVerificationRequired, "CLOUD_OPERATION_VERIFICATION_REQUIRED", "complete_cloud_operation_verification"),
+            (QuarkError::AuthorizationPending, "CLOUD_AUTHORIZATION_PENDING", "wait_for_current_cloud_authorization"),
+        ] {
+            assert_eq!(cloud_error(error), code);
+            let guidance = crate::cli_protocol::ApiError::new(code, "en");
+            assert_eq!(guidance.next_action.as_deref(), Some(next_action));
+            assert!(!guidance.retryable);
+        }
         assert_eq!(cloud_error(QuarkError::InvalidInput("agent.error.cloudWriteRequired".into())),"CLOUD_WRITE_REQUIRED");
     }
 }
