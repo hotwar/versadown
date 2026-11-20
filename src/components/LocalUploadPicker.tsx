@@ -48,6 +48,7 @@ export function LocalUploadPicker({ listEntries, onConfirm, onCancel }: LocalUpl
   const [pathInput, setPathInput] = useState('');
   const [editingPath, setEditingPath] = useState(false);
   const [selected, setSelected] = useState<LocalUploadEntry[]>([]);
+  const beforeDirectoryClick = useRef<{ path: string; selected: LocalUploadEntry[] } | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [visibleCount, setVisibleCount] = useState(200);
@@ -61,7 +62,6 @@ export function LocalUploadPicker({ listEntries, onConfirm, onCancel }: LocalUpl
   const pathClick = useRef<ReturnType<typeof setTimeout>>();
   const allRef = useRef<HTMLInputElement>(null);
   const selectionKeys = useMemo(() => new Set(selected.map(item => uploadPathKey(item.path))), [selected]);
-  const normalized = useMemo(() => normalizeUploadSelection(selected), [selected]);
   const entries = useMemo(() => sortUploadEntries((listing?.entries ?? []).filter(entry => showHidden || !entry.name.startsWith('.')), sort), [listing?.entries, showHidden, sort]);
   const selectedHere = entries.filter(item => selectionKeys.has(uploadPathKey(item.path))).length;
 
@@ -100,10 +100,17 @@ export function LocalUploadPicker({ listEntries, onConfirm, onCancel }: LocalUpl
   }, []);
   useEffect(() => { if (allRef.current) allRef.current.indeterminate = selectedHere > 0 && selectedHere < entries.length; }, [selectedHere, entries.length, loading]);
 
+  function addEntries(current: LocalUploadEntry[], entries: LocalUploadEntry[]) {
+    // Selecting individual children narrows an earlier whole-folder selection.
+    const ancestors = new Set(uploadPathSegments(listing?.path ?? '').map(segment => uploadPathKey(segment.path)));
+    const remaining = current.filter(item => item.kind !== 'directory' || !ancestors.has(uploadPathKey(item.path)));
+    return normalizeUploadSelection([...remaining, ...entries]);
+  }
+
   function toggle(entry: LocalUploadEntry) {
     const key = uploadPathKey(entry.path);
     setSelected(current => current.some(item => uploadPathKey(item.path) === key)
-      ? current.filter(item => uploadPathKey(item.path) !== key) : [...current, entry]);
+      ? current.filter(item => uploadPathKey(item.path) !== key) : addEntries(current, [entry]));
   }
 
   function editPath() {
@@ -153,14 +160,24 @@ export function LocalUploadPicker({ listEntries, onConfirm, onCancel }: LocalUpl
         {loading ? <p role="status">{translate('upload.readingDirectory')}</p> : <>
           <div className="local-upload-select-all"><input ref={allRef} type="checkbox" aria-label={translate('upload.selectCurrentFolder')} disabled={!entries.length} checked={entries.length > 0 && selectedHere === entries.length} onChange={event => {
             const keys = new Set(entries.map(item => uploadPathKey(item.path)));
-            setSelected(current => event.target.checked ? [...current, ...entries.filter(item => !selectionKeys.has(uploadPathKey(item.path)))] : current.filter(item => !keys.has(uploadPathKey(item.path))));
+            const checked = event.target.checked;
+            setSelected(current => checked ? addEntries(current, entries) : current.filter(item => !keys.has(uploadPathKey(item.path))));
           }} />{sortHeader('name', 'download.sort.name')}{sortHeader('size', 'download.sort.size')}{sortHeader('modifiedAt', 'download.sort.time')}</div>
           <div className="local-upload-file-list">
             {listing?.parentPath && <div className="local-upload-entry local-upload-parent"><span /><button type="button" className="local-upload-entry-name" title={translate('upload.parentFolder')} onClick={() => { void load(listing.parentPath!); }}><EntryIcon directory /><span>..</span></button><span /><span /></div>}
             {entries.length === 0 && <p className="local-upload-empty">{translate('upload.folderEmpty')}</p>}
             {entries.slice(0, visibleCount).map(entry => <div className={`local-upload-entry${selectionKeys.has(uploadPathKey(entry.path)) ? ' selected' : ''}`} key={entry.path}>
               <input type="checkbox" aria-label={translate('upload.selectNamed', { name: entry.name })} checked={selectionKeys.has(uploadPathKey(entry.path))} onChange={() => toggle(entry)} />
-              <button type="button" className="local-upload-entry-name" title={entry.path} onClick={() => toggle(entry)} onDoubleClick={() => { if (entry.kind === 'directory') void load(entry.path); }} onKeyDown={event => {
+              <button type="button" className="local-upload-entry-name" title={entry.path} onClick={event => {
+                if (entry.kind === 'directory' && event.detail === 1) beforeDirectoryClick.current = { path: entry.path, selected };
+                if (entry.kind === 'file' || event.detail < 2) toggle(entry);
+              }} onDoubleClick={() => {
+                if (entry.kind !== 'directory') return;
+                // A double click opens the directory. Undo the selection change from its first click.
+                if (beforeDirectoryClick.current?.path === entry.path) setSelected(beforeDirectoryClick.current.selected);
+                beforeDirectoryClick.current = null;
+                void load(entry.path);
+              }} onKeyDown={event => {
                 if (event.key === 'Enter' && entry.kind === 'directory') { event.preventDefault(); void load(entry.path); }
               }}><EntryIcon directory={entry.kind === 'directory'} /><span>{entry.name}</span></button>
               <small>{entry.kind === 'directory' || entry.size == null ? '—' : formatBytes(entry.size)}</small>
@@ -171,10 +188,10 @@ export function LocalUploadPicker({ listEntries, onConfirm, onCancel }: LocalUpl
         </>}
       </section>
     </div>
-    <footer><p>{translate('upload.itemsToUpload', { count: normalized.length })}</p><label className="local-upload-hidden-toggle"><input type="checkbox" checked={showHidden} onChange={event => setShowHidden(event.target.checked)} />{translate('upload.showHidden')}</label><button type="button" onClick={onCancel}>{translate('dialog.cancel')}</button><button type="button" className="primary" disabled={!normalized.length || loading} onClick={() => {
-      if (submitted.current || !normalized.length) return;
+    <footer><p>{translate('upload.itemsToUpload', { count: selected.length })}</p><label className="local-upload-hidden-toggle"><input type="checkbox" checked={showHidden} onChange={event => setShowHidden(event.target.checked)} />{translate('upload.showHidden')}</label><button type="button" onClick={onCancel}>{translate('dialog.cancel')}</button><button type="button" className="primary" disabled={!selected.length || loading} onClick={() => {
+      if (submitted.current || !selected.length) return;
       submitted.current = true;
-      onConfirm(normalized.map(item => item.path));
+      onConfirm(selected.map(item => item.path));
     }}>{translate('upload.confirm')}</button></footer>
   </dialog>, document.body);
 }
