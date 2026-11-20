@@ -384,7 +384,7 @@ async fn open_authorization(app: AppHandle, provider: CloudProvider, authorizati
     // enter the UI initialization path. WebView creation runs off the UI thread.
     // The host owns this worker even if the CLI/MCP request disconnects.
     if current_session(&app, &authorization_id).is_ok_and(|session| session.status == Status::Pending) {
-        if crate::cloud::commands::begin_authorization_for(app.clone(), provider, AuthorizationWindowSource::Agent).await.is_err()
+        if crate::cloud::commands::begin_authorization_for(app.clone(), provider, AuthorizationWindowSource::Agent, None).await.is_err()
         {
             fail_session(&app, &authorization_id);
         }

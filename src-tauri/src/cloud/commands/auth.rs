@@ -372,20 +372,84 @@ pub fn logout_provider(
     store.remove(provider.key())
 }
 
+#[derive(Clone)]
+pub(super) struct BaiduAuthorizationBinding {
+    owner: String,
+    revision: u64,
+    closed: Arc<Mutex<bool>>,
+}
+
+impl BaiduAuthorizationBinding {
+    fn capture(
+        store: &impl CredentialStore,
+        supervisor: &auth_supervisor::AuthSupervisor,
+        owner: String,
+    ) -> Result<Self, QuarkError> {
+        let revision = Self::current_revision(store, supervisor, &owner)?;
+        Ok(Self { owner, revision, closed: Default::default() })
+    }
+
+    fn current_revision(
+        store: &impl CredentialStore,
+        supervisor: &auth_supervisor::AuthSupervisor,
+        owner: &str,
+    ) -> Result<u64, QuarkError> {
+        let record = supervisor.record(store, CloudProvider::Baidu)?;
+        if record.health == auth_supervisor::AuthHealth::Disconnected
+            || store.load(CloudProvider::Baidu.key())?.is_none()
+        {
+            return Err(QuarkError::NotAuthorized);
+        }
+        if owner.is_empty() || record.account_id.as_deref() != Some(owner) {
+            return Err(QuarkError::AccountMismatch);
+        }
+        Ok(record.session_revision)
+    }
+
+    // The caller owns the provider lock throughout validation and publication.
+    fn complete(
+        &self,
+        store: &impl CredentialStore,
+        supervisor: &auth_supervisor::AuthSupervisor,
+        validate: impl FnOnce(&MemoryCredentialStore) -> Result<CloudAccount, QuarkError>,
+    ) -> Result<CloudAccount, QuarkError> {
+        if Self::current_revision(store, supervisor, &self.owner)? != self.revision {
+            return Err(QuarkError::AccountMismatch);
+        }
+        let preview = MemoryCredentialStore::default();
+        let account = validate(&preview)?;
+        if account.provider != CloudProvider::Baidu || account.id != self.owner {
+            return Err(QuarkError::AccountMismatch);
+        }
+        let candidate = zeroize::Zeroizing::new(preview.load(CloudProvider::Baidu.key())?.ok_or(QuarkError::NotAuthorized)?);
+        let closed = self.closed.lock().map_err(|_| QuarkError::Storage)?;
+        if *closed {
+            return Err(QuarkError::AuthorizationPending);
+        }
+        store.save(CloudProvider::Baidu.key(), &candidate)?;
+        Ok(account)
+    }
+}
+
 #[tauri::command]
 pub async fn cloud_begin_authorization(
     app: AppHandle,
     provider: CloudProvider,
+    expected_account_id: Option<String>,
 ) -> Result<CloudAuthorization, QuarkError> {
-    begin_authorization_for(app, provider, crate::cli_cloud_auth::AuthorizationWindowSource::Desktop).await
+    begin_authorization_for(app, provider, crate::cli_cloud_auth::AuthorizationWindowSource::Desktop, expected_account_id).await
 }
 
 pub(crate) async fn begin_authorization_for(
     app: AppHandle,
     provider: CloudProvider,
     source: crate::cli_cloud_auth::AuthorizationWindowSource,
+    expected_account_id: Option<String>,
 ) -> Result<CloudAuthorization, QuarkError> {
     require_connected_provider(provider)?;
+    if expected_account_id.is_some() && provider != CloudProvider::Baidu {
+        return Err(QuarkError::ProviderUnsupported);
+    }
     let cloud = app
         .try_state::<Arc<CloudState>>()
         .ok_or(QuarkError::Storage)?;
@@ -395,12 +459,25 @@ pub(crate) async fn begin_authorization_for(
         .await?;
     let label = format!("cloud-auth-{}", provider.key());
     if let Some(window) = app.get_webview_window(&label) {
+        if provider == CloudProvider::Baidu {
+            let active = cloud.baidu_authorization_binding.lock().map_err(|_| QuarkError::Storage)?;
+            if active.as_ref().map(|binding| &binding.owner) != expected_account_id.as_ref() {
+                return Err(QuarkError::AuthorizationPending);
+            }
+        }
         crate::cli_cloud_auth::authorization_window_opened(&app, provider, false, source);
         window
             .show()
             .map_err(|_| QuarkError::WebAuthorizationRequired)?;
         let _ = window.set_focus();
     } else {
+        let binding = if let Some(owner) = expected_account_id {
+            Some(run(app.clone(), provider, move |state, _| {
+                BaiduAuthorizationBinding::capture(&state.store, &state.auth_supervisor, owner)
+            }).await?)
+        } else {
+            None
+        };
         cloud.clear_authorization_completion(provider)?;
         let url = crate::cloud::ProviderRegistry::global()
             .get(provider)
@@ -450,15 +527,26 @@ pub(crate) async fn begin_authorization_for(
         {
             builder = builder.initialization_script(script);
         }
-        let window = builder
-            .build()
-            .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+        let window = builder.build().map_err(|_| QuarkError::WebAuthorizationRequired)?;
         let generation = crate::cli_cloud_auth::authorization_window_opened(&app, provider, true, source);
-        if let Some(generation) = generation.clone() {
+        let stop_on_close = binding.as_ref().map(|binding| binding.closed.clone());
+        if provider == CloudProvider::Baidu {
+            *cloud.baidu_authorization_binding.lock().map_err(|_| QuarkError::Storage)? = binding;
+        }
+        if generation.is_some() || stop_on_close.is_some() {
             let close_app = app.clone();
+            let generation = generation.clone();
+            let closed = stop_on_close.clone();
             window.on_window_event(move |event| {
+                if matches!(event, tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed) {
+                    if let Some(closed) = &closed {
+                        *closed.lock().unwrap_or_else(|error| error.into_inner()) = true;
+                    }
+                }
                 if matches!(event, tauri::WindowEvent::Destroyed) {
-                    crate::cli_cloud_auth::authorization_window_closed(&close_app, provider, &generation);
+                    if let Some(generation) = &generation {
+                        crate::cli_cloud_auth::authorization_window_closed(&close_app, provider, generation);
+                    }
                 }
             });
         }
@@ -471,6 +559,11 @@ pub(crate) async fn begin_authorization_for(
         let completion_app = app.clone();
         tauri::async_runtime::spawn(async move {
             for _ in 0..300 {
+                if stop_on_close.as_ref().is_some_and(|closed| {
+                    *closed.lock().unwrap_or_else(|error| error.into_inner())
+                }) {
+                    return;
+                }
                 if completion_app
                     .get_webview_window(&format!("cloud-auth-{}", provider.key()))
                     .is_none()
@@ -483,11 +576,10 @@ pub(crate) async fn begin_authorization_for(
                 }) {
                     return;
                 }
-                if complete_authorization_for_window(completion_app.clone(), provider, generation.clone())
-                    .await
-                    .is_ok()
-                {
-                    return;
+                match complete_authorization_for_window(completion_app.clone(), provider, generation.clone()).await {
+                    Ok(_) => return,
+                    Err(QuarkError::AccountMismatch | QuarkError::NotAuthorized) if stop_on_close.is_some() => return,
+                    Err(_) => {}
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             }
@@ -692,7 +784,7 @@ pub async fn cloud_reauthorize_failed_task(
         Err(error) if should_attempt_silent_provider_recovery(&error) => {}
         Err(error) => return Err(error),
     }
-    cloud_begin_authorization(app, requested_provider).await
+    cloud_begin_authorization(app, requested_provider, None).await
 }
 
 pub async fn resume_reauthorized_provider_tasks(
@@ -933,7 +1025,16 @@ async fn complete_authorization_for_window(
             },
             auth_method: CloudAuthMethod::Web,
         };
-        let account = if recipe.browser_context {
+        let binding = if provider == CloudProvider::Baidu {
+            state.baidu_authorization_binding.lock().map_err(|_| QuarkError::Storage)?.clone()
+        } else {
+            None
+        };
+        let account = if let Some(binding) = binding {
+            binding.complete(&state.store, &state.auth_supervisor, |candidate| {
+                ProviderRegistry::global().driver(provider, candidate, http).auth().complete_web(&input)
+            })?
+        } else if recipe.browser_context {
             let validation_http = TianyiBrowserValidationTransport {
                 window: &window,
                 native: http,
@@ -1268,4 +1369,43 @@ pub async fn cloud_logout(app: AppHandle, provider: CloudProvider) -> Result<(),
         Ok(())
     })
     .await
+}
+
+#[cfg(test)]
+#[test]
+fn bound_baidu_web_login_cannot_replace_another_or_newer_session() {
+    let store = MemoryCredentialStore::default();
+    let supervisor = auth_supervisor::AuthSupervisor::default();
+    let provider = CloudProvider::Baidu;
+    let owner = "owner";
+    let ready = || supervisor.ready(&store, provider, Some(owner.into()), Some(CloudAuthMethod::Password), None);
+    store.save(provider.key(), b"original").unwrap();
+    ready().unwrap();
+    let binding = BaiduAuthorizationBinding::capture(&store, &supervisor, owner.into()).unwrap();
+    let stage = |candidate: &MemoryCredentialStore, id: &str| {
+        candidate.save(provider.key(), b"candidate")?;
+        Ok(CloudAccount {
+            provider, id: id.into(), display_name: String::new(), auth_method: CloudAuthMethod::Web,
+        })
+    };
+    assert!(matches!(binding.complete(&store, &supervisor, |c| stage(c, "other")), Err(QuarkError::AccountMismatch)));
+    assert_eq!(store.load(provider.key()).unwrap().unwrap(), b"original");
+
+    let cancelled = binding.clone();
+    assert!(matches!(binding.complete(&store, &supervisor, |c| {
+        *cancelled.closed.lock().unwrap() = true;
+        stage(c, owner)
+    }), Err(QuarkError::AuthorizationPending)));
+    assert_eq!(store.load(provider.key()).unwrap().unwrap(), b"original");
+
+    let next = BaiduAuthorizationBinding::capture(&store, &supervisor, owner.into()).unwrap();
+    ready().unwrap();
+    assert!(matches!(next.complete(&store, &supervisor, |_| panic!("stale candidate")), Err(QuarkError::AccountMismatch)));
+    assert_eq!(store.load(provider.key()).unwrap().unwrap(), b"original");
+
+    let fresh = BaiduAuthorizationBinding::capture(&store, &supervisor, owner.into()).unwrap();
+    fresh.complete(&store, &supervisor, |c| stage(c, owner)).unwrap();
+    assert_eq!(store.load(provider.key()).unwrap().unwrap(), b"candidate");
+    supervisor.disconnect(&store, provider).unwrap();
+    assert!(matches!(fresh.complete(&store, &supervisor, |_| panic!("disconnected")), Err(QuarkError::NotAuthorized)));
 }

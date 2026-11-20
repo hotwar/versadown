@@ -628,6 +628,7 @@ fn upload_selected_path(
     provider: CloudProvider,
     parent_id: &str,
     prepared: PreparedUpload,
+    expected_account_id: Option<&str>,
     control: crate::cloud::UploadControl,
 ) -> Result<Vec<CloudFile>, QuarkError> {
     control.wait_ready_blocking()?;
@@ -643,9 +644,25 @@ fn upload_selected_path(
         inner: transport,
         control: control.clone(),
     };
+    if let Some(expected) = expected_account_id {
+        let PreparedUpload::File(path) = prepared else { return Err(QuarkError::SourceFileMissing); };
+        if expected.is_empty() || provider != CloudProvider::Baidu { return Err(QuarkError::AccountMismatch); }
+        return upload_file_with_progress(&control, &path, || {
+            state.with_upload_session(provider, &http, |store| {
+                let client = baidu::BaiduClient::new(load_provider_session(provider, store)?, &http);
+                if client.account()?.id != expected { return Err(QuarkError::AccountMismatch); }
+                client.upload_file(parent_id, &path, &http)
+            })
+        }).map(|file| vec![file]);
+    }
     match prepared {
         PreparedUpload::Directory(plan) => {
-            upload_directory_tree(state, &http, provider, parent_id, plan, &control)
+            upload_directory_tree(state, &http, provider, parent_id, plan, &control).map_err(|error| {
+                // A directory may already contain successful writes. Only single files can continue after authorization.
+                if matches!(error, QuarkError::BaiduUploadWebSessionRequired) {
+                    QuarkError::BaiduUploadPrecreateRejected { status: 200, errno: Some(-6) }
+                } else { error }
+            })
         }
         PreparedUpload::File(path) => Ok(vec![upload_file_with_progress(&control, &path, || {
             state.upload_file(provider, &http, parent_id, &path)
@@ -669,6 +686,8 @@ fn upload_error_code(error: &QuarkError) -> &'static str {
         QuarkError::BaiduDriveVerificationRequired => "baidu_drive_verification_required",
         QuarkError::BaiduOperationVerificationRequired => "baidu_operation_verification_required",
         QuarkError::BaiduUploadAuthorizationRequired(stage) => stage.code(),
+        QuarkError::BaiduUploadWebSessionRequired => "baidu_upload_web_session_required",
+        QuarkError::BaiduUploadPrecreateRejected { .. } => "baidu_upload_precreate_rejected",
         QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired => "web_auth_required",
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
         QuarkError::AuthorizationPending => "authorization_pending",
@@ -719,6 +738,7 @@ async fn upload_selected_paths(
     provider: CloudProvider,
     parent_id: String,
     paths: Vec<PathBuf>,
+    expected_account_id: Option<String>,
     tracker: UploadProgressTracker,
     control: UploadControl,
     rate_limiter: Arc<crate::bandwidth::BandwidthLimiter>,
@@ -760,7 +780,7 @@ async fn upload_selected_paths(
                 .with_rate_limiter(rate_limiter.clone());
             let result = prepared
                 .and_then(|prepared| {
-                    upload_selected_path(&state, provider, &parent_id, prepared, control.clone())
+                    upload_selected_path(&state, provider, &parent_id, prepared, expected_account_id.as_deref(), control.clone())
                 })
                 .map_err(|error| {
                     if control.is_cancelled() {
@@ -796,6 +816,7 @@ pub async fn cloud_upload_files(
     provider: CloudProvider,
     parent_id: String,
     paths: Option<Vec<String>>,
+    expected_account_id: Option<String>,
     on_progress: Channel<CloudUploadProgress>,
     upload_id: String,
 ) -> Result<CloudUploadOutcome, QuarkError> {
@@ -841,6 +862,7 @@ pub async fn cloud_upload_files(
                 provider,
                 parent_id,
                 paths,
+                expected_account_id,
                 tracker,
                 control,
                 lease.limiter(),
@@ -914,6 +936,7 @@ pub async fn cloud_upload_directory(
                 provider,
                 parent_id,
                 vec![path],
+                None,
                 tracker,
                 control,
                 lease.limiter(),
@@ -1542,3 +1565,7 @@ mod directory_tests {
         assert_eq!(outcome.failures[0].code, "network_error");
     }
 }
+
+#[cfg(test)]
+#[path = "live_baidu_upload_test.rs"]
+mod live_baidu_upload_test;

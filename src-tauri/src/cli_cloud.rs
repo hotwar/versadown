@@ -23,6 +23,8 @@ pub(crate) fn cloud_code(e:QuarkError)->&'static str {
         QuarkError::InvalidInput(s) if s=="agent.error.fileConflict"=>"FILE_CONFLICT",
         QuarkError::InvalidInput(_)=>"INVALID_ARGUMENT",
         QuarkError::SourceFileMissing=>"SOURCE_CHANGED",
+        QuarkError::BaiduUploadWebSessionRequired => "CLOUD_UPLOAD_AUTHORIZATION_REQUIRED",
+        QuarkError::BaiduUploadPrecreateRejected { .. } => "CLOUD_UPLOAD_PREPARATION_REJECTED",
         QuarkError::BaiduUploadAuthorizationRequired(stage) => match stage {
             BaiduUploadAuthStage::Token => "CLOUD_UPLOAD_SESSION_REQUIRED",
             BaiduUploadAuthStage::Precreate => "CLOUD_UPLOAD_VERIFICATION_REQUIRED",
@@ -219,7 +221,7 @@ async fn perform(app:&AppHandle,plan:&CloudPlan,dto:&mut CloudOperationDto)->Cod
                             dto.status = "needs_review".into();
                             break;
                         }
-                        "CLOUD_UPLOAD_SESSION_REQUIRED" | "CLOUD_UPLOAD_VERIFICATION_REQUIRED"
+                        "CLOUD_UPLOAD_AUTHORIZATION_REQUIRED" | "CLOUD_UPLOAD_PREPARATION_REJECTED" | "CLOUD_UPLOAD_SESSION_REQUIRED" | "CLOUD_UPLOAD_VERIFICATION_REQUIRED"
                         | "CLOUD_OPERATION_VERIFICATION_REQUIRED" | "CLOUD_AUTHORIZATION_PENDING"
                         | "AUTH_REQUIRED" | "ACCOUNT_MISMATCH" => break,
                         _ => {}
@@ -258,6 +260,14 @@ mod tests{
 
     #[test]
     fn baidu_upload_errors_preserve_verification_and_uncertain_commit() {
+        let renewal = cloud_code(QuarkError::BaiduUploadWebSessionRequired);
+        assert_eq!(renewal, "CLOUD_UPLOAD_AUTHORIZATION_REQUIRED");
+        assert_eq!(ApiError::new(renewal, "en").next_action.as_deref(), Some("renew_upload_authorization_in_vd"));
+        let rejected = cloud_code(QuarkError::BaiduUploadPrecreateRejected { status: 200, errno: Some(-6) });
+        assert_eq!(rejected, "CLOUD_UPLOAD_PREPARATION_REJECTED");
+        let error = ApiError::new(rejected, "zh-CN");
+        assert_eq!(error.next_action.as_deref(), Some("inspect_desktop"));
+        assert!(!error.retryable);
         for (stage, code, next_action) in [
             (BaiduUploadAuthStage::Token, "CLOUD_UPLOAD_SESSION_REQUIRED", "verify_cloud_upload_in_browser"),
             (BaiduUploadAuthStage::Precreate, "CLOUD_UPLOAD_VERIFICATION_REQUIRED", "verify_cloud_upload_in_browser"),

@@ -54,6 +54,7 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
             "baidu_operation_verification_required".into()
         }
         QuarkError::BaiduUploadAuthorizationRequired(stage) => stage.message().into(),
+        QuarkError::BaiduUploadPrecreateRejected { .. } | QuarkError::BaiduUploadWebSessionRequired => error.to_string(),
         QuarkError::PikpakRegionalMembershipRestricted => {
             "区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员"
                 .into()
@@ -105,6 +106,8 @@ pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
         QuarkError::BaiduDriveVerificationRequired => "baidu_drive_verification_required",
         QuarkError::BaiduOperationVerificationRequired => "baidu_operation_verification_required",
         QuarkError::BaiduUploadAuthorizationRequired(stage) => stage.code(),
+        QuarkError::BaiduUploadWebSessionRequired => "baidu_upload_web_session_required",
+        QuarkError::BaiduUploadPrecreateRejected { .. } => "baidu_upload_precreate_rejected",
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
         QuarkError::AuthorizationPending => "authorization_pending",
         QuarkError::SourceFileMissing => "source_file_missing",

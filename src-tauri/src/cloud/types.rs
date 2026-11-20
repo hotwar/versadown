@@ -413,6 +413,10 @@ pub enum CloudError {
     BaiduDriveVerificationRequired,
     #[error("{}", .0.message())]
     BaiduUploadAuthorizationRequired(BaiduUploadAuthStage),
+    #[error("HTTP {status}{}", errno.map(|code| format!(", errno {code}")).unwrap_or_default())]
+    BaiduUploadPrecreateRejected { status: u16, errno: Option<i64> },
+    #[error("HTTP 200, errno -6")]
+    BaiduUploadWebSessionRequired,
     #[error("区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员")]
     PikpakRegionalMembershipRestricted,
     #[error("正在等待网页登录，请在授权窗口完成登录")]
@@ -535,6 +539,8 @@ impl Serialize for CloudError {
             Self::BaiduDriveVerificationRequired => "baidu_drive_verification_required",
             Self::BaiduOperationVerificationRequired => "baidu_operation_verification_required",
             Self::BaiduUploadAuthorizationRequired(stage) => stage.code(),
+            Self::BaiduUploadWebSessionRequired => "baidu_upload_web_session_required",
+            Self::BaiduUploadPrecreateRejected { .. } => "baidu_upload_precreate_rejected",
             Self::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
             Self::AuthorizationPending => "authorization_pending",
             Self::SourceFileMissing => "source_file_missing",

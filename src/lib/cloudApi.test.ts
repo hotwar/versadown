@@ -114,6 +114,20 @@ it('uses the share management command contract for creating, listing, and cancel
   expect(native.invoke).toHaveBeenNthCalledWith(3, 'cloud_cancel_shares', { provider: 'quark', shareIds: ['share-1'] });
 });
 
+it('binds a Baidu upload authorization and its resumed native upload to the same expected account', async () => {
+  const api = await import('./cloudApi');
+  native.invoke.mockClear();
+  await api.beginCloudAuthorization('baidu');
+  await api.beginCloudAuthorization('baidu', 'owner');
+  await api.uploadCloudFiles('baidu', 'original-folder', ['C:/test.txt'], undefined, 'owner');
+  expect(native.invoke).toHaveBeenNthCalledWith(1, 'cloud_begin_authorization', { provider: 'baidu' });
+  expect(native.invoke).toHaveBeenNthCalledWith(2, 'cloud_begin_authorization', { provider: 'baidu', expectedAccountId: 'owner' });
+  expect(native.invoke).toHaveBeenNthCalledWith(3, 'cloud_upload_files', {
+    provider: 'baidu', parentId: 'original-folder', paths: ['C:/test.txt'], expectedAccountId: 'owner',
+    uploadId: expect.any(String), onProgress: expect.any(Object),
+  });
+});
+
 it('opens Baidu operation verification and captures the same account afterward', async () => {
   const api = await import('./cloudApi');
   native.invoke.mockClear();

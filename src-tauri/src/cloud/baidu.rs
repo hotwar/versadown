@@ -255,7 +255,10 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), b"upload fixture").unwrap();
         let token = json!({"errno":0,"result":{"bdstoken":"token"}});
-        let http = Http::new(vec![token.clone(), json!({"errno":-20})]);
+        let http = Http::new(vec![
+            token.clone(),
+            json!({"errno":-20,"vcode_str":"fixture-challenge"}),
+        ]);
         let error = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http)
             .upload_file("/", file.path(), &http)
             .unwrap_err();
@@ -283,6 +286,62 @@ mod tests {
         assert_eq!(requests.len(), 3);
         assert_eq!(requests[2].method, "POST");
         assert!(requests[2].url.contains("/api/create?"));
+    }
+
+    #[test]
+    fn baidu_upload_precreate_denial_preserves_status_without_replaying_or_expiring_the_session() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"upload fixture").unwrap();
+        for errno in [-6, 6, -20, 110, 31045] {
+            let http = Http::new(vec![
+                json!({"errno":0,"result":{"bdstoken":"fixture"}}),
+                json!({"errno":errno,"vcode":"0","errmsg":"untrusted response"}),
+                json!({"errno":0,"list":[]}),
+            ]);
+            let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
+            let error = client.upload_file("/", file.path(), &http).unwrap_err();
+            assert!(!error.is_session_level());
+            assert_eq!(
+                serde_json::to_value(&error).unwrap(),
+                json!({"code":"baidu_upload_precreate_rejected","message":format!("HTTP 200, errno {errno}")}),
+            );
+            client.directory("/").unwrap();
+            let requests = http.requests.lock().unwrap();
+            assert_eq!(requests.len(), 3);
+            assert_eq!(requests.iter().filter(|r| r.method == "POST").count(), 1);
+            assert!(requests[1].url.contains("/api/precreate?"));
+        }
+    }
+
+    #[test]
+    fn baidu_upload_password_session_rejected_before_transfer_can_renew_in_vd() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"upload fixture").unwrap();
+        let mut session = BaiduSession::cookie("BDUSS=fixture");
+        session.auth_method = CloudAuthMethod::Password;
+        let http = Http::new(vec![
+            json!({"errno":0, "result":{"bdstoken":"fixture"}}),
+            json!({"errno":-6}),
+        ]);
+        let error = BaiduClient::new(session, &http).upload_file("/", file.path(), &http).unwrap_err();
+        assert!(matches!(error, QuarkError::BaiduUploadWebSessionRequired));
+        assert!(!error.is_session_level());
+        assert_eq!(http.requests.lock().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn baidu_upload_precreate_uses_only_explicit_challenges_and_numeric_diagnostics() {
+        for (status, body, code, message) in [
+            (401, "not JSON", "baidu_upload_precreate_rejected", "HTTP 401"),
+            (403, r#"{"error_code":"6","msg":"CAPTCHA"}"#, "baidu_upload_precreate_rejected", "HTTP 403, errno 6"),
+            (503, "upstream", "baidu_upload_precreate_rejected", "HTTP 503"),
+            (401, r#"{"errno":-6,"verify_url":"https://example.invalid/private"}"#,
+                "baidu_upload_verification_required", BaiduUploadAuthStage::Precreate.message()),
+        ] {
+            let response = CloudHttpResponse { status, body: body.into(), ..Default::default() };
+            let error = baidu_json_at_stage(&response, Some(BaiduUploadAuthStage::Precreate)).unwrap_err();
+            assert_eq!(serde_json::to_value(&error).unwrap(), json!({"code": code, "message": message}));
+        }
     }
 
     #[test]
@@ -2208,9 +2267,21 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         self.list_directory(parent, |url| self.personal_get(url, self.pan_headers(), None))
     }
 
-    /// Login validation already checked the account using this transport.
-    /// Keep a rejected candidate pending in the official sign-in window.
-    pub(crate) fn validate_login_directory(&self, parent: &str) -> Result<(), QuarkError> {
+    /// A new login must identify the account and read the root without the
+    /// recovery used by an already-authorized directory listing.
+    pub(crate) fn validate_login_candidate(
+        &self,
+        root: &str,
+        mut report_stage: impl FnMut(&'static str),
+    ) -> Result<CloudAccount, QuarkError> {
+        report_stage("账号信息校验");
+        let account = self.account()?;
+        report_stage("目录访问校验");
+        self.validate_login_directory(root)?;
+        Ok(account)
+    }
+
+    fn validate_login_directory(&self, parent: &str) -> Result<(), QuarkError> {
         self.list_directory(parent, |url| {
             let response = self.http.send(CloudHttpRequest {
                 method: "GET",
@@ -2799,7 +2870,11 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
                 ("rtype", if no_replace { "0" } else { "3" }.into()),
                 ("block_list", json!(blocks).to_string()),
             ]),
-        )?;
+        ).map_err(|error| match error {
+            QuarkError::BaiduUploadPrecreateRejected { status: 200, errno: Some(-6) }
+                if self.session.auth_method == CloudAuthMethod::Password => QuarkError::BaiduUploadWebSessionRequired,
+            other => other,
+        })?;
         // A zero-slice/rapid-upload response still needs the normal create
         // commit unless the service has already returned a concrete file.
         // Treating precreate itself as a completed file loses valid rapid
@@ -3296,8 +3371,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         } else {
             BaiduClient::new(session.clone(), http)
         };
-        let validated_account = client.account()?;
-        client.validate_login_directory("/")?;
+        let validated_account = client.validate_login_candidate("/", |_| {})?;
         let final_cookies = http.cookies_for_url(PAN)?;
         if !final_cookies.is_empty() {
             session = parse_baidu_web_session(&final_cookies)?;
@@ -3463,9 +3537,17 @@ fn baidu_json_at_stage(
             eprintln!("[baidu-upload] stage={stage:?} http={} errno={errno:?}", response.status);
         }
     };
+    let precreate = upload_stage == Some(BaiduUploadAuthStage::Precreate);
+    let successful_http = (200..300).contains(&response.status);
+    let precreate_rejection = |errno| QuarkError::BaiduUploadPrecreateRejected {
+        status: response.status,
+        errno,
+    };
     let value: Value = serde_json::from_str(&response.body).map_err(|_| {
         log_upload(None);
-        if response.status == 401 {
+        if precreate && !successful_http {
+            precreate_rejection(None)
+        } else if response.status == 401 {
             QuarkError::AuthorizationExpired
         } else {
             QuarkError::InvalidResponse
@@ -3473,6 +3555,17 @@ fn baidu_json_at_stage(
     })?;
     let errno = baidu_response_errno(&value);
     log_upload(errno);
+    if precreate {
+        // Passport error numbers have different meanings on the drive upload endpoint.
+        // Require challenge details from this operation before asking the user to verify.
+        if challenge_fields(&value) {
+            return Err(QuarkError::BaiduUploadAuthorizationRequired(BaiduUploadAuthStage::Precreate));
+        }
+        if errno.is_some() || !successful_http {
+            return Err(precreate_rejection(errno));
+        }
+        return Ok(value);
+    }
     if challenge(&value) {
         return Err(QuarkError::WebAuthorizationRequired);
     }
@@ -3500,7 +3593,11 @@ fn challenge(value: &Value) -> bool {
             value.get(key).and_then(baidu_error_number),
             Some(-20 | 6 | 16 | 257 | 9019 | 120021 | 400031 | 400023 | 400101 | 500001 | 500002)
         )
-    }) || [
+    }) || challenge_fields(value)
+}
+
+fn challenge_fields(value: &Value) -> bool {
+    [
         "captcha",
         "vcode",
         "vcode_str",
@@ -3512,9 +3609,17 @@ fn challenge(value: &Value) -> bool {
     .any(|key| {
         value
             .get(key)
-            .is_some_and(|field| field.as_str().is_some_and(|s| !s.is_empty()))
+            .is_some_and(|field| match field {
+                Value::String(text) => {
+                    let text = text.trim();
+                    !text.is_empty() && text != "0" && !text.eq_ignore_ascii_case("false")
+                }
+                Value::Bool(flag) => *flag && matches!(*key, "captcha" | "vcode"),
+                _ => false,
+            })
     })
 }
+
 fn baidu_response_errno(value: &Value) -> Option<i64> {
     ["errno", "error_code", "err_no"]
         .iter()
