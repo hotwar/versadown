@@ -611,6 +611,95 @@ fn failed_attempts_persist_escalating_backoff_across_restart_and_success_resets_
 }
 
 #[test]
+fn transient_maintenance_failures_survive_restart_without_demanding_login() {
+    let provider = CloudProvider::Baidu;
+    let (supervisor, clock, store) = fixture(1000, 30);
+    store.save(provider.key(), b"saved-session").unwrap();
+    supervisor.ready(&store, provider, Some("owner".into()), None, None).unwrap();
+    for (attempt, expected) in ["network_error", "invalid_response", "provider_error", "credential_storage_error"]
+        .into_iter().enumerate()
+    {
+        let now = 1000 + 300 * attempt as i64;
+        clock.store(now, Ordering::SeqCst);
+        let result = supervisor.maintain(&store, provider, None, true, || {
+            Err(match expected {
+                "network_error" => CloudError::Transport("private fixture detail".into()),
+                "provider_error" => CloudError::Provider("private fixture detail".into()),
+                "credential_storage_error" => CloudError::Storage,
+                _ => CloudError::InvalidResponse,
+            })
+        }).unwrap_err();
+        assert_eq!(serde_json::to_value(&result).unwrap()["code"], expected);
+        let clock_copy = Arc::clone(&clock);
+        let restarted = AuthSupervisor::new(move || clock_copy.load(Ordering::SeqCst), || 30);
+        restarted.restore(&store, provider).unwrap();
+        let record = restarted.record(&store, provider).unwrap();
+        assert_ne!(record.health, AuthHealth::NeedsInteractiveAuth);
+        assert_eq!(record.consecutive_failures, 0, "infrastructure failures must not use the login budget");
+        assert_eq!(record.next_allowed_attempt_at, Some(now + 300));
+        assert!(!serde_json::to_string(&record).unwrap().contains("private fixture detail"));
+        let failure = restarted.run::<()>(&store, provider, SessionWorkKind::Read,
+            |_| Err(CloudError::AuthorizationExpired), |_| panic!("cooldown must survive restarting VD"),
+        ).unwrap_err();
+        assert_eq!(serde_json::to_value(&failure).unwrap()["code"], expected);
+        restarted.run(&store, provider, SessionWorkKind::Read, |_| Ok(()),
+            |_| panic!("a successful request must still work during cooldown")
+        ).unwrap();
+    }
+    clock.store(2200, Ordering::SeqCst);
+    supervisor.maintain(&store, provider, None, true, || Ok(())).unwrap();
+    let record = supervisor.record(&store, provider).unwrap();
+    assert_eq!(record.health, AuthHealth::Ready);
+    assert_eq!(record.next_allowed_attempt_at, None);
+}
+
+#[test]
+fn unfinished_maintenance_only_reserves_a_deadline_on_restart() {
+    let (supervisor, _, store) = fixture(1000, 30);
+    let provider = CloudProvider::Baidu;
+    store.save(provider.key(), b"saved").unwrap();
+    supervisor.ready(&store, provider, Some("owner".into()), None, None).unwrap();
+    supervisor.maintain(&store, provider, None, true, || {
+        // Only the persisted in-flight record would survive a process exit here.
+        let copy = MemoryCredentialStore::default();
+        copy.save(provider.key(), b"saved")?;
+        let record_key = "cloud-auth-maintenance-baidu";
+        copy.save(record_key, &store.load(record_key)?.unwrap())?;
+        let restarted = AuthSupervisor::new(|| 1001, || 30);
+        restarted.restore(&copy, provider)?;
+        let error = restarted.maintain(&copy, provider, None, true, || panic!("reserved cooldown")).unwrap_err();
+        assert!(matches!(error, CloudError::Provider(_)));
+        assert_eq!(restarted.record(&copy, provider)?.consecutive_failures, 0);
+        Ok(())
+    }).unwrap();
+}
+
+#[test]
+fn proactive_profile_continuation_preserves_temporary_failure_after_restart() {
+    let (supervisor, clock, store) = fixture(1000, 30);
+    let provider = CloudProvider::Aliyun;
+    store.save(provider.key(), br#"{"expires_at":2000}"#).unwrap();
+    supervisor.ready(&store, provider, Some("owner".into()), None, Some(2000)).unwrap();
+    clock.store(1670, Ordering::SeqCst);
+    let result: Result<(), _> = supervisor.run(&store, provider, SessionWorkKind::Read,
+        |_| Err(CloudError::AuthorizationExpired),
+        |phase| match phase {
+            RecoveryPhase::Proactive => Err(CloudError::WebAuthorizationRequired),
+            RecoveryPhase::ProfileOnly => Err(CloudError::Transport("connection failed".into())),
+            _ => panic!("unexpected recovery step"),
+        },
+    );
+    assert!(matches!(result, Err(CloudError::Transport(_))));
+    let restarted = AuthSupervisor::new(|| 1671, || 30);
+    restarted.restore(&store, provider).unwrap();
+    assert_eq!(restarted.record(&store, provider).unwrap().consecutive_failures, 0);
+    let retry = restarted.run::<()>(&store, provider, SessionWorkKind::Read,
+        |_| Err(CloudError::AuthorizationExpired), |_| panic!("cooldown"),
+    );
+    assert!(matches!(retry, Err(CloudError::Transport(_))));
+}
+
+#[test]
 fn successful_recovery_resets_previous_failure() {
     let (supervisor, clock, store) = fixture(1000, 30);
     let provider = CloudProvider::Pikpak;
@@ -1316,4 +1405,128 @@ fn recovered_read_keeps_its_result_when_final_session_persistence_fails() {
     let warnings = warnings.lock().unwrap();
     assert_eq!(warnings.len(), 1);
     assert!(warnings[0].operation_succeeded);
+}
+
+#[test]
+fn cold_start_recovers_a_missing_native_session_only_for_an_existing_account() {
+    for (provider, known_owner, saved_owner, expected_phase) in [
+        (CloudProvider::Quark, Some("owner"), None, Some(RecoveryPhase::AuthFailure)),
+        (CloudProvider::Pikpak, None, Some("owner"), Some(RecoveryPhase::AuthFailure)),
+        (CloudProvider::Pikpak, Some("owner"), Some("other"), Some(RecoveryPhase::ProfileOnly)),
+        (CloudProvider::Pikpak, None, None, None),
+    ] {
+        let (previous, _, store) = fixture(1000, 30);
+        if let Some(owner) = known_owner {
+            previous.ready(&store, provider, Some(owner.into()), None, None).unwrap();
+        }
+        if let Some(owner) = saved_owner {
+            save_password_credential(&store, CloudPasswordCredential::new(provider, owner, "user", "fixture")).unwrap();
+        }
+        let restarted = AuthSupervisor::new(|| 1050, || 30);
+        restarted.restore(&store, provider).unwrap();
+        let mut attempts = 0;
+        let read = restarted.run(&store, provider, SessionWorkKind::Read,
+            |snapshot| snapshot.load(provider.key())?.ok_or(CloudError::NotAuthorized),
+            |phase| {
+                assert!(Some(phase) == expected_phase);
+                attempts += 1;
+                store.save(provider.key(), b"restored")
+            },
+        );
+        assert_eq!(attempts, usize::from(expected_phase.is_some()));
+        if expected_phase.is_some() {
+            assert_eq!(read.unwrap(), b"restored");
+        } else {
+            assert!(matches!(read, Err(CloudError::NotAuthorized)));
+        }
+        restarted.disconnect(&store, provider).unwrap();
+        let restarted = AuthSupervisor::new(|| 1200, || 30);
+        let read = restarted.run::<()>(&store, provider, SessionWorkKind::Read,
+            |_| panic!("explicit logout must stop reads"), |_| panic!("explicit logout must stop recovery"),
+        );
+        assert!(matches!(read, Err(CloudError::NotAuthorized)));
+    }
+}
+
+#[test]
+fn local_xunlei_verification_expiry_does_not_exhaust_account_recovery() {
+    let (supervisor, clock, store) = fixture(1000, 30);
+    let provider = CloudProvider::Xunlei;
+    store.save(provider.key(), b"session").unwrap();
+    supervisor.ready(&store, provider, Some("owner".into()), None, None).unwrap();
+    for _ in 0..4 {
+        let result = supervisor.run::<()>(&store, provider, SessionWorkKind::Read,
+            |_| Err(CloudError::XunleiVerificationUnavailable("metadata_expired")),
+            |phase| {
+                assert!(phase == RecoveryPhase::OperationVerification);
+                Err(CloudError::AuthorizationPending)
+            },
+        );
+        assert!(matches!(result, Err(CloudError::XunleiVerificationUnavailable("metadata_expired"))));
+        let record = supervisor.record(&store, provider).unwrap();
+        assert_eq!(record.consecutive_failures, 0);
+        assert_eq!(record.health, AuthHealth::Ready);
+        let cooldown = supervisor.maintain(&store, provider, None, true, || panic!("cooldown"));
+        assert!(matches!(cooldown, Err(CloudError::XunleiVerificationUnavailable("metadata_expired"))));
+        clock.store(record.next_allowed_attempt_at.unwrap(), Ordering::SeqCst);
+    }
+    supervisor.maintain(&store, provider, None, true, || Ok(())).unwrap();
+}
+
+#[test]
+fn scheduled_refresh_defers_the_browser_check_until_a_real_failure_even_across_restart() {
+    let provider = CloudProvider::Aliyun;
+    let (supervisor, clock, store) = fixture(1000, 30);
+    store.save(provider.key(), br#"{"expires_at":2000}"#).unwrap();
+    supervisor.ready(&store, provider, Some("owner".into()), None, Some(2000)).unwrap();
+    clock.store(1670, Ordering::SeqCst);
+    supervisor.maintain(&store, provider, None, false,
+        || Err(CloudError::WebAuthorizationRequired)).unwrap_err();
+    assert_eq!(supervisor.record(&store, provider).unwrap().consecutive_failures, 0);
+    let restarted = AuthSupervisor::new(|| 1671, || 30);
+    restarted.restore(&store, provider).unwrap();
+    assert!(!restarted.is_due(&store, provider).unwrap());
+    restarted.run(&store, provider, SessionWorkKind::Read,
+        |_| Ok(()), |_| panic!("a successful read must not open the provider profile")).unwrap();
+    let mut profiles = 0;
+    let result = restarted.run(&store, provider, SessionWorkKind::Read, |snapshot| {
+        if snapshot.load(provider.key())?.as_deref() == Some(b"restored") { Ok(()) }
+        else { Err(CloudError::AuthorizationExpired) }
+    }, |phase| {
+        assert!(phase == RecoveryPhase::ProfileOnly);
+        profiles += 1;
+        store.save(provider.key(), b"restored")
+    });
+    assert!(result.is_ok());
+    assert_eq!(profiles, 1);
+}
+
+#[test]
+fn concurrent_profile_reads_report_the_same_network_failure() {
+    let provider = CloudProvider::Aliyun;
+    let (supervisor, clock, store) = fixture(1000, 30);
+    store.save(provider.key(), br#"{"expires_at":2000}"#).unwrap();
+    supervisor.ready(&store, provider, Some("owner".into()), None, Some(2000)).unwrap();
+    clock.store(1670, Ordering::SeqCst);
+    supervisor.maintain(&store, provider, None, false, || {
+        Err(CloudError::WebAuthorizationRequired)
+    }).unwrap_err();
+    let read = supervisor.run::<()>(
+        &store, provider, SessionWorkKind::Read,
+        |_| {
+            clock.store(1672, Ordering::SeqCst);
+            let competing = supervisor.run::<()>(
+                &store, provider, SessionWorkKind::Read,
+                |_| Err(CloudError::AuthorizationExpired),
+                |phase| {
+                    assert!(phase == RecoveryPhase::ProfileOnly);
+                    Err(CloudError::Transport("test network failure".into()))
+                },
+            );
+            assert!(matches!(competing, Err(CloudError::Transport(_))));
+            Err(CloudError::AuthorizationExpired)
+        },
+        |_| panic!("another read completed the pending profile check"),
+    );
+    assert!(matches!(read, Err(CloudError::Transport(_))));
 }

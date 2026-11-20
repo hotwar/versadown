@@ -181,6 +181,46 @@ impl Sessions {
         }
     }
 
+    fn publish_bound(
+        &mut self,
+        id: &str,
+        generation: &str,
+        account: &CloudAccount,
+        timestamp: i64,
+        save: impl FnOnce() -> Result<(), QuarkError>,
+    ) -> Result<(), QuarkError> {
+        let session = self.sessions.get_mut(id).ok_or(QuarkError::AuthorizationPending)?;
+        if session.status != Status::Pending || timestamp >= session.expires_at
+            || session.window_generation.as_deref() != Some(generation)
+            || !self.windows.get(&session.provider).is_some_and(|window| window.generation == generation)
+        {
+            // The expiry sweep owns window cleanup when the deadline has passed.
+            return Err(QuarkError::AuthorizationPending);
+        }
+        let expected = session.expected_account.as_deref().ok_or(QuarkError::AuthorizationPending)?;
+        let reference = account_ref(account.provider, &account.id);
+        if account.provider != session.provider || reference != expected {
+            session.status = Status::AccountMismatch;
+            return Err(QuarkError::AccountMismatch);
+        }
+        save()?;
+        session.status = Status::Succeeded;
+        session.account_ref = Some(reference);
+        Ok(())
+    }
+
+    fn reject_bound(&mut self, provider: CloudProvider, generation: &str, timestamp: i64) {
+        if !self.windows.get(&provider).is_some_and(|window| window.generation == generation) {
+            return;
+        }
+        for session in self.sessions.values_mut().filter(|session| {
+            session.provider == provider && session.status == Status::Pending && timestamp < session.expires_at
+                && session.window_generation.as_deref() == Some(generation) && session.expected_account.is_some()
+        }) {
+            session.status = Status::AccountMismatch;
+        }
+    }
+
     fn closed(&mut self, provider: CloudProvider, generation: &str) {
         self.finish_window(provider, generation, Status::Closed, None);
         if self.windows.get(&provider).is_some_and(|window| window.generation == generation) {
@@ -231,6 +271,10 @@ async fn expire_sessions(app: &AppHandle) {
             authorization_window_closed(app, provider, &window.generation);
         }
     }
+    schedule_window_closure(app, expired);
+}
+
+fn schedule_window_closure(app: &AppHandle, expired: Vec<(CloudProvider, String)>) {
     for (provider, generation) in expired {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -269,11 +313,41 @@ pub(crate) fn authorization_window_can_close(app: &AppHandle, provider: CloudPro
         }).unwrap_or(false)
 }
 
+/// The caller stages and verifies the candidate before taking this lock. Only
+/// local publication runs inside it, serialized with cancellation and expiry.
+pub(crate) fn publish_bound_account(
+    app: &AppHandle,
+    session_id: &str,
+    generation: Option<&str>,
+    account: &CloudAccount,
+    save: impl FnOnce() -> Result<(), QuarkError>,
+) -> Result<(), QuarkError> {
+    let generation = generation.ok_or(QuarkError::AuthorizationPending)?;
+    let state = app.try_state::<AuthorizationSessions>().ok_or(QuarkError::Storage)?;
+    let mut sessions = state.0.lock().map_err(|_| QuarkError::Storage)?;
+    sessions.publish_bound(session_id, generation, account, now(), save)
+}
+
+pub(crate) fn reject_bound_account(app: &AppHandle, provider: CloudProvider, generation: Option<&str>) {
+    let (Some(state), Some(generation)) = (app.try_state::<AuthorizationSessions>(), generation) else { return; };
+    let close = state.0.lock().is_ok_and(|mut sessions| {
+        sessions.reject_bound(provider, generation, now());
+        sessions.agent_can_close(provider, generation) && sessions.sessions.values().any(|session|
+            session.provider == provider && session.window_generation.as_deref() == Some(generation)
+                && session.status == Status::AccountMismatch)
+    });
+    if close {
+        schedule_window_closure(app, vec![(provider, generation.to_owned())]);
+    }
+}
+
 pub(crate) fn authorization_window_closed(app: &AppHandle, provider: CloudProvider, generation: &str) {
     if let Some(state) = app.try_state::<AuthorizationSessions>() {
         if let Ok(mut sessions) = state.0.lock() {
-            sessions.expire(now());
+            let expired = sessions.expire(now());
             sessions.closed(provider, generation);
+            drop(sessions);
+            schedule_window_closure(app, expired);
         };
     }
 }
@@ -283,9 +357,11 @@ pub(crate) fn authorization_window_closed(app: &AppHandle, provider: CloudProvid
 pub(crate) fn authorization_window_completed(app: &AppHandle, account: &CloudAccount, generation: &str) {
     if let Some(state) = app.try_state::<AuthorizationSessions>() {
         if let Ok(mut sessions) = state.0.lock() {
-            sessions.expire(now());
+            let expired = sessions.expire(now());
             let reference = account_ref(account.provider, &account.id);
             sessions.finish_window(account.provider, generation, Status::Succeeded, Some(&reference));
+            drop(sessions);
+            schedule_window_closure(app, expired);
         };
     }
 }
@@ -383,9 +459,11 @@ async fn open_authorization(app: AppHandle, provider: CloudProvider, authorizati
     // This is explicit user-facing authorization. Account/status queries never
     // enter the UI initialization path. WebView creation runs off the UI thread.
     // The host owns this worker even if the CLI/MCP request disconnects.
-    if current_session(&app, &authorization_id).is_ok_and(|session| session.status == Status::Pending) {
-        if crate::cloud::commands::begin_authorization_for(app.clone(), provider, AuthorizationWindowSource::Agent, None).await.is_err()
-        {
+    if let Some(session) = current_session(&app, &authorization_id).ok().filter(|session| session.status == Status::Pending) {
+        let owner = session.expected_account.map(|reference| crate::cloud::commands::AuthorizationOwner::Agent {
+            reference, session_id: authorization_id.clone(),
+        });
+        if crate::cloud::commands::begin_authorization_for(app.clone(), provider, AuthorizationWindowSource::Agent, owner).await.is_err() {
             fail_session(&app, &authorization_id);
         }
     }
@@ -529,6 +607,72 @@ mod tests {
         let generation = sessions.opened(CloudProvider::Quark, true, AuthorizationWindowSource::Agent);
         assert!(sessions.finished_opening(&session.session_id).is_none());
         (session.session_id, generation)
+    }
+
+    fn candidate(id: &str) -> CloudAccount {
+        CloudAccount { id: id.into(), provider: CloudProvider::Quark, display_name: String::new(), auth_method: Default::default() }
+    }
+
+    #[test]
+    fn cli_cloud_auth_bound_candidate_publishes_once_only_after_identity_and_persistence_succeed() {
+        let mut sessions = Sessions::default();
+        let owner = candidate("owner");
+        let expected = account_ref(owner.provider, &owner.id);
+        let (id, generation) = opened(&mut sessions, Some(expected.clone()), 0);
+        let mut stored = "original";
+        assert!(matches!(sessions.publish_bound(&id, "old-generation", &owner, 1, || panic!("stale write")), Err(QuarkError::AuthorizationPending)));
+        assert!(matches!(sessions.publish_bound(&id, &generation, &owner, 1, || Err(QuarkError::Storage)), Err(QuarkError::Storage)));
+        assert_eq!(sessions.sessions[&id].status, Status::Pending);
+        sessions.publish_bound(&id, &generation, &owner, 2, || { stored = "same-owner-renewed"; Ok(()) }).unwrap();
+        assert_eq!(stored, "same-owner-renewed");
+        assert_eq!(sessions.sessions[&id].status, Status::Succeeded);
+        assert_eq!(sessions.sessions[&id].account_ref.as_ref(), Some(&expected));
+        assert!(matches!(sessions.publish_bound(&id, &generation, &owner, 3, || panic!("duplicate write")), Err(QuarkError::AuthorizationPending)));
+    }
+
+    #[test]
+    fn cli_cloud_auth_bound_wrong_account_cannot_replace_existing_session_even_in_shared_window() {
+        let mut sessions = Sessions::default();
+        let owner = candidate("owner");
+        let (id, generation) = opened(&mut sessions, Some(account_ref(owner.provider, &owner.id)), 0);
+        assert_eq!(sessions.opened(owner.provider, false, AuthorizationWindowSource::Desktop), generation);
+        let other = candidate("another-user");
+        assert!(matches!(sessions.publish_bound(&id, &generation, &other, 1, || panic!("wrong owner written")), Err(QuarkError::AccountMismatch)));
+        let dto = session_dto(&sessions.sessions[&id], "en");
+        assert_eq!(dto.error.unwrap().code, "ACCOUNT_MISMATCH");
+        assert!(dto.account_ref.is_none());
+    }
+
+    #[test]
+    fn cli_cloud_auth_bound_late_authorization_never_writes_and_leaves_window_cleanup_to_expiry() {
+        let owner = candidate("owner");
+        let mut sessions = Sessions::default();
+        let (id, generation) = opened(&mut sessions, Some(account_ref(owner.provider, &owner.id)), 0);
+        assert!(matches!(sessions.publish_bound(&id, &generation, &owner, SESSION_SECONDS, || panic!("expired write")), Err(QuarkError::AuthorizationPending)));
+        sessions.reject_bound(owner.provider, &generation, SESSION_SECONDS);
+        assert_eq!(sessions.expire(SESSION_SECONDS), vec![(owner.provider, generation.clone())]);
+        assert_eq!(sessions.sessions[&id].status, Status::Expired);
+        let (new_id, new_generation) = opened(&mut sessions, Some(account_ref(owner.provider, &owner.id)), SESSION_SECONDS + 1);
+        sessions.reject_bound(owner.provider, &generation, SESSION_SECONDS + 2);
+        assert_eq!(sessions.sessions[&new_id].status, Status::Pending);
+        sessions.sessions.get_mut(&new_id).unwrap().status = Status::Cancelled;
+        assert!(matches!(sessions.publish_bound(&new_id, &new_generation, &owner, SESSION_SECONDS + 2, || panic!("cancelled write")), Err(QuarkError::AuthorizationPending)));
+        sessions.reject_bound(owner.provider, &new_generation, SESSION_SECONDS + 2);
+        assert_eq!(sessions.sessions[&new_id].status, Status::Cancelled);
+    }
+
+    #[test]
+    fn cli_cloud_auth_bound_revision_rejection_only_finishes_matching_live_request() {
+        let owner = candidate("owner");
+        let mut sessions = Sessions::default();
+        let (id, generation) = opened(&mut sessions, Some(account_ref(owner.provider, &owner.id)), 0);
+        sessions.reject_bound(CloudProvider::Baidu, &generation, 1);
+        assert_eq!(sessions.sessions[&id].status, Status::Pending);
+        sessions.reject_bound(owner.provider, &generation, 1);
+        assert_eq!(sessions.sessions[&id].status, Status::AccountMismatch);
+        let (unbound, next) = opened(&mut sessions, None, 2);
+        sessions.reject_bound(owner.provider, &next, 3);
+        assert_eq!(sessions.sessions[&unbound].status, Status::Pending);
     }
 
     #[test]

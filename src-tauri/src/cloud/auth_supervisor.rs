@@ -26,6 +26,42 @@ pub struct AuthMaintenanceRecord {
     pub consecutive_failures: u32,
     pub next_allowed_attempt_at: Option<i64>,
     pub health: AuthHealth,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deferred_failure: Option<DeferredMaintenanceFailure>,
+}
+
+// Persist only a category. Provider and transport messages can contain private details.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+enum DeferredMaintenanceFailure {
+    Network,
+    Store,
+    InvalidResponse,
+    Service,
+    XunleiMetadataExpired,
+    ProfilePending,
+}
+
+impl DeferredMaintenanceFailure {
+    fn from_error(error: &CloudError) -> Option<Self> {
+        match error {
+            CloudError::Transport(_) => Some(Self::Network),
+            CloudError::Storage => Some(Self::Store),
+            CloudError::XunleiVerificationUnavailable("metadata_expired") => Some(Self::XunleiMetadataExpired),
+            CloudError::InvalidResponse => Some(Self::InvalidResponse),
+            CloudError::Provider(_) | CloudError::InvalidInput(_) => Some(Self::Service),
+            _ => None,
+        }
+    }
+
+    fn as_error(self) -> CloudError {
+        match self {
+            Self::Network => CloudError::Transport("连接失败".into()),
+            Self::Store => CloudError::Storage,
+            Self::XunleiMetadataExpired => CloudError::XunleiVerificationUnavailable("metadata_expired"),
+            Self::InvalidResponse => CloudError::InvalidResponse,
+            Self::Service | Self::ProfilePending => CloudError::Provider("cloud.session.maintenanceDeferred".into()),
+        }
+    }
 }
 
 /// Only an explicitly persisted disconnect blocks automatic recovery. A missing
@@ -98,7 +134,7 @@ impl From<bool> for RecoveryPhase {
     }
 }
 
-// This capability never leaves one run invocation or survives a restart.
+// A read snapshots the unconsumed profile check before doing any provider work.
 struct ProfileContinuation {
     revision: u64,
     account_id: Option<String>,
@@ -189,6 +225,7 @@ impl AuthSupervisor {
             consecutive_failures: 0,
             next_allowed_attempt_at: None,
             health: AuthHealth::Disconnected,
+            deferred_failure: None,
         })
     }
 
@@ -327,6 +364,7 @@ impl AuthSupervisor {
         };
         record.consecutive_failures = 0;
         record.next_allowed_attempt_at = None;
+        record.deferred_failure = None;
         record.health = AuthHealth::Ready;
     }
     pub fn ready(
@@ -390,6 +428,14 @@ impl AuthSupervisor {
     ) -> Result<(), CloudError> {
         let provider = account.provider;
         let mut record = self.record(store, provider)?;
+        if record.health == AuthHealth::RiskBlocked {
+            // An identity lookup can succeed while the provider still requires
+            // the user to complete a challenge. Only explicit authorization clears it.
+            if record.account_id.as_ref().is_some_and(|owner| owner != &account.id) {
+                return Err(CloudError::AccountMismatch);
+            }
+            return Ok(());
+        }
         if record.account_id.as_ref() == Some(&account.id)
             && record.auth_method == Some(account.auth_method)
         {
@@ -488,13 +534,14 @@ impl AuthSupervisor {
             if revision.is_some_and(|revision| revision != record.session_revision) {
                 return Ok(());
             }
-            if record.consecutive_failures >= 3
-                || record.health == AuthHealth::RiskBlocked
-                || record
-                    .next_allowed_attempt_at
-                    .is_some_and(|next| next > (self.clock)())
-            {
+            if record.consecutive_failures >= 3 || record.health == AuthHealth::RiskBlocked {
                 return Err(CloudError::WebAuthorizationRequired);
+            }
+            if record.next_allowed_attempt_at.is_some_and(|next| next > (self.clock)()) {
+                return Err(record.deferred_failure.map_or(
+                    CloudError::WebAuthorizationRequired,
+                    DeferredMaintenanceFailure::as_error,
+                ));
             }
             if !auth_error && !self.is_due(store, provider)? {
                 return Ok(());
@@ -505,17 +552,7 @@ impl AuthSupervisor {
             } else {
                 AuthHealth::Refreshing
             };
-            // Reserve the attempt durably before contacting the provider. A crash
-            // cannot create a tight login loop on the next launch.
-            record.consecutive_failures = record.consecutive_failures.saturating_add(1);
-            record.next_allowed_attempt_at = Some((self.clock)().saturating_add(
-                match record.consecutive_failures {
-                    1 => 300,
-                    2 => 1800,
-                    _ => 7200,
-                },
-            ));
-            self.save(store, &record)?;
+            self.reserve_attempt(store, &mut record)?;
             match work() {
                 Ok(()) => {
                     let expires = session_expiry(store, provider)?;
@@ -524,24 +561,60 @@ impl AuthSupervisor {
                     self.publish_locked(store, &record, false)
                 }
                 Err(error) => {
-                    record.health = if matches!(
-                        error,
-                        CloudError::XunleiVerificationUnavailable("metadata_expired")
-                    ) {
-                        previous_health
-                    } else if matches!(error, CloudError::CaptchaRequired) {
-                        AuthHealth::RiskBlocked
-                    } else if record.consecutive_failures >= 3 {
-                        AuthHealth::NeedsInteractiveAuth
+                    if !auth_error && matches!(error, CloudError::WebAuthorizationRequired) {
+                        // Scheduled refresh cannot inspect a browser profile. Let the
+                        // next real authentication failure complete this attempt.
+                        record.deferred_failure = Some(DeferredMaintenanceFailure::ProfilePending);
+                        record.next_refresh_at = None;
+                        record.health = previous_health;
+                        self.save(store, &record)?;
                     } else {
-                        AuthHealth::NeedsSilentRelogin
-                    };
-                    self.save(store, &record)?;
+                        self.record_failure(store, &mut record, previous_health, &error)?;
+                    }
                     Err(error)
                 }
             }
         })
     }
+    fn reserve_attempt(
+        &self,
+        store: &impl CredentialStore,
+        record: &mut AuthMaintenanceRecord,
+    ) -> Result<(), CloudError> {
+        let delay = match record.consecutive_failures {
+            0 => 300,
+            1 => 1800,
+            _ => 7200,
+        };
+        // A process exit mid-request establishes a cooldown, never a rejection.
+        record.deferred_failure = Some(DeferredMaintenanceFailure::Service);
+        record.next_allowed_attempt_at = Some((self.clock)().saturating_add(delay));
+        self.save(store, record)
+    }
+
+    fn record_failure(
+        &self,
+        store: &impl CredentialStore,
+        record: &mut AuthMaintenanceRecord,
+        previous_health: AuthHealth,
+        error: &CloudError,
+    ) -> Result<(), CloudError> {
+        record.deferred_failure = DeferredMaintenanceFailure::from_error(error);
+        if record.deferred_failure.is_none() {
+            record.consecutive_failures = record.consecutive_failures.saturating_add(1);
+        }
+        record.health = if matches!(error, CloudError::XunleiVerificationUnavailable("metadata_expired")) {
+            previous_health
+        } else if matches!(error, CloudError::CaptchaRequired) {
+            AuthHealth::RiskBlocked
+        } else if record.consecutive_failures >= 3 {
+            AuthHealth::NeedsInteractiveAuth
+        } else {
+            AuthHealth::NeedsSilentRelogin
+        };
+        self.save(store, record)
+    }
+
     pub fn run<T>(
         &self,
         store: &impl CredentialStore,
@@ -583,29 +656,30 @@ impl AuthSupervisor {
         if is_manually_disconnected(store, provider)? {
             return Err(CloudError::NotAuthorized);
         }
-        let mut continuation = None;
         if self.is_due(store, provider)? {
             let revision = self.record(store, provider)?.session_revision;
             // A proactive refresh failure must not stop still-valid ordinary reads.
             let _ = self.maintain(store, provider, Some(revision), false, || {
                 check()?;
-                let record = self.record(store, provider)?;
-                let binding = self.snapshot(store, provider)?.binding;
-                let result = recover(RecoveryPhase::Proactive);
-                if matches!(result, Err(CloudError::WebAuthorizationRequired)) {
-                    continuation = Some(ProfileContinuation {
-                        revision: record.session_revision,
-                        account_id: record.account_id,
-                        failures: record.consecutive_failures,
-                        next_allowed: record.next_allowed_attempt_at,
-                        binding,
-                    });
-                }
-                result
+                recover(RecoveryPhase::Proactive)
             });
         }
         let snapshot = self.snapshot(store, provider)?;
         let revision = snapshot.revision;
+        let record = self.record(store, provider)?;
+        let mut continuation = if matches!(record.deferred_failure, Some(DeferredMaintenanceFailure::ProfilePending))
+            && record.session_revision == revision && record.account_id == snapshot.account_id
+        {
+            Some(ProfileContinuation {
+                revision,
+                account_id: record.account_id,
+                failures: record.consecutive_failures,
+                next_allowed: record.next_allowed_attempt_at,
+                binding: snapshot.binding,
+            })
+        } else {
+            None
+        };
         check()?;
         let result = work(&snapshot, Some(&snapshot));
         if let Err(stopped) = check() {
@@ -686,9 +760,30 @@ impl AuthSupervisor {
                         "metadata_missing" | "metadata_expired" | "timestamp_invalid"
                     ))) =>
             {
-                if snapshot.initial.is_none() || store.load(provider.key())?.is_none() {
-                    return Err(error);
-                }
+                let auth_failure_phase = if snapshot.initial.is_none() {
+                    // Cold starts can lose the native session while an account-bound
+                    // browser profile or a previously saved login still exists.
+                    if kind != SessionWorkKind::Read || !matches!(error, CloudError::NotAuthorized) {
+                        return Err(error);
+                    }
+                    let saved = if cloud_session_policy(provider).supports_password_fallback {
+                        load_password_credential(store, provider)?
+                    } else {
+                        None
+                    };
+                    match (snapshot.account_id.as_deref(), saved.as_ref()) {
+                        (None, None) => return Err(error),
+                        (Some(owner), Some(login)) if owner != login.account_id() => {
+                            RecoveryPhase::ProfileOnly
+                        }
+                        _ => RecoveryPhase::AuthFailure,
+                    }
+                } else {
+                    if store.load(provider.key())?.is_none() {
+                        return Err(error);
+                    }
+                    RecoveryPhase::AuthFailure
+                };
                 let mut recover = |phase| {
                     if provider != CloudProvider::Xunlei
                         || !matches!(error, CloudError::WebAuthorizationRequired)
@@ -755,13 +850,23 @@ impl AuthSupervisor {
                         if record.session_revision != ticket.revision {
                             return Ok(());
                         }
+                        if record.health == AuthHealth::RiskBlocked {
+                            return Err(CloudError::WebAuthorizationRequired);
+                        }
+                        if !matches!(record.deferred_failure, Some(DeferredMaintenanceFailure::ProfilePending)) {
+                            return Err(record.deferred_failure.map_or(
+                                CloudError::WebAuthorizationRequired,
+                                DeferredMaintenanceFailure::as_error,
+                            ));
+                        }
                         if record.consecutive_failures != ticket.failures
                             || record.next_allowed_attempt_at != ticket.next_allowed
-                            || record.health == AuthHealth::RiskBlocked
                         {
                             return Err(CloudError::WebAuthorizationRequired);
                         }
                         check()?;
+                        let previous_health = record.health;
+                        self.reserve_attempt(store, &mut record)?;
                         match recover(RecoveryPhase::ProfileOnly) {
                             Ok(()) => {
                                 self.mark_ready(&mut record, session_expiry(store, provider)?);
@@ -769,10 +874,7 @@ impl AuthSupervisor {
                                 self.publish_locked(store, &record, false)
                             }
                             Err(error) => {
-                                if matches!(error, CloudError::CaptchaRequired) {
-                                    record.health = AuthHealth::RiskBlocked;
-                                    self.save(store, &record)?;
-                                }
+                                self.record_failure(store, &mut record, previous_health, &error)?;
                                 Err(error)
                             }
                         }
@@ -780,7 +882,7 @@ impl AuthSupervisor {
                 } else {
                     self.maintain(store, provider, Some(revision), true, || {
                         check()?;
-                        recover(RecoveryPhase::AuthFailure)
+                        recover(auth_failure_phase)
                     }).map_err(upload_recovery_error)?;
                 }
                 let next = self.snapshot(store, provider)?;
@@ -1091,6 +1193,30 @@ pub fn session_expiry(
         .ok()
         .and_then(|v| v.get("expires_at").and_then(|v| v.as_i64()))
         .filter(|expiry| *expiry > 0))
+}
+
+#[test]
+fn ordinary_account_reads_preserve_a_pending_security_challenge_across_restart() {
+    let provider = CloudProvider::Aliyun;
+    let store = MemoryCredentialStore::default();
+    store.save(provider.key(), br#"{"expires_at":2000}"#).unwrap();
+    let supervisor = AuthSupervisor::new(|| 1000, || 30);
+    let account = CloudAccount {
+        provider, id: "owner".into(), display_name: "test".into(), auth_method: CloudAuthMethod::Web,
+    };
+    supervisor.ready(&store, provider, Some(account.id.clone()), Some(account.auth_method), Some(2000)).unwrap();
+    let result = supervisor.run::<()>(&store, provider, SessionWorkKind::Read,
+        |_| Err(CloudError::CaptchaRequired), |_| panic!("explicit verification required"),
+    );
+    assert!(matches!(result, Err(CloudError::CaptchaRequired)));
+    let observation = supervisor.snapshot(&store, provider).unwrap();
+    supervisor.observe_account(&store, &observation, &account).unwrap();
+    let restarted = AuthSupervisor::new(|| 4000, || 30);
+    restarted.restore(&store, provider).unwrap();
+    assert_eq!(restarted.record(&store, provider).unwrap().health, AuthHealth::RiskBlocked);
+    assert!(!restarted.is_due(&store, provider).unwrap());
+    restarted.ready(&store, provider, Some(account.id), Some(account.auth_method), None).unwrap();
+    assert_eq!(restarted.record(&store, provider).unwrap().health, AuthHealth::Ready);
 }
 
 #[cfg(test)]

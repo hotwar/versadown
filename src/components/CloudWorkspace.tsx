@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type Dispatch, type PointerEvent as ReactPointerEvent, type SetStateAction } from 'react';
 import type { CloudAccount, CloudProvider, ProviderDescriptor } from '../lib/cloudTypes';
-import { CloudManager, CloudManagerClient } from './CloudManager';
+import { accountRecoveryAction, CloudManager, CloudManagerClient, errorMessage } from './CloudManager';
 import { useTranslation } from '../i18n';
 import { cloudProviderLabel } from '../i18n/cloudProviderLabel';
 
@@ -61,17 +61,7 @@ function saveProviderCardOrder(order: readonly CloudProvider[]) {
   }
 }
 
-function isUnauthorized(error: unknown) {
-  return typeof error === 'object' && error !== null && 'code' in error && ['unauthorized', 'not_authorized'].includes(String((error as { code?: unknown }).code));
-}
-
-function errorMessage(error: unknown, fallback: string) {
-  if (error instanceof Error && error.message) return error.message;
-  if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as { message?: unknown }).message === 'string') {
-    return (error as { message: string }).message;
-  }
-  return fallback;
-}
+type AccountRecoveryError = { action: 'retry' | 'expired' | 'web'; message: string };
 
 export function CloudWorkspace({ client, activePage, onPageChange, onProvidersChange, onDownloadTask, privacyDownloadEnabled = false }: CloudWorkspaceProps) {
   const { t } = useTranslation();
@@ -81,7 +71,8 @@ export function CloudWorkspace({ client, activePage, onPageChange, onProvidersCh
   const [loadingCatalog, setLoadingCatalog] = useState(true);
   const recoveringAccounts = loadingCatalog || pendingProviders.length > 0;
   const [recoveryError, setRecoveryError] = useState<string | null>(null);
-  const [accountErrors, setAccountErrors] = useState<Partial<Record<CloudProvider, string>>>({});
+  const [accountErrors, setAccountErrors] = useState<Partial<Record<CloudProvider, AccountRecoveryError>>>({});
+  const recoveryGeneration = useRef(0);
   const [visitedAccounts, setVisitedAccounts] = useState<ReadonlySet<string>>(() => new Set());
   const [providerCardOrder, setProviderCardOrder] = useState<readonly CloudProvider[]>(savedProviderCardOrder);
   const [providerCardPreviewOrder, setProviderCardPreviewOrder] = useState<readonly CloudProvider[] | null>(null);
@@ -116,8 +107,29 @@ export function CloudWorkspace({ client, activePage, onPageChange, onProvidersCh
       : [...current, account]);
   }
 
+  async function restoreProvider(provider: CloudProvider, generation = recoveryGeneration.current) {
+    setPendingProviders(current => [...current, provider]);
+    try {
+      const account = await client.getCloudAccount(provider);
+      if (generation !== recoveryGeneration.current) return;
+      if (account.provider !== provider) throw new Error(t('cloud.authorization.providerMismatch'));
+      acceptAccount(account);
+    } catch (error) {
+      if (generation !== recoveryGeneration.current) return;
+      const action = accountRecoveryAction(error);
+      setAccountErrors(current => {
+        const next = { ...current };
+        if (action === 'authorize') delete next[provider];
+        else next[provider] = { action, message: errorMessage(error, t('cloud.authorization.restoreSessionFailed')) };
+        return next;
+      });
+    } finally {
+      if (generation === recoveryGeneration.current) setPendingProviders(current => current.filter(item => item !== provider));
+    }
+  }
+
   useEffect(() => {
-    let active = true;
+    const generation = ++recoveryGeneration.current;
     setLoadingCatalog(true);
     setRecoveryError(null);
     setAccountErrors({});
@@ -126,26 +138,17 @@ export function CloudWorkspace({ client, activePage, onPageChange, onProvidersCh
     setPendingProviders([]);
     onPageChange('management');
     void client.getCloudProviderCatalog().then((descriptors) => {
-      if (!active) return;
+      if (generation !== recoveryGeneration.current) return;
       setCatalog(descriptors);
-      setPendingProviders(descriptors.map(d => d.provider));
       setLoadingCatalog(false);
-      for (const { provider } of descriptors) {
-        void client.getCloudAccount(provider).then(account => {
-          if (active && account.provider === provider) acceptAccount(account);
-        }).catch(error => {
-          if (active && !isUnauthorized(error)) setAccountErrors(current => ({ ...current, [provider]: errorMessage(error, t('cloud.authorization.restoreSessionFailed')) }));
-        }).finally(() => {
-          if (active) setPendingProviders(current => current.filter(item => item !== provider));
-        });
-      }
+      for (const { provider } of descriptors) void restoreProvider(provider, generation);
     }).catch(error => {
-      if (active) {
+      if (generation === recoveryGeneration.current) {
         setLoadingCatalog(false);
         setRecoveryError(errorMessage(error, t('cloud.error.readDirectory')));
       }
     });
-    return () => { active = false; };
+    return () => { recoveryGeneration.current += 1; };
   }, [client, onPageChange]);
 
   function removeAccount(provider: CloudProvider) {
@@ -257,7 +260,15 @@ export function CloudWorkspace({ client, activePage, onPageChange, onProvidersCh
       <div className="cloud-provider-auths" onPointerMove={updateProviderCardDrag} onPointerUp={finishProviderCardDrag} onPointerCancel={cancelProviderCardDrag}>{managementCatalog.map((descriptor) => {
         const { provider } = descriptor;
         const providerName = cloudProviderLabel(provider, t);
-        if (pendingProviders.includes(provider)) return <section key={provider} className={`cloud-manager cloud-authorization cloud-provider-${provider}`} aria-label={t('cloud.accountRecovery', { name: providerName })}><header className="cloud-heading"><h2>{t('cloud.providerDrive', { name: providerName })}</h2></header><p role="status">{t('cloud.readingAccountStatus')}…</p></section>;
+        const failure = accountErrors[provider];
+        const pending = pendingProviders.includes(provider);
+        if (pending || failure?.action === 'retry') return <section key={provider} className={`cloud-manager cloud-authorization cloud-provider-${provider}`} aria-label={t('cloud.accountRecovery', { name: providerName })}>
+          <header className="cloud-heading"><h2>{t('cloud.providerDrive', { name: providerName })}</h2></header>
+          {pending ? <p role="status">{t('cloud.readingAccountStatus')}…</p> : <>
+            <p className="cloud-operation-status error" role="alert">{failure?.message}</p>
+            <button type="button" className="secondary" onClick={() => void restoreProvider(provider)}>{t('common.retryAction')}</button>
+          </>}
+        </section>;
         const account = accounts.find((item) => item.provider === provider);
         return <CloudManager
           key={`${provider}:${account?.id ?? 'unauthorized'}`}
@@ -265,7 +276,7 @@ export function CloudWorkspace({ client, activePage, onPageChange, onProvidersCh
           provider={provider}
           client={client}
           initialAccount={account ?? null}
-          recoveryFailed={Boolean(accountErrors[provider])}
+          recoveryAuthorization={failure?.action}
           privacyDownloadEnabled={privacyDownloadEnabled}
           authorizationOnly
           restoreOnMount={false}

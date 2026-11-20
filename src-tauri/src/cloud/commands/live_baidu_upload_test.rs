@@ -62,6 +62,71 @@ fn desktop_baidu_upload_profile_selection_rejects_other_or_missing_roots_before_
     assert!(live_upload_profile(None, None).is_err());
 }
 
+fn compare_fixture_bytes(download: baidu::BaiduDownload, bytes: &[u8]) -> Result<(), &'static str> {
+    let http = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(30))
+        .build().map_err(|_| "initialize download")?;
+    let mut request = http.get(&download.url);
+    for (key, value) in download.headers {
+        if key.eq_ignore_ascii_case("User-Agent") { request = request.header(key, value); }
+    }
+    let mut received = Vec::new();
+    request.send().and_then(|r| r.error_for_status()).map_err(|_| "download fixture")?
+        .take(bytes.len() as u64 + 1).read_to_end(&mut received).map_err(|_| "read fixture")?;
+    if received != bytes { return Err("fixture byte comparison failed"); }
+    Ok(())
+}
+
+#[test]
+#[ignore = "read-only cold restore with an explicitly selected, logged-in profile"]
+fn desktop_baidu_saved_web_authorization_cold_restore() -> Result<(), String> {
+    if std::env::var("VERSADOWN_LIVE_BAIDU_FIXTURE").as_deref() != Ok("1") {
+        return Err("explicit live fixture opt-in required".into());
+    }
+    let selected = std::env::var_os("VERSADOWN_LIVE_BAIDU_UPLOAD_PROBE_DIR").map(PathBuf::from);
+    let run_root = std::env::var_os("VERSADOWN_RUN_ROOT").map(PathBuf::from);
+    let (profile, mode) = live_upload_profile(selected.as_deref(), run_root.as_deref())?;
+    let provider = CloudProvider::Baidu;
+    let state = CloudState::new(profile).map_err(|_| "open selected profile")?;
+    let candidate: baidu::BaiduSession = load_provider_session(provider, &state.store)
+        .map_err(|_| "load selected VD authorization")?;
+    let temporary = crate::cloud::MemoryCredentialStore::default();
+    let account = finalize_baidu_web_authorization(
+        ProviderRegistry::global().get(provider), candidate, &temporary, &state.http,
+    ).map_err(|error| format!("authorize: {}", upload_error_code(&error)))?;
+    drop(state);
+    let fresh = crate::cloud::ReqwestTransport::new().map_err(|_| "open cold HTTP client")?;
+    let restored = restore_account(provider, &temporary, &fresh)
+        .map_err(|error| format!("cold account: {}", upload_error_code(&error)))?;
+    if restored.id != account.id {
+        return Err("cold account changed".into());
+    }
+    let directory = list_cloud_directory(provider, &temporary, &fresh, "/")
+        .map_err(|error| format!("cold directory: {}", upload_error_code(&error)))?;
+    if let Some(name) = std::env::var_os("VERSADOWN_LIVE_BAIDU_GUI_FIXTURE") {
+        let name = name.to_str().ok_or("invalid GUI fixture name")?;
+        let root = run_root.as_deref().ok_or("select the portable GUI run root")?;
+        if !name.starts_with("VD-Baidu-fresh-") || !name.ends_with(".txt")
+            || name.contains(['/', '\\', ':']) {
+            return Err("select the generated GUI fixture by name".into());
+        }
+        let bytes = std::fs::read(root.join(name)).map_err(|_| "read local GUI fixture")?;
+        let mut matches = directory.items.iter().filter(|item| item.kind == "file" && item.name == name);
+        let file = matches.next().ok_or("GUI fixture missing from root")?;
+        if matches.next().is_some() || file.size != Some(bytes.len() as u64) {
+            return Err("GUI fixture identity or size mismatch".into());
+        }
+        let session = load_provider_session(provider, &temporary).map_err(|_| "read isolated session")?;
+        let download = baidu::BaiduClient::new(session, &fresh).download(&file.id)
+            .map_err(|_| "resolve GUI fixture download")?;
+        compare_fixture_bytes(download, &bytes)?;
+        eprintln!("[baidu-live] cold GUI fixture matches ({} bytes)", bytes.len());
+    }
+    baidu::verify_baidu_upload_session(&temporary, &fresh)
+        .map_err(|error| format!("cold upload token: {}", upload_error_code(&error)))?;
+    eprintln!("[baidu-live] profile={mode}: isolated save, cold same account, root and upload token passed");
+    Ok(())
+}
+
 #[test]
 #[ignore = "writes one unique synthetic file using an explicitly selected, logged-in profile"]
 fn desktop_baidu_upload() -> Result<(), String> {
@@ -107,20 +172,8 @@ fn desktop_baidu_upload() -> Result<(), String> {
     if !list()?.items.iter().any(|entry| entry.id == uploaded.id && entry.name == name) {
         return Err("fixture identity not confirmed by fresh listing".into());
     }
-    let check_bytes = (|| {
-        let download = client.download(&uploaded.id).map_err(|_| "resolve fixture download")?;
-        let http = reqwest::blocking::Client::builder().timeout(std::time::Duration::from_secs(30))
-            .build().map_err(|_| "initialize download")?;
-        let mut request = http.get(&download.url);
-        for (key, value) in download.headers {
-            if key.eq_ignore_ascii_case("User-Agent") { request = request.header(key, value); }
-        }
-        let mut received = Vec::new();
-        request.send().and_then(|r| r.error_for_status()).map_err(|_| "download fixture")?
-            .take(bytes.len() as u64 + 1).read_to_end(&mut received).map_err(|_| "read fixture")?;
-        if received != bytes { return Err("fixture byte comparison failed"); }
-        Ok(())
-    })();
+    let check_bytes = client.download(&uploaded.id).map_err(|_| "resolve fixture download")
+        .and_then(|download| compare_fixture_bytes(download, &bytes));
     match check_bytes {
         Ok(()) => eprintln!("[baidu-live] downloaded bytes match the local fixture"),
         Err(stage) => eprintln!("[baidu-live] downloaded byte check failed: {stage}"),

@@ -56,7 +56,7 @@ export interface CloudManagerClient {
 
 export interface CloudManagerProps {
   descriptor: ProviderDescriptor;
-  recoveryFailed?: boolean;
+  recoveryAuthorization?: 'expired' | 'web';
   provider: CloudProvider;
   client?: CloudManagerClient;
   initialAccount?: CloudAccount | null;
@@ -153,8 +153,14 @@ function baiduUploadMessageKey(code: unknown) {
 function requiresOfficialWebAuthorization(error: unknown) {
   if (typeof error !== 'object' || error === null) return false;
   const code = 'code' in error ? String((error as { code?: unknown }).code).toLowerCase() : '';
-  if (code) return ['web_auth_required', 'captcha_required', 'captcha_invalid', 'verification_required', 'web_verification_required', 'risk_verification_required'].includes(code);
-  return /captcha|verification required|网页验证|安全验证|风险验证/i.test(errorMessage(error, ''));
+  return ['web_auth_required', 'captcha_required', 'captcha_invalid', 'verification_required', 'web_verification_required', 'risk_verification_required'].includes(code);
+}
+
+export function accountRecoveryAction(error: unknown) {
+  if (isUnauthorized(error)) return 'authorize';
+  if (isCredentialExpired(error)) return 'expired';
+  if (requiresOfficialWebAuthorization(error)) return 'web';
+  return 'retry';
 }
 
 function requiresPikpakOperationVerification(error: unknown) {
@@ -198,9 +204,13 @@ function isXunleiVerificationFailure(error: unknown, reason: 'metadata_expired' 
     && 'message' in error && error.message === reason;
 }
 
-function errorMessage(error: unknown, fallback: string) {
+export function errorMessage(error: unknown, fallback: string) {
   if (hasXunleiVerificationCode(error)) return xunleiVerificationMessage((error as { message?: unknown }).message);
   if (typeof error === 'object' && error !== null && 'code' in error) {
+    if (error.code === 'provider_error' && 'message' in error &&
+      (error.message === 'cloud.session.maintenanceDeferred' || error.message === '网盘请求失败：cloud.session.maintenanceDeferred')) {
+      return t('cloud.session.maintenanceDeferred');
+    }
     if (error.code === 'baidu_drive_verification_required') return t('cloud.verification.baidu.drive');
     if (error.code === 'baidu_transfer_pending') return t('cloud.error.baiduTransferPending');
     const uploadKey = baiduUploadMessageKey(error.code);
@@ -666,7 +676,7 @@ function CloudDestinationPicker({ action, provider, descriptor, client, excluded
   </div>, document.body);
 }
 
-export function CloudManager({ provider, descriptor, client = unavailableClient, initialAccount = null, recoveryFailed = false, onDownloadTask, authorizationOnly = false, restoreOnMount = true, showSessionActions = true, workspaceVisible = true, privacyDownloadEnabled = false, authorizationCardDrag, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
+export function CloudManager({ provider, descriptor, client = unavailableClient, initialAccount = null, recoveryAuthorization, onDownloadTask, authorizationOnly = false, restoreOnMount = true, showSessionActions = true, workspaceVisible = true, privacyDownloadEnabled = false, authorizationCardDrag, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
   const { t } = useTranslation();
   const label = cloudProviderLabel(provider, t);
   const rootId = descriptor.rootDirectoryId;
@@ -690,8 +700,9 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const passwordFieldsEdited = useRef(false);
   const passwordInputVersion = useRef(0);
   const effectiveAuthorizationCapabilities = descriptor.authorization;
-  const supportsPasswordLogin = effectiveAuthorizationCapabilities.password;
-  const [authorizationStatus, setAuthorizationStatus] = useState(recoveryFailed ? expiredAuthorizationStatus : initialAuthorizationStatus);
+  const supportsPasswordLogin = effectiveAuthorizationCapabilities.password && recoveryAuthorization !== 'web';
+  const [authorizationStatus, setAuthorizationStatus] = useState(recoveryAuthorization === 'expired'
+    ? expiredAuthorizationStatus : recoveryAuthorization === 'web' ? t('cloud.authorization.completeOfficialVerification') : initialAuthorizationStatus);
   const [reauthorizationRequired, setReauthorizationRequired] = useState(false);
   const [openingOperationVerification, setOpeningOperationVerification] = useState(false);
   const [pendingAuthorizationName, setPendingAuthorizationName] = useState<string | null>(null);
@@ -856,10 +867,6 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }, [client, provider, supportsPasswordLogin, activeAccount?.id]);
 
   useEffect(() => {
-    if (recoveryFailed && !activeAccount) setAuthorizationStatus(expiredAuthorizationStatus);
-  }, [activeAccount, recoveryFailed]);
-
-  useEffect(() => {
     const account = activeAccount;
     if (!authorizationOnly || !account) {
       setAccountCapacity(undefined);
@@ -958,7 +965,6 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         isXunleiVerificationFailure(error, 'metadata_expired')
         || isXunleiVerificationFailure(error, 'metadata_missing')
       )) {
-        if (isXunleiVerificationFailure(error, 'metadata_expired')) setReauthorizationRequired(true);
         setDirectoryState(directory ? (directory.items.length ? 'ready' : 'empty') : 'error');
         const message = errorMessage(error, t('cloud.error.readDirectory'));
         setAuthorizationStatus(message);
@@ -1326,9 +1332,6 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
           return;
         }
         if (result.failures.length > 0) {
-          if (provider === 'xunlei' && result.failures.some(failure => isXunleiVerificationFailure(failure, 'metadata_expired'))) {
-            setReauthorizationRequired(true);
-          }
           if (uploadRetry?.afterWebSessionUpgrade) {
             setOperation(finalReport);
             return;
@@ -1399,9 +1402,6 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       } else if (isSessionRenewedRetryOperation(error)) {
         setOperation({ kind: 'error', message: t('cloud.operation.recoveredRetry', { name: operationLabel }) });
       } else {
-        if (provider === 'xunlei' && isXunleiVerificationFailure(error, 'metadata_expired')) {
-          setReauthorizationRequired(true);
-        }
         setOperation({ kind: 'error', message: t('cloud.operation.failed', { name: operationLabel, detail: errorMessage(error, t('common.retry')) }) });
       }
     } finally {

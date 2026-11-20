@@ -300,12 +300,11 @@ pub(crate) fn finalize_baidu_web_authorization(
     store: &impl CredentialStore,
     http: &impl CloudHttpTransport,
 ) -> Result<CloudAccount, QuarkError> {
-    let client = baidu::BaiduClient::new(session.clone(), http);
-    let account = authorization_result(
-        client.validate_login_candidate(descriptor.root_directory_id, |_| {}),
-    )?;
+    let (account, receipt) = authorization_result(session.validated_login_receipt(
+        http, descriptor.root_directory_id, None, |_| {},
+    ))?;
     select_password_credential_account(store, CloudProvider::Baidu, &account.id)?;
-    save_provider_session(CloudProvider::Baidu, store, &session)?;
+    store.save(CloudProvider::Baidu.key(), &receipt)?;
     Ok(account)
 }
 
