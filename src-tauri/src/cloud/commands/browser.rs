@@ -1,5 +1,21 @@
 use super::*;
 
+// A failed IPC connection or local deadline does not establish that a provider rejected the login.
+pub(crate) fn browser_unavailable() -> QuarkError {
+    QuarkError::Transport("连接失败".into())
+}
+
+fn browser_timeout() -> QuarkError {
+    QuarkError::Transport("连接超时".into())
+}
+
+fn browser_receive_error(error: std::sync::mpsc::RecvTimeoutError) -> QuarkError {
+    match error {
+        std::sync::mpsc::RecvTimeoutError::Timeout => browser_timeout(),
+        std::sync::mpsc::RecvTimeoutError::Disconnected => browser_unavailable(),
+    }
+}
+
 pub(crate) struct TianyiBrowserValidationTransport<'a, T: CloudHttpTransport> {
     pub(crate) window: &'a tauri::WebviewWindow,
     pub(crate) native: &'a T,
@@ -166,7 +182,7 @@ pub(crate) fn tianyi_browser_send(
             .get_webview_window(window.label())
             .is_none()
         {
-            return Err(QuarkError::WebAuthorizationRequired);
+            return Err(browser_unavailable());
         }
         match web_storage_tokens(window, &script) {
             Ok(state) if state["done"].as_bool() == Some(true) => {
@@ -193,7 +209,7 @@ pub(crate) fn tianyi_browser_send(
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    Err(QuarkError::WebAuthorizationRequired)
+    Err(browser_timeout())
 }
 
 #[cfg(test)]
@@ -308,11 +324,11 @@ fn capture_persistent_authorization(
     }
     let window = builder
         .build()
-        .map_err(|_| CloudError::WebAuthorizationRequired)?;
+        .map_err(|_| browser_unavailable())?;
     let result = (|| {
         ready
             .recv_timeout(std::time::Duration::from_secs(15))
-            .map_err(|_| CloudError::WebAuthorizationRequired)?;
+            .map_err(browser_receive_error)?;
         let temporary = MemoryCredentialStore::default();
         // Tianyi's browser candidate and signed App credentials are separate
         // transports for the same account. Seed only the isolated validation
@@ -517,13 +533,14 @@ pub(crate) fn browser_password_login(
         if background_ui_test {
             QuarkError::Provider("后台验证未能创建网盘登录窗口".into())
         } else {
-            QuarkError::WebAuthorizationRequired
+            browser_unavailable()
         }
     })?;
     let started = std::time::Instant::now();
     let result = (|| {
         let mut shown = challenge || background_ui_test;
         let mut last_notice = String::new();
+        let mut deadline_error = if challenge { QuarkError::CaptchaRequired } else { browser_timeout() };
         while started.elapsed() < std::time::Duration::from_secs(180) {
             if app.get_webview_window(&label).is_none() {
                 return Err(if background_ui_test {
@@ -535,7 +552,7 @@ pub(crate) fn browser_password_login(
             if !shown && started.elapsed() >= std::time::Duration::from_secs(12) {
                 window
                     .show()
-                    .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+                    .map_err(|_| browser_unavailable())?;
                 let _ = window.set_focus();
                 shown = true;
             }
@@ -652,11 +669,14 @@ pub(crate) fn browser_password_login(
                         }
                         last_notice = notice;
                     }
+                    if matches!(error, QuarkError::CaptchaRequired | QuarkError::WebAuthorizationRequired) {
+                        deadline_error = error;
+                    }
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(1000));
         }
-        Err(QuarkError::WebAuthorizationRequired)
+        Err(deadline_error)
     })();
     // Retain a failed window only in the hidden diagnostic harness so it can
     // report the official page's non-sensitive progress flags before process
@@ -740,7 +760,7 @@ pub(crate) fn browser_cookies(
     #[cfg(target_os = "macos")]
     let available = window
         .cookies()
-        .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+        .map_err(|_| browser_unavailable())?;
     for url in urls {
         #[cfg(target_os = "macos")]
         let cookies = {
@@ -761,7 +781,7 @@ pub(crate) fn browser_cookies(
         #[cfg(not(target_os = "macos"))]
         let cookies = window
             .cookies_for_url(url.parse().map_err(|_| QuarkError::InvalidResponse)?)
-            .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+            .map_err(|_| browser_unavailable())?;
         for cookie in cookies {
             values.insert(cookie.name().to_owned(), cookie.value().to_owned());
         }
@@ -796,6 +816,30 @@ fn cookie_matches_provider_url(
     url.path() == path
         || (url.path().starts_with(path)
             && (path.ends_with('/') || url.path().as_bytes().get(path.len()) == Some(&b'/')))
+}
+
+#[cfg(test)]
+mod browser_runtime_errors {
+    use super::*;
+
+    #[test]
+    fn unavailable_browser_and_callback_timeout_preserve_authorization() {
+        use std::sync::mpsc::RecvTimeoutError;
+        for error in [
+            browser_unavailable(),
+            browser_receive_error(RecvTimeoutError::Timeout),
+            browser_receive_error(RecvTimeoutError::Disconnected),
+        ] {
+            let code = cloud_failure_code(&error);
+            assert_eq!(code, "network_error");
+            assert!(!requires_cloud_reauthorization_failure(Some(code)));
+            assert!(!should_attempt_silent_provider_recovery(&error));
+            assert!(!browser_login::can_fallback_to_browser(&error));
+        }
+        assert!(requires_cloud_reauthorization_failure(Some(
+            cloud_failure_code(&QuarkError::WebAuthorizationRequired)
+        )));
+    }
 }
 
 #[cfg(test)]
@@ -841,10 +885,10 @@ pub(crate) fn web_storage_tokens(
         .eval_with_callback(script, move |value| {
             let _ = tx.send(value);
         })
-        .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+        .map_err(|_| browser_unavailable())?;
     let raw = rx
         .recv_timeout(std::time::Duration::from_secs(15))
-        .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+        .map_err(browser_receive_error)?;
     web_value(&raw)
 }
 

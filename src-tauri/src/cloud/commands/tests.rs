@@ -2204,6 +2204,47 @@ fn browser_password_session_reports_tianyi_rejection_without_replacing_credentia
 }
 
 #[test]
+fn baidu_web_authorization_waits_for_a_restorable_candidate_before_publication() {
+    struct LoginTransport { cold: bool }
+    impl CloudHttpTransport for LoginTransport {
+        fn isolated_session(&self) -> Result<Option<Box<dyn CloudHttpTransport>>, QuarkError> {
+            Ok(Some(Box::new(Self { cold: true })))
+        }
+        fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            assert_eq!(request.method, "GET");
+            let credential = request.headers.get("Cookie").unwrap().as_str();
+            let body = if self.cold && credential == "BDUSS=first" {
+                r#"{"errno":-6}"#
+            } else if request.url.contains("method=uinfo") {
+                if self.cold && credential == "BDUSS=switched" { r#"{"errno":0,"uk":"other"}"# }
+                else { r#"{"errno":0,"uk":"owner"}"# }
+            } else {
+                assert!(request.url.contains("/api/list?"));
+                r#"{"errno":0,"list":[]}"#
+            };
+            Ok(CloudHttpResponse { status: 200, body: body.into(), ..Default::default() })
+        }
+    }
+    let store = MemoryCredentialStore::default();
+    let provider = CloudProvider::Baidu;
+    let descriptor = crate::cloud::ProviderRegistry::global().get(provider);
+    let previous = serde_json::to_vec(&BaiduSession::cookie("BDUSS=previous")).unwrap();
+    store.save("baidu", &previous).unwrap();
+    let finish = |candidate| super::finalize_baidu_web_authorization(
+        descriptor, BaiduSession::cookie(candidate), &store, &LoginTransport { cold: false },
+    );
+    assert!(matches!(finish("BDUSS=first"), Err(QuarkError::AuthorizationPending)));
+    assert_eq!(store.load("baidu").unwrap().as_deref(), Some(previous.as_slice()));
+    assert!(matches!(finish("BDUSS=switched"), Err(QuarkError::AccountMismatch)));
+    assert_eq!(store.load("baidu").unwrap().as_deref(), Some(previous.as_slice()));
+    // The still-open authorization flow supplies the provider's current candidate.
+    assert_eq!(finish("BDUSS=second").unwrap().id, "owner");
+    let reopened = LoginTransport { cold: true };
+    assert_eq!(super::restore_account(provider, &store, &reopened).unwrap().id, "owner");
+    assert!(super::list_cloud_directory(provider, &store, &reopened, "/").is_ok());
+}
+
+#[test]
 fn baidu_web_authorization_persists_a_browser_session_that_restores_the_root_directory() {
     let credentials = MemoryCredentialStore::default();
     let transport = SequenceTransport(Mutex::new(VecDeque::from([

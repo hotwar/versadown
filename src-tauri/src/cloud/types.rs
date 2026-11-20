@@ -457,7 +457,7 @@ pub use CloudError as QuarkError;
 pub(crate) fn xunlei_verification_text(reason: &str) -> &'static str {
     match reason {
         "metadata_missing" => "缺少迅雷操作验证信息，请重新网页授权后重试",
-        "metadata_expired" => "迅雷分享信息已过期，请重新打开分享链接或重新网页授权",
+        "metadata_expired" => "迅雷操作验证信息已超过本地复用时限，暂时无法完成此操作",
         "timestamp_invalid" => "迅雷验证信息的时间戳无效，请检查系统时间后重试",
         "xunlei_share_profile_unsupported" => {
             "当前迅雷网页版本暂不支持解析此分享，请在迅雷官网打开该分享"

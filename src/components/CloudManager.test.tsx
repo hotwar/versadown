@@ -2355,10 +2355,10 @@ it('keeps Baidu signed in and retries the same share listing after operation ver
   expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
 });
 
-it.each(['provider_error', 'network_error'])('keeps a typed %s separate from a login challenge', async code => {
+it.each(['provider_error', 'network_error', undefined])('keeps an operation failure with code %s separate from a login challenge', async code => {
   const user = userEvent.setup();
   const client = createCloudFake();
-  client.createCloudDirectory.mockRejectedValueOnce({ code, message: '网页验证服务连接中断' });
+  client.createCloudDirectory.mockRejectedValueOnce(code ? { code, message: '网页验证服务连接中断' } : new Error('网页验证服务连接中断'));
   render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'web' }} restoreOnMount={false} />);
   await screen.findByRole('tree');
   await user.click(screen.getByRole('button', { name: '新建目录' }));
@@ -2886,9 +2886,12 @@ it.each([
 });
 
 
-it.each(['shares', 'mkdir', 'upload'] as const)('reports Xunlei local verification failure without login loops: %s', async (operation) => {
+it.each([
+  ['shares', 'metadata_missing'], ['mkdir', 'metadata_missing'], ['upload', 'metadata_missing'],
+  ['shares', 'metadata_expired'], ['mkdir', 'metadata_expired'], ['upload', 'metadata_expired'],
+] as const)('reports Xunlei %s operation failure without asking for a login on %s', async (operation, reason) => {
   const user = userEvent.setup();
-  const failure = { code: 'xunlei_verification_unavailable', message: 'metadata_missing' };
+  const failure = { code: 'xunlei_verification_unavailable', message: reason };
   const client = createCloudFake({
     listCloudShares: vi.fn().mockRejectedValue(failure),
     createCloudDirectory: vi.fn().mockRejectedValue(failure),
@@ -2906,26 +2909,10 @@ it.each(['shares', 'mkdir', 'upload'] as const)('reports Xunlei local verificati
     await user.click(screen.getByRole('button', { name: '上传', exact: true }));
     await confirmAllLocalUploads(user);
   }
-  expect((await screen.findAllByText(/XL-LOCAL-MISSING/)).length).toBeGreaterThan(0);
-  expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
-  expect(client.logoutCloud).not.toHaveBeenCalled();
-});
-
-it('keeps the Xunlei file list and offers explicit authorization when operation verification expires', async () => {
-  const user = userEvent.setup();
-  const client = createCloudFake({
-    listCloudShares: vi.fn().mockRejectedValue({
-      code: 'xunlei_verification_unavailable',
-      message: 'metadata_expired',
-    }),
-  });
-  render(<CloudManager provider="xunlei" client={client} initialAccount={{ id: 'x-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} />);
-  await user.dblClick(await screen.findByText('我的分享'));
-  expect(await screen.findByText(/XL-LOCAL-EXPIRED/)).toBeVisible();
+  expect((await screen.findAllByText(reason === 'metadata_missing' ? /XL-LOCAL-MISSING/ : /XL-LOCAL-EXPIRED/)).length).toBeGreaterThan(0);
   expect(screen.getByText('报告.pdf')).toBeVisible();
+  expect(screen.queryByRole('button', { name: '重新网页授权' })).not.toBeInTheDocument();
   expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
-  await user.click(screen.getByRole('button', { name: '重新网页授权' }));
-  expect(client.beginCloudAuthorization).toHaveBeenCalledWith('xunlei');
   expect(client.logoutCloud).not.toHaveBeenCalled();
 });
 
