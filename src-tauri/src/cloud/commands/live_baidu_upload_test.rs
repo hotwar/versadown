@@ -5,6 +5,27 @@
 use super::*;
 use std::io::Read;
 
+#[test]
+#[ignore = "read-only metadata of an explicitly selected VD authorization"]
+fn desktop_baidu_authorization_metadata() -> Result<(), String> {
+    if std::env::var("VERSADOWN_LIVE_BAIDU_FIXTURE").as_deref() != Ok("1") {
+        return Err("explicit live fixture opt-in required".into());
+    }
+    let selected = std::env::var_os("VERSADOWN_LIVE_BAIDU_UPLOAD_PROBE_DIR").map(PathBuf::from);
+    let run_root = std::env::var_os("VERSADOWN_RUN_ROOT").map(PathBuf::from);
+    let (profile, mode) = live_upload_profile(selected.as_deref(), run_root.as_deref())?;
+    let store = SystemCredentialStore::new(profile).map_err(|_| "open selected VD store")?;
+    let saved: baidu::BaiduSession = load_provider_session(CloudProvider::Baidu, &store)
+        .map_err(|_| "load selected VD session")?;
+    let pairs: std::collections::BTreeMap<_, _> = saved.cookie.split(';')
+        .filter_map(|pair| pair.trim().split_once('=')).collect();
+    for name in ["BDUSS", "BDUSS_BFESS", "STOKEN", "STOKEN_BFESS", "PANPSC", "SCRC", "BAIDUID", "BAIDUID_BFESS"] {
+        eprintln!("[baidu-live] profile={mode} cookie_name={name} present={}", pairs.get(name).is_some_and(|value| !value.is_empty()));
+    }
+    eprintln!("[baidu-live] profile={mode} auth_method={:?}", saved.auth_method);
+    Ok(())
+}
+
 fn live_upload_profile(selected: Option<&Path>, run_root: Option<&Path>) -> Result<(PathBuf, &'static str), &'static str> {
     if let Some(profile) = selected {
         if !profile.is_absolute() || !profile.ends_with("cloud-sessions") || !profile.is_dir() {

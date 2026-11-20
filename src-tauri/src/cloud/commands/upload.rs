@@ -64,6 +64,15 @@ pub fn cloud_control_upload(
     crate::cloud::upload_registry().apply(provider, &upload_id, &action)
 }
 
+/// Token acquisition and the following writes own one HTTP session. Background
+/// account/directory requests must not rotate its cookies between those steps.
+fn with_upload_http<T>(
+    work: impl FnOnce(&ReqwestTransport) -> Result<T, QuarkError>,
+) -> Result<T, QuarkError> {
+    let transport = ReqwestTransport::new()?;
+    work(&transport)
+}
+
 enum PreparedUpload {
     File(PathBuf),
     Directory(DirectoryUploadPlan),
@@ -482,44 +491,38 @@ fn upload_selected_path(
     control: crate::cloud::UploadControl,
 ) -> Result<Vec<CloudFile>, QuarkError> {
     control.wait_ready_blocking()?;
-    // Keep Baidu's account, directory and upload requests on the same cookie jar.
-    let isolated;
-    let transport = if provider == CloudProvider::Baidu {
-        &state.http
-    } else {
-        isolated = ReqwestTransport::new()?;
-        &isolated
-    };
-    let http = crate::cloud::http::ControlledUploadHttp {
-        inner: transport,
-        control: control.clone(),
-    };
-    if let Some(expected) = expected_account_id {
-        let PreparedUpload::File(path) = prepared else { return Err(QuarkError::SourceFileMissing); };
-        if expected.is_empty() || provider != CloudProvider::Baidu { return Err(QuarkError::AccountMismatch); }
-        return upload_file_with_progress(&control, &path, || {
-            state.with_upload_session(provider, &http, |store| {
-                let client = baidu::BaiduClient::new(load_provider_session(provider, store)?, &http);
-                if client.account()?.id != expected { return Err(QuarkError::AccountMismatch); }
-                client.upload_file(parent_id, &path, &http)
-            })
-        }).map(|file| vec![file]);
-    }
-    match prepared {
-        PreparedUpload::Directory(plan) => {
-            upload_directory_tree(state, &http, provider, parent_id, plan, &control).map_err(|error| {
-                // A directory may already contain successful writes. Only single files can continue after authorization.
-                if matches!(error, QuarkError::BaiduUploadWebSessionRequired) {
-                    QuarkError::BaiduUploadPrecreateRejected { status: 200, errno: Some(-6) }
-                } else { error }
-            })
+    with_upload_http(|transport| {
+        let http = crate::cloud::http::ControlledUploadHttp {
+            inner: transport,
+            control: control.clone(),
+        };
+        if let Some(expected) = expected_account_id {
+            let PreparedUpload::File(path) = prepared else { return Err(QuarkError::SourceFileMissing); };
+            if expected.is_empty() || provider != CloudProvider::Baidu { return Err(QuarkError::AccountMismatch); }
+            return upload_file_with_progress(&control, &path, || {
+                state.with_upload_session(provider, &http, |store| {
+                    let client = baidu::BaiduClient::new(load_provider_session(provider, store)?, &http);
+                    if client.account()?.id != expected { return Err(QuarkError::AccountMismatch); }
+                    client.upload_file(parent_id, &path, &http)
+                })
+            }).map(|file| vec![file]);
         }
-        PreparedUpload::File(path) => Ok(vec![upload_file_with_progress(&control, &path, || {
-            ProviderRegistry::global()
-                .driver(provider, &state.store, &http)
-                .upload(state, &http, parent_id, &path)
-        })?]),
-    }
+        match prepared {
+            PreparedUpload::Directory(plan) => {
+                upload_directory_tree(state, &http, provider, parent_id, plan, &control).map_err(|error| {
+                    // A directory may already contain successful writes. Only single files can continue after authorization.
+                    if matches!(error, QuarkError::BaiduUploadWebSessionRequired) {
+                        QuarkError::BaiduUploadPrecreateRejected { status: 200, errno: Some(-6) }
+                    } else { error }
+                })
+            }
+            PreparedUpload::File(path) => Ok(vec![upload_file_with_progress(&control, &path, || {
+                ProviderRegistry::global()
+                    .driver(provider, &state.store, &http)
+                    .upload(state, &http, parent_id, &path)
+            })?]),
+        }
+    })
 }
 
 fn upload_error_code(error: &QuarkError) -> &'static str {
@@ -1287,3 +1290,67 @@ mod directory_tests {
 #[cfg(test)]
 #[path = "live_baidu_upload_test.rs"]
 mod live_baidu_upload_test;
+
+#[cfg(test)]
+mod upload_session_isolation_tests {
+    use super::*;
+    use std::{collections::BTreeMap, io::{Read, Write}, net::TcpListener, time::Duration};
+
+    #[test]
+    fn upload_token_cookie_survives_a_concurrent_account_cookie_update() {
+        let server = TcpListener::bind("127.0.0.1:0").unwrap();
+        let origin = format!("http://{}", server.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let mut upload_cookie_matched = false;
+            for stage in 0..3 {
+                let (mut stream, _) = server.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut header = Vec::new();
+                while !header.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    header.push(byte[0]);
+                }
+                let header = String::from_utf8(header).unwrap();
+                let cookie = header.lines().find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case("Cookie").then(|| value.trim())
+                }).unwrap();
+                let (status, rotation, body) = match stage {
+                    0 => {
+                        assert!(header.starts_with("GET /token "));
+                        assert_eq!(cookie, "fixture=initial");
+                        ("200 OK", "Set-Cookie: fixture=upload-state; Path=/\r\n", "token-for-upload-state")
+                    }
+                    1 => {
+                        assert!(header.starts_with("GET /background-account "));
+                        ("200 OK", "Set-Cookie: fixture=background-state; Path=/\r\n", "{}")
+                    }
+                    _ => {
+                        assert!(header.starts_with("POST /precreate?token=token-for-upload-state "));
+                        upload_cookie_matched = cookie == "fixture=upload-state";
+                        (if upload_cookie_matched { "200 OK" } else { "409 Conflict" }, "", "{}")
+                    }
+                };
+                write!(stream, "HTTP/1.1 {status}\r\n{rotation}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            upload_cookie_matched
+        });
+        let shared = ReqwestTransport::new().unwrap();
+        let request = |method, path: &str| CloudHttpRequest {
+            method, url: format!("{origin}{path}"),
+            headers: BTreeMap::from([("Cookie".into(), "fixture=initial".into())]),
+            body: None,
+        };
+        let response = with_upload_http(|http| {
+            let token = http.send(request("GET", "/token"))?;
+            assert_eq!(token.status, 200);
+            // A background account response arrives between token and precreate.
+            shared.send(request("GET", "/background-account"))?;
+            http.send(request("POST", &format!("/precreate?token={}", token.body)))
+        }).unwrap();
+        let matched = worker.join().unwrap();
+        assert_eq!(response.status, 200, "upload state was changed by an unrelated request");
+        assert!(matched);
+    }
+}
