@@ -559,6 +559,7 @@ pub(crate) async fn begin_authorization_for(
         })
         .on_page_load(move |window, payload| {
             if payload.event() == PageLoadEvent::Finished {
+                record_authorization_page_finished(&window, provider, payload.url());
                 let _ = window.eval(AUTHORIZATION_TOP_RIGHT_VIEWPORT_JS);
                 if ProviderRegistry::global()
                     .get(provider)
@@ -1019,7 +1020,7 @@ async fn complete_authorization_for_window(
         let mut driver = ProviderRegistry::global().driver(provider, &state.store, http);
         let recipe = driver.auth().web_authorization_recipe();
         let input = crate::cloud::driver::WebAuthorizationInput {
-            cookies: browser_cookies(&window, web_session_cookie_urls(provider))?,
+            cookies: browser_authorization_cookies(&window, provider)?,
             storage: match recipe.token_script {
                 Some(script) => web_storage_tokens(&window, script)?,
                 None => serde_json::Value::Null,
@@ -1204,6 +1205,11 @@ pub async fn cloud_open_operation_verification(
         .title(title)
         .inner_size(1024.0, 760.0)
         .data_directory(authorization_profile_directory(&window_app, provider)?)
+        .on_page_load(move |window, payload| {
+            if payload.event() == PageLoadEvent::Finished {
+                record_authorization_page_finished(&window, provider, payload.url());
+            }
+        })
         .on_navigation(move |url| {
             if provider == CloudProvider::Baidu {
                 url.scheme() == "https"
@@ -1239,7 +1245,7 @@ pub async fn cloud_complete_operation_verification(
         if auth_supervisor::is_manually_disconnected(&state.store, provider)? {
             return Err(QuarkError::NotAuthorized);
         }
-        let cookies = browser_cookies(&capture_window, web_session_cookie_urls(provider))?;
+        let cookies = browser_authorization_cookies(&capture_window, provider)?;
         let account = refresh_baidu_operation_verification_session(
             &state.store,
             http,
