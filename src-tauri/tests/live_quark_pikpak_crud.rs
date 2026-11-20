@@ -116,6 +116,8 @@ fn error_kind(error: &CloudError) -> &'static str {
         CloudError::BaiduTransferPending => "baidu-transfer-pending",
         CloudError::ShareTransferDownloadUnavailable => "transfer-saved-download-unavailable",
         CloudError::ProviderUnsupported => "provider-unsupported",
+        CloudError::BaiduUploadPrecreateRejected { .. } => "baidu-upload-precreate-rejected",
+        CloudError::BaiduUploadWebSessionRequired => "baidu-upload-web-session-required",
     }
 }
 

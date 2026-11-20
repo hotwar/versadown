@@ -364,6 +364,8 @@ fn error_state(error: &QuarkError) -> &'static str {
         QuarkError::Provider(_) => "provider-error",
         QuarkError::InvalidInput(_) => "invalid-input",
         QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => "provider-unsupported",
+        QuarkError::BaiduUploadPrecreateRejected { .. } => "baidu-upload-precreate-rejected",
+        QuarkError::BaiduUploadWebSessionRequired => "baidu-upload-web-session-required",
     }
 }
 

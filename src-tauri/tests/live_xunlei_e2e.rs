@@ -65,6 +65,15 @@ fn error_kind(error: &CloudError) -> &'static str {
         CloudError::ProviderUnsupported => "provider-unsupported",
         CloudError::PikpakRegionalMembershipRestricted => "provider-restricted",
         CloudError::PikpakOperationVerificationRequired(_) => "operation-verification-required",
+        CloudError::XunleiVerificationUnavailable(_) => "xunlei-verification-unavailable",
+        CloudError::BaiduOperationVerificationRequired => "baidu-operation-verification-required",
+        CloudError::BaiduDriveVerificationRequired => "baidu-operation-verification-required",
+        CloudError::BaiduUploadAuthorizationRequired(_) => "baidu-upload-authorization-required",
+        CloudError::BaiduUploadPrecreateRejected { .. } => "baidu-upload-precreate-rejected",
+        CloudError::BaiduUploadWebSessionRequired => "baidu-upload-web-session-required",
+        CloudError::XunleiNativeDownload(_) => "xunlei-native-download-error",
+        CloudError::BaiduTransferPending => "baidu-transfer-pending",
+        CloudError::ShareTransferDownloadUnavailable => "transfer-saved-download-unavailable",
     }
 }
 

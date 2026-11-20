@@ -268,6 +268,8 @@ fn provider_error_kind(error: &QuarkError) -> &'static str {
         QuarkError::ShareTransferDownloadUnavailable => "transfer-saved-download-unavailable",
         QuarkError::BaiduDriveVerificationRequired | QuarkError::BaiduOperationVerificationRequired => "baidu-operation-verification-required",
         QuarkError::ProviderUnsupported => "provider-unsupported",
+        QuarkError::BaiduUploadPrecreateRejected { .. } => "baidu-upload-precreate-rejected",
+        QuarkError::BaiduUploadWebSessionRequired => "baidu-upload-web-session-required",
     }
 }
 
