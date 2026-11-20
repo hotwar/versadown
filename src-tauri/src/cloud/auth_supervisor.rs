@@ -680,6 +680,7 @@ impl AuthSupervisor {
                     CloudError::AuthorizationExpired
                         | CloudError::NotAuthorized
                         | CloudError::WebAuthorizationRequired
+                        | CloudError::BaiduUploadWebSessionRequired
                 ) || (provider == CloudProvider::Xunlei
                     && matches!(error, CloudError::XunleiVerificationUnavailable(
                         "metadata_missing" | "metadata_expired" | "timestamp_invalid"
@@ -716,6 +717,13 @@ impl AuthSupervisor {
                         return Err(CloudError::WebAuthorizationRequired);
                     }
                     Ok(())
+                };
+                // A confirmed expiry during upload uses ordinary silent maintenance.
+                // Retain the file-specific continuation only if maintenance needs the user.
+                let upload_recovery_error = |failure| match (&error, failure) {
+                    (CloudError::BaiduUploadWebSessionRequired, CloudError::WebAuthorizationRequired) =>
+                        CloudError::BaiduUploadWebSessionRequired,
+                    (_, other) => other,
                 };
                 if matches!(error, CloudError::XunleiVerificationUnavailable("metadata_expired")) {
                     let recovery = self.maintain(store, provider, Some(revision), true, || {
@@ -768,12 +776,12 @@ impl AuthSupervisor {
                                 Err(error)
                             }
                         }
-                    })?;
+                    }).map_err(upload_recovery_error)?;
                 } else {
                     self.maintain(store, provider, Some(revision), true, || {
                         check()?;
                         recover(RecoveryPhase::AuthFailure)
-                    })?;
+                    }).map_err(upload_recovery_error)?;
                 }
                 let next = self.snapshot(store, provider)?;
                 if next.initial.is_none()
