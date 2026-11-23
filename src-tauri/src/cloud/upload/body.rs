@@ -256,6 +256,16 @@ pub enum UploadBody {
         body: Box<UploadBody>,
         control: UploadControl,
     },
+    /// The plaintext of `body` encrypted on the fly with AES-128-CTR, as MEGA
+    /// uploads require. The keystream starts at plaintext byte `offset` of the
+    /// whole file, so any slice can be (re)sent independently and nothing but
+    /// the slice's own read buffer is ever held in memory.
+    AesCtr {
+        body: Box<UploadBody>,
+        key: zeroize::Zeroizing<[u8; 16]>,
+        nonce: [u8; 8],
+        offset: u64,
+    },
 }
 impl From<Vec<u8>> for UploadBody {
     fn from(bytes: Vec<u8>) -> Self {
@@ -272,7 +282,7 @@ impl UploadBody {
                 file,
                 suffix,
             } => prefix.len() as u64 + file.len() + suffix.len() as u64,
-            Self::Controlled { body, .. } => body.len(),
+            Self::Controlled { body, .. } | Self::AesCtr { body, .. } => body.len(),
         }
     }
     pub fn reader(&self, control: UploadControl) -> Result<Box<dyn Read + Send>, QuarkError> {
@@ -338,6 +348,22 @@ impl UploadBody {
                     _ => reader,
                 })
             }
+            Self::AesCtr {
+                body,
+                key,
+                nonce,
+                offset,
+            } => {
+                use ctr::cipher::{KeyIvInit, StreamCipherSeek};
+                let mut iv = [0u8; 16];
+                iv[..8].copy_from_slice(nonce);
+                let mut cipher = AesCtrStream::new(&(**key).into(), &iv.into());
+                cipher.seek(*offset);
+                Ok(Box::new(CtrReader {
+                    reader: body.reader_for(control, transfer)?,
+                    cipher,
+                }))
+            }
         }
     }
     /// AWS requires a payload digest before sending; hash in a bounded buffer.
@@ -354,6 +380,23 @@ impl UploadBody {
             hash.update(&buffer[..count]);
         }
         Ok(format!("{:x}", hash.finalize()))
+    }
+}
+
+type AesCtrStream = ctr::Ctr128BE<aes::Aes128>;
+
+/// Encrypts whatever the inner reader yields; sizes and EOF pass through.
+struct CtrReader {
+    reader: Box<dyn Read + Send>,
+    cipher: AesCtrStream,
+}
+
+impl Read for CtrReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        use ctr::cipher::StreamCipher;
+        let count = self.reader.read(buffer)?;
+        self.cipher.apply_keystream(&mut buffer[..count]);
+        Ok(count)
     }
 }
 
