@@ -364,6 +364,7 @@ fn error_state(error: &QuarkError) -> &'static str {
         QuarkError::Provider(_) => "provider-error",
         QuarkError::InvalidInput(_) => "invalid-input",
         QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => "provider-unsupported",
+        QuarkError::Gofile(_) => "gofile-link-error",
         QuarkError::Mega(_) => "mega-link-error",
     }
 }

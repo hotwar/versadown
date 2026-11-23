@@ -70,6 +70,7 @@ fn error_kind(error: &CloudError) -> &'static str {
         CloudError::BaiduTransferPending => "baidu-transfer-pending",
         CloudError::ShareTransferDownloadUnavailable => "transfer-saved-download-unavailable",
         CloudError::Mega(_) => "mega-link-error",
+        CloudError::Gofile(_) => "gofile-link-error",
         CloudError::PikpakRegionalMembershipRestricted => "provider-restricted",
         CloudError::PikpakOperationVerificationRequired(_) => "operation-verification-required",
     }

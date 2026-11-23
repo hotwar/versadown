@@ -69,6 +69,7 @@ fn error_kind(error: &QuarkError) -> &'static str {
         QuarkError::BaiduTransferPending => "baidu-transfer-pending",
         QuarkError::ShareTransferDownloadUnavailable => "transfer-saved-download-unavailable",
         QuarkError::Mega(_) => "mega-link-error",
+        QuarkError::Gofile(_) => "gofile-link-error",
     }
 }
 

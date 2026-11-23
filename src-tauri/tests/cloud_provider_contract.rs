@@ -345,8 +345,8 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
             direct
         );
     }
-    assert_eq!(descriptors.len(), 8);
-    assert_eq!(registry.catalog().len(), 7);
+    assert_eq!(descriptors.len(), 9);
+    assert_eq!(registry.catalog().len(), 8);
 }
 
 #[test]
@@ -804,8 +804,8 @@ fn registry_catalog_is_complete_unique_and_routes_each_share() {
     let registry = ProviderRegistry::global();
     let descriptors = registry.all();
     let catalog = registry.catalog();
-    assert_eq!(descriptors.len(), 8);
-    assert_eq!(catalog.len(), 7);
+    assert_eq!(descriptors.len(), 9);
+    assert_eq!(catalog.len(), 8);
     assert!(catalog
         .iter()
         .all(|descriptor| descriptor.provider.is_enabled()));
@@ -815,7 +815,7 @@ fn registry_catalog_is_complete_unique_and_routes_each_share() {
             .map(|d| d.provider)
             .collect::<HashSet<_>>()
             .len(),
-        8
+        9
     );
     assert_eq!(
         descriptors
@@ -823,7 +823,7 @@ fn registry_catalog_is_complete_unique_and_routes_each_share() {
             .map(|d| d.provider.key())
             .collect::<HashSet<_>>()
             .len(),
-        8
+        9
     );
     for descriptor in descriptors {
         assert!(!descriptor.root_directory_id.is_empty());

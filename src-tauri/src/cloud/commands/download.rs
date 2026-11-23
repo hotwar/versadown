@@ -1041,6 +1041,9 @@ pub(crate) fn directory_download_failure_fields(
     if let QuarkError::Mega(failure) = error {
         return (failure.code(), failure.message().into());
     }
+    if let QuarkError::Gofile(failure) = error {
+        return (failure.code(), failure.message().into());
+    }
     let (code, message) = fixed_directory_download_failure_fields(error);
     (code, message.into())
 }
@@ -1050,6 +1053,7 @@ fn fixed_directory_download_failure_fields(
 ) -> (&'static str, &'static str) {
     match error {
         QuarkError::Mega(failure) => (failure.code(), failure.message_key()),
+        QuarkError::Gofile(failure) => (failure.code(), failure.message()),
         QuarkError::XunleiVerificationUnavailable(reason) => ("xunlei_verification_unavailable", reason),
         QuarkError::AuthorizationExpired | QuarkError::NotAuthorized => {
             ("credentials_expired", "网盘会话已过期")

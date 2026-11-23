@@ -26,8 +26,10 @@ use tauri_plugin_dialog::DialogExt;
 
 mod auth;
 mod browser;
+mod browser_share;
 mod common;
 pub(crate) use browser::*;
+pub use browser_share::*;
 mod download;
 mod drive;
 #[path = "commands/mega.rs"]

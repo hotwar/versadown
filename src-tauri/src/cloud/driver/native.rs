@@ -43,10 +43,14 @@ impl ProviderDriverFactory for NativeDriverFactory {
                 store: StoreRef(store),
                 http: HttpRef(http),
             }),
+            CloudProvider::Gofile => Box::new(AccountlessDriver),
         }
     }
 }
 
+mod accountless_driver;
+// Providers the registry declares with `account == false` (Gofile).
+use accountless_driver::AccountlessDriver;
 mod mega_driver;
 use mega_driver::MegaDriver;
 mod quark_driver;
