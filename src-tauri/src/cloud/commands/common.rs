@@ -84,6 +84,7 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
         QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => {
             "当前网盘分享下载暂不支持".into()
         }
+        QuarkError::Mega(failure) => failure.message(),
     }
 }
 
@@ -121,6 +122,7 @@ pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
         QuarkError::Provider(_) => "provider_error",
         QuarkError::InvalidInput(_) => "invalid_input",
         QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => "provider_unsupported",
+        QuarkError::Mega(failure) => failure.code(),
     }
 }
 
@@ -225,6 +227,43 @@ pub(crate) async fn run_session_work_checked<T: Send + 'static>(
     app: AppHandle,
     provider: CloudProvider,
     kind: SessionWorkKind,
+    work: impl FnMut(&SessionWorkContext<'_>, &ReqwestTransport) -> Result<T, QuarkError>
+        + Send
+        + 'static,
+    check: impl Fn() -> Result<(), QuarkError> + Send + 'static,
+) -> Result<T, QuarkError> {
+    if !ProviderRegistry::global().get(provider).account {
+        return run_accountless_work(app, provider, work, check).await;
+    }
+    run_authorized_work(app, provider, kind, work, check).await
+}
+
+/// Share reads and resolutions of providers whose public links need no login
+/// (MEGA keys) never recover the signed-in session,
+/// even when the provider also has accounts. MEGA may read the stored session
+/// to request download URLs against its quota, falling back to anonymous.
+pub(crate) async fn run_share_work_checked<T: Send + 'static>(
+    app: AppHandle,
+    provider: CloudProvider,
+    kind: SessionWorkKind,
+    work: impl FnMut(&SessionWorkContext<'_>, &ReqwestTransport) -> Result<T, QuarkError>
+        + Send
+        + 'static,
+    check: impl Fn() -> Result<(), QuarkError> + Send + 'static,
+) -> Result<T, QuarkError> {
+    if !ProviderRegistry::global()
+        .get(provider)
+        .public_shares_need_session
+    {
+        return run_accountless_work(app, provider, work, check).await;
+    }
+    run_authorized_work(app, provider, kind, work, check).await
+}
+
+async fn run_authorized_work<T: Send + 'static>(
+    app: AppHandle,
+    provider: CloudProvider,
+    kind: SessionWorkKind,
     mut work: impl FnMut(&SessionWorkContext<'_>, &ReqwestTransport) -> Result<T, QuarkError>
         + Send
         + 'static,
@@ -263,6 +302,40 @@ pub(crate) async fn run_session_work_checked<T: Send + 'static>(
     .await
 }
 
+/// Providers without an account have no session to snapshot, persist or
+/// recover, so their work bypasses the authorization supervisor entirely.
+async fn run_accountless_work<T: Send + 'static>(
+    app: AppHandle,
+    provider: CloudProvider,
+    mut work: impl FnMut(&SessionWorkContext<'_>, &ReqwestTransport) -> Result<T, QuarkError>
+        + Send
+        + 'static,
+    check: impl Fn() -> Result<(), QuarkError> + Send + 'static,
+) -> Result<T, QuarkError> {
+    run_initialized(
+        move || {
+            app.try_state::<Arc<CloudState>>()
+                .map(|state| Arc::clone(state.inner()))
+        },
+        provider,
+        move |state, http| {
+            check()?;
+            let result = work(
+                &SessionWorkContext {
+                    store: crate::cloud::driver::StoreRef(&state.store),
+                    state,
+                },
+                http,
+            );
+            check()?;
+            result
+        },
+        std::time::Duration::from_secs(10),
+        false,
+    )
+    .await
+}
+
 pub(crate) async fn run_share_session_read_work<T: Send + 'static>(
     app: AppHandle,
     provider: CloudProvider,
@@ -270,7 +343,7 @@ pub(crate) async fn run_share_session_read_work<T: Send + 'static>(
         + Send
         + 'static,
 ) -> Result<T, QuarkError> {
-    run_session_work(app, provider, SessionWorkKind::Read, work).await
+    run_share_work_checked(app, provider, SessionWorkKind::Read, work, || Ok(())).await
 }
 
 pub(crate) fn valid_name(name: &str) -> Result<(), QuarkError> {

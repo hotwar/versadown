@@ -454,7 +454,7 @@ fn only_authorization_failures_request_a_new_official_login() {
         directory_download_failure_fields(&QuarkError::AccountMismatch),
         (
             "account_mismatch",
-            "当前登录的网盘账号与下载任务所属账号不一致，请切换账号或取消该任务"
+            "当前登录的网盘账号与下载任务所属账号不一致，请切换账号或取消该任务".into()
         )
     );
 }
@@ -734,7 +734,7 @@ async fn mac_xunlei_native_failures_reach_the_queue_with_their_localization_keys
         let error = QuarkError::XunleiNativeDownload(failure);
         assert_eq!(
             directory_download_failure_fields(&error),
-            (cloud_failure_code(&error), message)
+            (cloud_failure_code(&error), message.into())
         );
         let result = dispatch
             .run(
@@ -857,6 +857,7 @@ fn directory_output_file_names_avoid_devices_in_confirmation_and_submission() {
         let expected = format!("_{}", name.trim_end_matches(['.', ' ']));
         let confirmed = super::safe_filename(&name);
         let submitted = super::ResolvedCloudDownload {
+            transform: None,
             url: "https://download.example/file".into(),
             name: name.clone(),
             headers: vec![],
@@ -1194,7 +1195,7 @@ fn resolved_quark_download_keeps_fresh_cookie_when_building_aria2_options() {
 
 #[tokio::test]
 async fn baidu_submission_keeps_upstream_credentials_out_of_local_aria2_options() {
-    let gateway = crate::cloud::baidu_range_gateway::BaiduRangeGateway::start()
+    let gateway = crate::cloud::range_gateway::RangeGateway::start()
         .await
         .unwrap();
     let task_id = uuid::Uuid::new_v4();
@@ -1207,6 +1208,7 @@ async fn baidu_submission_keeps_upstream_credentials_out_of_local_aria2_options(
             proxy: Some("http://proxy.example.test:8080".into()),
             ..Default::default()
         },
+        None,
         false,
     )
     .unwrap();
@@ -1225,6 +1227,7 @@ async fn baidu_submission_keeps_upstream_credentials_out_of_local_aria2_options(
         task_id,
         "https://d.pcs.baidu.com/file?sign=renewed".into(),
         crate::UriSubmissionOptions::default(),
+        None,
         true,
     )
     .unwrap();
@@ -1246,19 +1249,22 @@ async fn baidu_share_submission_keeps_configured_connections_through_gateway() {
         crate::UriSubmissionOptions::default(),
     );
     let resolved = super::ResolvedCloudDownload {
+        transform: None,
         url: "https://d.pcs.baidu.com/file?sign=secret".into(),
         name: "share.bin".into(),
         headers: vec![("Cookie".into(), "BDUSS=secret".into())],
     };
     let (signed_url, options) =
         crate::cloud::share::share_submission_options(resolved, configured).unwrap();
-    let gateway = crate::cloud::baidu_range_gateway::BaiduRangeGateway::start()
+    let gateway = crate::cloud::range_gateway::RangeGateway::start()
         .await
         .unwrap();
     let task_id = uuid::Uuid::new_v4();
     let (_, options, mut registration) =
-        super::register_stable_range_gateway_download(&gateway, task_id, signed_url, options, false)
-            .unwrap();
+        super::register_stable_range_gateway_download(
+            &gateway, task_id, signed_url, options, None, false,
+        )
+        .unwrap();
 
     let aria2 = options.into_aria2_options().unwrap();
     assert_eq!(aria2.get("split").map(String::as_str), Some("3"));

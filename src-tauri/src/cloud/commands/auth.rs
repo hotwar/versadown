@@ -184,7 +184,7 @@ pub(crate) fn bind_reauthorized_cloud_task_owner(
 }
 
 /// Explicit authorization only: background refresh must never close interactive UI.
-fn publish_authorization_completion(
+pub(crate) fn publish_authorization_completion(
     app: &AppHandle,
     state: &CloudState,
     account: &CloudAccount,
@@ -354,11 +354,12 @@ pub async fn cloud_tianyi_resolve_download_for_test(
     .await
 }
 
+/// Guards account operations (authorization, logout, ...). A provider without
+/// an account has nothing to authorize; its public share flow never calls this.
 pub(crate) fn require_connected_provider(provider: CloudProvider) -> Result<(), QuarkError> {
-    if !provider.is_enabled() {
+    if !provider.is_enabled() || !ProviderRegistry::global().get(provider).account {
         return Err(QuarkError::ProviderUnsupported);
     }
-    let _ = ProviderRegistry::global().get(provider);
     Ok(())
 }
 
@@ -378,6 +379,10 @@ pub async fn cloud_begin_authorization(
     provider: CloudProvider,
 ) -> Result<CloudAuthorization, QuarkError> {
     require_connected_provider(provider)?;
+    // Providers without an official web sign-in use their own login form.
+    if !provider_capabilities(provider).web {
+        return Err(QuarkError::NotAuthorized);
+    }
     let cloud = app
         .try_state::<Arc<CloudState>>()
         .ok_or(QuarkError::Storage)?;
@@ -1170,8 +1175,13 @@ pub async fn cloud_login_password(
 pub async fn cloud_logout(app: AppHandle, provider: CloudProvider) -> Result<(), QuarkError> {
     require_connected_provider(provider)?;
     let copy = app.clone();
-    run(app, provider, move |s, _| {
-        {
+    run(app, provider, move |s, http| {
+        // MEGA sessions live on the server: end this one while its id is
+        // still stored. Best effort, so signing out never needs the network.
+        if provider == CloudProvider::Mega {
+            crate::cloud::mega::account::revoke_session(http, &s.store);
+        }
+        if provider_capabilities(provider).web {
             let profile_window = WebviewWindowBuilder::new(
                 &copy,
                 format!("cloud-logout-{}", provider.key()),

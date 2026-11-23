@@ -58,6 +58,7 @@ async fn authorization_recovery_discovers_only_durable_matching_account_failures
         assert!(eligible.contains(&task.id));
         for attempt in 0..2 {
             let resolved = versadown_lib::cloud::ResolvedCloudDownload {
+                transform: None,
                 url: "https://download.example/file".into(),
                 name: "file.txt".into(),
                 headers: Default::default(),

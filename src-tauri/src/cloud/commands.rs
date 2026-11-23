@@ -30,6 +30,8 @@ mod common;
 pub(crate) use browser::*;
 mod download;
 mod drive;
+#[path = "commands/mega.rs"]
+mod mega_commands;
 #[path = "commands/share.rs"]
 mod share_commands;
 #[path = "commands/upload.rs"]
@@ -38,6 +40,7 @@ pub use auth::*;
 pub use common::*;
 pub use download::*;
 pub use drive::*;
+pub use mega_commands::*;
 pub use share_commands::*;
 pub use upload_commands::*;
 #[cfg(test)]
@@ -181,7 +184,7 @@ impl CloudState {
         for descriptor in ProviderRegistry::global()
             .all()
             .iter()
-            .filter(|descriptor| descriptor.provider.is_enabled())
+            .filter(|descriptor| descriptor.provider.is_enabled() && descriptor.account)
         {
             let state = Arc::downgrade(self);
             let provider = descriptor.provider;
@@ -230,7 +233,11 @@ fn restore_startup_authorizations(
     store: &impl CredentialStore,
 ) -> bool {
     let mut failed = false;
-    for descriptor in ProviderRegistry::global().all() {
+    for descriptor in ProviderRegistry::global()
+        .all()
+        .iter()
+        .filter(|descriptor| descriptor.account)
+    {
         if let Err(error) = supervisor.restore(store, descriptor.provider) {
             // Failed reads never become persisted disconnects. Credential
             // operations remain authoritative and report the original error.

@@ -1636,6 +1636,7 @@ impl<T: CloudHttpTransport + ?Sized> QuarkClient<'_, T> {
     ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
         let url = parse_quark_download_url(&response.response.body)?;
         Ok(super::commands::ResolvedCloudDownload {
+            transform: None,
             url,
             name: name.into(),
             headers: quark_download_headers(&response.cookie, &[]),

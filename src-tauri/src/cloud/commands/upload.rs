@@ -526,6 +526,7 @@ fn upload_error_code(error: &QuarkError) -> &'static str {
         QuarkError::Provider(_) => "provider_error",
         QuarkError::InvalidInput(_) => "invalid_input",
         QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => "provider_unsupported",
+        QuarkError::Mega(failure) => failure.code(),
     }
 }
 

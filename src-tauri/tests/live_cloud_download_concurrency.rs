@@ -127,6 +127,13 @@ fn cloud_error_kind(error: &CloudError) -> &'static str {
         CloudError::Provider(_) => "provider-error",
         CloudError::InvalidInput(_) => "provider-input-invalid",
         CloudError::UploadUnavailable | CloudError::ProviderUnsupported => "provider-unsupported",
+        CloudError::XunleiVerificationUnavailable(_) => "xunlei-verification-unavailable",
+        CloudError::BaiduOperationVerificationRequired => "operation-verification-required",
+        CloudError::BaiduUploadAuthorizationRequired(_) => "baidu-upload-authorization-required",
+        CloudError::XunleiNativeDownload(_) => "xunlei-native-download-error",
+        CloudError::BaiduTransferPending => "baidu-transfer-pending",
+        CloudError::ShareTransferDownloadUnavailable => "transfer-saved-download-unavailable",
+        CloudError::Mega(_) => "mega-link-error",
     }
 }
 

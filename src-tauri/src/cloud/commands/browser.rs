@@ -262,6 +262,10 @@ fn capture_persistent_authorization(
     http: &impl CloudHttpTransport,
     phase: auth_supervisor::RecoveryPhase,
 ) -> Result<bool, CloudError> {
+    // Providers without a web sign-in have no browser profile to recapture.
+    if !provider_capabilities(provider).web {
+        return Ok(false);
+    }
     if auth_supervisor::is_manually_disconnected(&state.store, provider)? {
         return Err(CloudError::NotAuthorized);
     }

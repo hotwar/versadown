@@ -313,7 +313,7 @@ pub async fn resolve_stable_cloud_download(
 pub struct CloudDirectoryDownloadFailure {
     pub relative_path: String,
     pub code: &'static str,
-    pub message: &'static str,
+    pub message: std::borrow::Cow<'static, str>,
 }
 
 #[derive(Clone, Serialize)]
@@ -441,6 +441,11 @@ pub(crate) fn ready_cloud_download_account(
     app: &AppHandle,
     provider: CloudProvider,
 ) -> Result<Option<String>, QuarkError> {
+    // Public links that run outside the session (MEGA keys) never belong to the signed-in account.
+    let descriptor = ProviderRegistry::global().get(provider);
+    if !descriptor.account || !descriptor.public_shares_need_session {
+        return Ok(None);
+    }
     let cloud = app
         .try_state::<Arc<CloudState>>()
         .ok_or(QuarkError::Storage)?;
@@ -691,14 +696,24 @@ pub async fn queue_cloud_dispatch(
                         .service()
                         .await
                         .map_err(|_| QuarkError::DownloadEngineUnavailable)?;
+                    let transform = resolved.transform.clone();
+                    // Tell the user which quota a public MEGA link is using.
+                    let fallback_notice = fallback_notice.or_else(|| {
+                        transform
+                            .as_ref()
+                            .is_some_and(|transform| transform.uses_account_quota())
+                            .then(|| crate::cloud::mega::ACCOUNT_QUOTA_NOTICE.to_owned())
+                    });
                     let (signed_url, options) =
                         share::share_submission_options(resolved, configured)?;
                     let mut gateway_registration = None;
-                    let (url, options) = if requires_stable_range_gateway(provider) {
+                    let (url, options) = if transform.is_some()
+                        || requires_stable_range_gateway(provider)
+                    {
                         let gateway = state
-                            .baidu_range_gateway
+                            .range_gateway
                             .get_or_try_init(|| async {
-                                crate::cloud::baidu_range_gateway::BaiduRangeGateway::start()
+                                crate::cloud::range_gateway::RangeGateway::start()
                                     .await
                                     .map(Arc::new)
                             })
@@ -709,6 +724,7 @@ pub async fn queue_cloud_dispatch(
                             id,
                             signed_url,
                             options,
+                            transform,
                             replacing_gid.is_some(),
                         )?;
                         gateway_registration = Some((Arc::clone(gateway), registration));
@@ -741,6 +757,15 @@ pub async fn queue_cloud_dispatch(
                     {
                         service
                             .note_download_route(id, gid, &message)
+                            .await
+                            .map_err(|_| QuarkError::Storage)?
+                    } else if let (CloudProvider::Mega, Some(gid)) =
+                        (provider, submitted.aria_gid.as_deref())
+                    {
+                        // A refresh that fell back to anonymous must not keep
+                        // the account-quota label of the earlier resolution.
+                        service
+                            .clear_download_route(id, gid, crate::cloud::mega::ACCOUNT_QUOTA_NOTICE)
                             .await
                             .map_err(|_| QuarkError::Storage)?
                     } else {
@@ -802,20 +827,30 @@ pub(crate) fn emit_cloud_dispatch_update(app: &AppHandle, state: &AppState, task
 }
 
 pub(crate) fn register_stable_range_gateway_download(
-    gateway: &crate::cloud::baidu_range_gateway::BaiduRangeGateway,
+    gateway: &crate::cloud::range_gateway::RangeGateway,
     task_id: Uuid,
     signed_url: String,
     mut options: UriSubmissionOptions,
+    transform: Option<crate::cloud::download_transform::DownloadTransform>,
     refreshing: bool,
 ) -> Result<
     (
         String,
         UriSubmissionOptions,
-        crate::cloud::baidu_range_gateway::GatewayRegistration,
+        crate::cloud::range_gateway::GatewayRegistration,
     ),
     QuarkError,
 > {
-    let registration = if refreshing {
+    let registration = if let Some(transform) = transform {
+        gateway.register_transformed(
+            task_id,
+            signed_url,
+            options.headers.clone(),
+            options.proxy.clone(),
+            transform,
+            refreshing,
+        )
+    } else if refreshing {
         gateway.register_refreshing(
             task_id,
             signed_url,
@@ -998,10 +1033,23 @@ pub(crate) fn directory_download_failure(
     }
 }
 
+/// Provider failures that carry parameters (MEGA's quota wait) keep them in
+/// the message; everything else is a fixed text.
 pub(crate) fn directory_download_failure_fields(
+    error: &QuarkError,
+) -> (&'static str, std::borrow::Cow<'static, str>) {
+    if let QuarkError::Mega(failure) = error {
+        return (failure.code(), failure.message().into());
+    }
+    let (code, message) = fixed_directory_download_failure_fields(error);
+    (code, message.into())
+}
+
+fn fixed_directory_download_failure_fields(
     error: &QuarkError,
 ) -> (&'static str, &'static str) {
     match error {
+        QuarkError::Mega(failure) => (failure.code(), failure.message_key()),
         QuarkError::XunleiVerificationUnavailable(reason) => ("xunlei_verification_unavailable", reason),
         QuarkError::AuthorizationExpired | QuarkError::NotAuthorized => {
             ("credentials_expired", "网盘会话已过期")
@@ -1420,14 +1468,14 @@ where
                 let failure = CloudDirectoryDownloadFailure {
                     relative_path,
                     code: "duplicate",
-                    message: "已存在下载任务，未重复入队",
+                    message: "已存在下载任务，未重复入队".into(),
                 };
                 store
                     .fail_cloud_directory_group_item(
                         group.id,
                         item.id,
                         failure.code,
-                        failure.message,
+                        &failure.message,
                     )
                     .map_err(|_| QuarkError::Storage)?;
                 failures.push(failure);
@@ -1454,7 +1502,7 @@ pub(crate) fn persist_directory_failure(
 ) -> Result<(), QuarkError> {
     let failure = directory_download_failure(file, error);
     store
-        .fail_cloud_directory_group_item(group_id, item_id, failure.code, failure.message)
+        .fail_cloud_directory_group_item(group_id, item_id, failure.code, &failure.message)
         .map_err(|_| QuarkError::Storage)?;
     failures.push(failure);
     Ok(())
@@ -1919,6 +1967,43 @@ mod tests {
             ),
             crate::xunlei_native::PLUGIN_UPDATE_MESSAGE,
         );
+    }
+
+    #[test]
+    fn the_mega_account_quota_label_follows_each_resolution() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store
+            .create(crate::NewTask::direct("cloud-share://mega/file/AbC12345"))
+            .unwrap();
+        let task = store
+            .apply_transfer_snapshot(DownloadTask {
+                status: TaskStatus::Downloading,
+                aria_gid: Some("0123456789abcdef".into()),
+                ..task
+            })
+            .unwrap();
+        let gid = task.aria_gid.as_deref().unwrap();
+        let notice = crate::cloud::mega::ACCOUNT_QUOTA_NOTICE;
+        // Resolved with the account: labelled.
+        let labelled = store.note_download_route(task.id, gid, notice).unwrap();
+        assert_eq!(labelled.status_message.as_deref(), Some(notice));
+        // Re-resolved anonymously: the label goes away.
+        let cleared = store.clear_download_route(task.id, gid, notice).unwrap();
+        assert!(cleared.status_message.is_none());
+        // Re-resolved with the account again: labelled again.
+        let labelled = store.note_download_route(task.id, gid, notice).unwrap();
+        assert_eq!(labelled.status_message.as_deref(), Some(notice));
+        // Only that label is removed, never another status or another task's.
+        assert!(store
+            .clear_download_route(task.id, gid, "other")
+            .unwrap()
+            .status_message
+            .is_some());
+        assert!(store
+            .clear_download_route(task.id, "obsolete", notice)
+            .unwrap()
+            .status_message
+            .is_some());
     }
 
     #[cfg(target_os = "macos")]

@@ -1648,6 +1648,7 @@ fn uc_share_download(
     let url = required(file, "download_url")?;
     super::share::validate_direct_url(&url)?;
     Ok(super::commands::ResolvedCloudDownload {
+        transform: None,
         url,
         name: name.into(),
         headers: headers.into_iter().collect(),

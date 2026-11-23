@@ -2339,6 +2339,7 @@ impl PikPakShareAdapter<'_> {
         let (url, _) = PikPakClient::new(self.http, self.credentials).download(file_id)?;
         super::share::validate_direct_url(&url)?;
         Ok(super::commands::ResolvedCloudDownload {
+            transform: None,
             url,
             name,
             headers: pikpak_share_cdn_headers(&self.session()?.headers),
@@ -2563,6 +2564,7 @@ fn resolve_pikpak_share_with_context(
         super::share::validate_direct_url(&url)?;
         Ok(ShareResolution::Direct(
             super::commands::ResolvedCloudDownload {
+                transform: None,
                 url: url.to_owned(),
                 name: entry.entry.name.clone(),
                 headers: pikpak_share_cdn_headers(&session.headers),

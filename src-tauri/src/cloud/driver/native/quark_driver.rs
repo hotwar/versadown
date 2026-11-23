@@ -115,6 +115,7 @@ impl DownloadOps for QuarkDriver<'_> {
             let url = parse_quark_download_url(&result.response.body)?;
             persist_quark_download_cookies(store, &cookie, &result)?;
             Ok(ResolvedCloudDownload {
+                transform: None,
                 url,
                 name: v
                     .pointer("/data/0/file_name")

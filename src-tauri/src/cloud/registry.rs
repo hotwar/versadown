@@ -25,6 +25,9 @@ pub struct ProviderCapabilities {
     pub share_list: bool,
     pub share_cancel: bool,
     pub share_update_pass_code: bool,
+    /// Whether a created share can carry a pass code and an expiry. MEGA links
+    /// are always plain: their only secret is the key in the link.
+    pub share_configurable: bool,
 }
 
 #[derive(Clone, Copy, Debug, Serialize)]
@@ -38,12 +41,27 @@ pub struct DownloadConcurrencyPolicy {
 #[serde(rename_all = "camelCase")]
 pub struct ProviderDescriptor {
     pub provider: CloudProvider,
+    /// Whether the provider has a user account that can be signed in to and
+    /// listed. A provider without one only serves public share links: it is
+    /// never listed among the user's drives, needs no authorization, and its
+    /// work never touches the authorization supervisor.
+    pub account: bool,
+    /// Whether this provider's public share links run inside the signed-in
+    /// session (so they need, refresh and may recover it). Links that carry
+    /// their own key (MEGA) or are public work signed out: they never trigger a
+    /// login recovery and are not bound to an account.
+    #[serde(skip)]
+    pub public_shares_need_session: bool,
     pub display_name: &'static str,
     pub share_display_name: &'static str,
     pub upload_display_name: &'static str,
     pub share_directory_name: &'static str,
     pub root_directory_id: &'static str,
     pub recycle_bin_directory_id: &'static str,
+    /// A virtual directory that lists what other accounts shared with this
+    /// one, for providers that have such shares.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub incoming_shares_directory_id: Option<&'static str>,
     pub authorization: CloudAuthorizationCapabilities,
     pub authorization_url: &'static str,
     pub password_login_hosts: &'static [&'static str],
@@ -105,6 +123,21 @@ impl ProviderRegistry {
         credentials: &'a dyn super::CredentialStore,
         http: &'a dyn super::CloudHttpTransport,
     ) -> super::share::ShareCapabilities<'a> {
+        self.share_capabilities_with(
+            provider,
+            credentials,
+            http,
+            super::share::ShareAdapterOptions::default(),
+        )
+    }
+
+    pub fn share_capabilities_with<'a>(
+        &self,
+        provider: CloudProvider,
+        credentials: &'a dyn super::CredentialStore,
+        http: &'a dyn super::CloudHttpTransport,
+        options: super::share::ShareAdapterOptions,
+    ) -> super::share::ShareCapabilities<'a> {
         use super::share::ShareCapabilities;
         macro_rules! read_only {
             ($adapter:expr) => {{
@@ -146,6 +179,13 @@ impl ProviderRegistry {
             }
             CloudProvider::Tianyi => {
                 read_only!(super::tianyi::TianyiShareAdapter { credentials, http })
+            }
+            CloudProvider::Mega => {
+                transferable!(super::mega::MegaShareAdapter {
+                    credentials,
+                    http,
+                    account_quota: options.mega_account_quota,
+                })
             }
         }
     }
@@ -294,6 +334,17 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             &["drive.uc.cn"],
             &["/s/"],
         ),
+        // The drive has a real rubbish bin: the id is the virtual directory the
+        // account client maps to MEGA's rubbish root.
+        Mega => (
+            "MEGA",
+            "0",
+            super::mega::MEGA_RECYCLE_BIN_ID,
+            None,
+            "https://mega.nz",
+            &["mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz"],
+            &["/file/", "/folder/"],
+        ),
     };
     let password_login_hosts: &'static [&'static str] = match provider {
         Baidu => &["pan.baidu.com", "passport.baidu.com"],
@@ -301,14 +352,29 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
         Xunlei => &["pan.xunlei.com", "i.xunlei.com"],
         _ => &[],
     };
+    // Every provider declares these facts explicitly (no wildcard arm), so a
+    // new provider cannot silently inherit the wrong session semantics.
+    let account = match provider {
+        Quark | Pikpak | Baidu | Tianyi | Aliyun | Xunlei | Uc | Mega => true,
+    };
+    let public_shares_need_session = match provider {
+        Quark | Pikpak | Baidu | Tianyi | Aliyun | Xunlei | Uc => true,
+        Mega => false,
+    };
+    // MEGA's drive is fully managed, including copy (every node key of the
+    // copied tree is re-encrypted for the account).
+    let writable = account;
     ProviderDescriptor {
         provider,
+        account,
+        public_shares_need_session,
         browser_context: provider == Tianyi,
         browser_profile_owner: provider == Baidu,
         recycle_directory_download: provider != Pikpak,
         display_name,
         root_directory_id,
         recycle_bin_directory_id,
+        incoming_shares_directory_id: (provider == Mega).then_some(super::mega::MEGA_INCOMING_SHARES_ID),
         authorization_url,
         share_display_name: match provider {
             Quark => "夸克网盘",
@@ -318,6 +384,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Aliyun => "阿里云盘",
             Xunlei => "迅雷网盘",
             Uc => "UC 网盘",
+            Mega => "MEGA",
         },
         upload_display_name: match provider {
             Quark => "夸克",
@@ -327,6 +394,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Aliyun => "阿里云盘",
             Xunlei => "迅雷云盘",
             Uc => "UC网盘",
+            Mega => "MEGA",
         },
         share_directory_name: match provider {
             Quark => "夸克分享目录",
@@ -336,6 +404,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Aliyun => "阿里云盘分享目录",
             Xunlei => "迅雷云盘分享目录",
             Uc => "UC网盘分享目录",
+            Mega => "MEGA分享目录",
         },
         password_login_hosts,
         web_initialization_script: (provider == Xunlei)
@@ -347,33 +416,39 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Quark => &["https://pan.quark.cn", "https://drive-pc.quark.cn"],
             Baidu => &["https://pan.baidu.com"],
             Uc => &["https://drive.uc.cn", "https://pc-api.uc.cn"],
-            Pikpak | Aliyun | Xunlei => &[],
+            Pikpak | Aliyun | Xunlei | Mega => &[],
         },
         authorization: CloudAuthorizationCapabilities {
             provider,
-            web: true,
+            // MEGA signs in with its own e-mail/password/2FA form and command.
+            web: account && provider != Mega,
             password: password_login_mode == RustDirect
                 || (password_login_mode == OfficialWebView && !password_login_hosts.is_empty()),
             password_login_mode,
         },
+        // Personal-drive operations need an account.
         capabilities: ProviderCapabilities {
-            list: true,
-            create_directory: true,
-            rename: true,
-            r#move: true,
-            copy: true,
-            trash: true,
-            delete: true,
-            restore: true,
-            download: true,
-            upload: true,
+            list: account,
+            create_directory: writable,
+            rename: writable,
+            r#move: writable,
+            copy: writable,
+            trash: writable,
+            delete: writable,
+            restore: writable,
+            download: account,
+            upload: writable,
             share_inspect: true,
-            share_transfer: matches!(provider, Quark | Pikpak | Baidu | Aliyun | Uc | Xunlei),
-            recorded_transfer_resolve: matches!(provider, Quark | Pikpak | Baidu | Aliyun | Uc | Xunlei),
-            share_create: true,
-            share_list: true,
-            share_cancel: true,
+            share_transfer: matches!(provider, Quark | Pikpak | Baidu | Aliyun | Uc | Xunlei | Mega),
+            recorded_transfer_resolve: matches!(
+                provider,
+                Quark | Pikpak | Baidu | Aliyun | Uc | Xunlei | Mega
+            ),
+            share_create: writable,
+            share_list: writable,
+            share_cancel: writable,
             share_update_pass_code: provider == Pikpak,
+            share_configurable: writable && provider != Mega,
         },
         share_hosts,
         share_patterns,
@@ -382,6 +457,11 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Quark | Pikpak | Baidu | Aliyun | Uc => DownloadConcurrencyPolicy {
                 max_connections_per_file: 4,
                 max_concurrent_tasks: 4,
+            },
+            // Transfers share MEGA's per-IP quota; stay conservative.
+            Mega => DownloadConcurrencyPolicy {
+                max_connections_per_file: 4,
+                max_concurrent_tasks: 2,
             },
             Tianyi => DownloadConcurrencyPolicy {
                 max_connections_per_file: 1,

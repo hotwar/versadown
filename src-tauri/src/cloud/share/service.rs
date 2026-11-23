@@ -44,10 +44,28 @@ pub fn resolve_current_share_download_cancellable(
     source: &str,
     control: &ShareWorkControl,
 ) -> Result<crate::cloud::commands::ResolvedCloudDownload, QuarkError> {
+    resolve_current_share_download_cancellable_with(
+        plans,
+        credentials,
+        http,
+        source,
+        control,
+        ShareAdapterOptions::default(),
+    )
+}
+
+pub fn resolve_current_share_download_cancellable_with(
+    plans: &CloudSharePlanStore,
+    credentials: &dyn CredentialStore,
+    http: &dyn crate::cloud::CloudHttpTransport,
+    source: &str,
+    control: &ShareWorkControl,
+    options: ShareAdapterOptions,
+) -> Result<crate::cloud::commands::ResolvedCloudDownload, QuarkError> {
     control.check()?;
     let (provider, _, _) = parse_stable_cloud_share_source(source)?;
     let http = control.transport(http);
-    let adapter = provider_share_adapter(provider, credentials, &http)?;
+    let adapter = provider_share_adapter_with(provider, credentials, &http, options)?;
     let result = resolve_current_share_download(plans, adapter.as_ref(), source);
     // Do not commit this operation's private session after caller cancellation
     // or timeout. Completed transfer IDs have already reached the journal.

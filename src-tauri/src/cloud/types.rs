@@ -10,9 +10,10 @@ pub enum CloudProvider {
     Aliyun,
     Xunlei,
     Uc,
+    Mega,
 }
 impl CloudProvider {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Quark,
         Self::Pikpak,
         Self::Baidu,
@@ -20,6 +21,7 @@ impl CloudProvider {
         Self::Aliyun,
         Self::Xunlei,
         Self::Uc,
+        Self::Mega,
     ];
 
     /// Tianyi remains a known serialized provider so historical task records
@@ -37,6 +39,7 @@ impl CloudProvider {
             Self::Aliyun => "aliyun",
             Self::Xunlei => "xunlei",
             Self::Uc => "uc",
+            Self::Mega => "mega",
         }
     }
 }
@@ -443,6 +446,8 @@ pub enum CloudError {
     UploadUnavailable,
     #[error("当前网盘服务尚未接通，请稍后重试")]
     ProviderUnsupported,
+    #[error("{}", .0.message())]
+    Mega(super::mega::MegaFailure),
 }
 pub use CloudError as QuarkError;
 
@@ -548,6 +553,7 @@ impl Serialize for CloudError {
             Self::InvalidInput(_) => "invalid_input",
             Self::UploadUnavailable => "provider_unsupported",
             Self::ProviderUnsupported => "provider_unsupported",
+            Self::Mega(failure) => failure.code(),
         };
         // Xunlei verification keeps its stable reason on the wire so the
         // frontend can localize it; Display stays human-readable.
@@ -586,6 +592,10 @@ pub struct ResolvedCloudDownload {
     pub url: String,
     pub name: String,
     pub headers: Vec<(String, String)>,
+    /// Set when the bytes behind `url` are not the plain file (for example
+    /// end-to-end encrypted). Such a download must go through the local range
+    /// gateway, which applies the transform before aria2 sees any data.
+    pub transform: Option<super::download_transform::DownloadTransform>,
 }
 
 #[cfg(test)]

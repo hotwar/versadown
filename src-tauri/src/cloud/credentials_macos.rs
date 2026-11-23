@@ -135,6 +135,7 @@ mod tests {
             "baidu",
             "xunlei",
             "uc",
+            "mega",
             "pikpak",
             "tianyi",
             "aliyun",

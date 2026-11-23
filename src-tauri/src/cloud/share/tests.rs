@@ -569,6 +569,7 @@ impl ShareResolve for SagaAdapter {
         } else {
             Ok(ShareResolution::Direct(
                 super::super::commands::ResolvedCloudDownload {
+                    transform: None,
                     url: "https://cdn.example/file".into(),
                     name: entry.entry.name.clone(),
                     headers: vec![],
@@ -645,6 +646,7 @@ impl ShareTransfer for RecordedTransferAdapter {
             &recorded_transfer_owner(),
         )?;
         Ok(super::super::commands::ResolvedCloudDownload {
+            transform: None,
             url: "https://cdn.example/new-transfer".into(),
             name: entry.entry.name.clone(),
             headers: vec![],
@@ -668,6 +670,7 @@ impl RecordedTransferResolver for RecordedTransferAdapter {
         Ok(ShareOperationResult {
             result: Ok(RecordedTransferDownload::Available(
                 super::super::commands::ResolvedCloudDownload {
+                    transform: None,
                     url: "https://cdn.example/reused-transfer".into(),
                     name: entry.entry.name.clone(),
                     headers: vec![],
@@ -913,6 +916,7 @@ impl ShareTransfer for IdentityUnavailableTransferAdapter {
             "identity-unavailable-id",
         )?;
         Ok(super::super::commands::ResolvedCloudDownload {
+            transform: None,
             url: "https://cdn.example/identity-unavailable-transfer".into(),
             name: entry.entry.name.clone(),
             headers: vec![],
@@ -1231,6 +1235,7 @@ fn rotated_share_context_must_be_persisted_before_transfer_or_download_handoff()
                         })
                     } else {
                         ShareResolution::Direct(super::super::commands::ResolvedCloudDownload {
+                            transform: None,
                             url: "https://cdn.example/file".into(),
                             name: "file".into(),
                             headers: vec![],
@@ -1266,6 +1271,7 @@ fn rotated_share_context_must_be_persisted_before_transfer_or_download_handoff()
                     Err(QuarkError::WebAuthorizationRequired)
                 } else {
                     Ok(super::super::commands::ResolvedCloudDownload {
+                        transform: None,
                         url: "https://cdn.example/personal".into(),
                         name: "file".into(),
                         headers: vec![],
@@ -1335,6 +1341,7 @@ impl ShareResolve for DirectAdapter {
         let revision = self.0.fetch_add(1, Ordering::SeqCst);
         Ok(ShareResolution::Direct(
             super::super::commands::ResolvedCloudDownload {
+                transform: None,
                 url: format!("https://cdn.example/file?signature={revision}"),
                 name: "file.txt".into(),
                 headers: vec![("x-share-token".into(), format!("token-{revision}"))],
@@ -1571,6 +1578,7 @@ fn share_pages_and_transfer_requirements_never_become_direct_downloads() {
     let page = FixedAdapter(|| {
         Ok(ShareResolution::Direct(
             super::super::commands::ResolvedCloudDownload {
+                transform: None,
                 url: "https://pan.baidu.com/s/private-share?pwd=secret".into(),
                 name: "file.txt".into(),
                 headers: vec![],

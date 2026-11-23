@@ -1220,6 +1220,16 @@ impl DownloadService {
         self.store.note_download_route(task_id, gid, message)
     }
 
+    pub(crate) async fn clear_download_route(
+        &self,
+        task_id: Uuid,
+        gid: &str,
+        message: &str,
+    ) -> Result<DownloadTask, StoreError> {
+        let _guard = self.operation.lock().await;
+        self.store.clear_download_route(task_id, gid, message)
+    }
+
     pub async fn reconcile_task(
         &self,
         task_id: Uuid,

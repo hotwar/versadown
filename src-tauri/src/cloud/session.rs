@@ -159,7 +159,10 @@ fn password_credential_key(provider: CloudProvider) -> Result<&'static str, Quar
         CloudProvider::Baidu => Ok("cloud-password-baidu"),
         CloudProvider::Tianyi => Ok("cloud-password-tianyi"),
         CloudProvider::Xunlei => Ok("cloud-password-xunlei"),
-        CloudProvider::Quark | CloudProvider::Aliyun | CloudProvider::Uc => {
+        CloudProvider::Quark
+        | CloudProvider::Aliyun
+        | CloudProvider::Uc
+        | CloudProvider::Mega => {
             unreachable!("password providers must have a password credential key")
         }
     }
@@ -993,7 +996,10 @@ fn password_login_draft_key(provider: CloudProvider) -> Result<&'static str, Qua
         CloudProvider::Baidu => Ok("cloud-password-draft-baidu"),
         CloudProvider::Tianyi => Ok("cloud-password-draft-tianyi"),
         CloudProvider::Xunlei => Ok("cloud-password-draft-xunlei"),
-        CloudProvider::Quark | CloudProvider::Aliyun | CloudProvider::Uc => {
+        CloudProvider::Quark
+        | CloudProvider::Aliyun
+        | CloudProvider::Uc
+        | CloudProvider::Mega => {
             unreachable!("password providers have a login draft key")
         }
     }

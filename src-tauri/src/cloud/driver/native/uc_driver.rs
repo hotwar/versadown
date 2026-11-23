@@ -185,6 +185,7 @@ impl DownloadOps for UcDriver<'_> {
         with_uc_client(store, http, |client| {
             let download = client.download(file_id)?;
             Ok(ResolvedCloudDownload {
+                transform: None,
                 url: download.url,
                 name: download.name,
                 headers: download.headers.into_iter().collect(),

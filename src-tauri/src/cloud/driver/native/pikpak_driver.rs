@@ -110,6 +110,7 @@ impl DownloadOps for PikpakDriver<'_> {
         {
             let (url, name) = PikPakClient::new(http, store).download(file_id)?;
             Ok(ResolvedCloudDownload {
+                transform: None,
                 url,
                 name,
                 headers: Vec::new(),

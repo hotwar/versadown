@@ -43,8 +43,8 @@ pub struct AppState {
     pub privacy_session: crate::privacy::PrivacySession,
     pub cloud_download_sources: crate::cloud::commands::CloudDownloadSourceGate,
     pub cloud_download_dispatch: crate::cloud::download_dispatch::CloudDownloadDispatch,
-    pub baidu_range_gateway:
-        Arc<tokio::sync::OnceCell<Arc<crate::cloud::baidu_range_gateway::BaiduRangeGateway>>>,
+    pub range_gateway:
+        Arc<tokio::sync::OnceCell<Arc<crate::cloud::range_gateway::RangeGateway>>>,
     pub xunlei_native_backend: std::sync::Arc<crate::xunlei_native::XunleiNativeBackend>,
 }
 

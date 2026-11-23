@@ -1981,6 +1981,7 @@ pub fn resolve_tianyi_share(
     super::share::validate_direct_url(&url)?;
     Ok(ShareResolution::Direct(
         super::commands::ResolvedCloudDownload {
+            transform: None,
             url,
             name: entry.entry.name.clone(),
             headers: session.headers().into_iter().collect(),

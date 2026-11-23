@@ -10,10 +10,7 @@ pub(super) const MASTER_KEY_NAME: &str = "cloud-session-key-v1";
 const DATABASE: &str = "cloud-sessions-v1.sqlite";
 
 pub(super) fn handles(key: &str) -> bool {
-    matches!(
-        key,
-        "quark" | "pikpak" | "baidu" | "tianyi" | "aliyun" | "xunlei" | "uc"
-    )
+    provider_session_key(key)
 }
 
 pub(super) trait MasterKeyStore {
@@ -233,9 +230,7 @@ mod tests {
         let session = serde_json::to_vec(&session).unwrap();
         assert!(session.len() > 2560);
         assert!(keys.write(&session).is_err());
-        for provider in [
-            "quark", "pikpak", "baidu", "tianyi", "aliyun", "xunlei", "uc",
-        ] {
+        for provider in crate::cloud::CloudProvider::ALL.map(|provider| provider.key()) {
             save(root.path(), "service", provider, &session, &keys).unwrap();
             assert_eq!(
                 load(root.path(), "service", provider, &keys).unwrap(),
