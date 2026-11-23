@@ -70,6 +70,11 @@ describe('share failure messages', () => {
     expect(downloadErrorMessage('cloud.error.mega.integrityFailed')).toContain('integrity check');
   });
 
+  it('localizes Gofile failures', async () => {
+    await setLocalePreference('en');
+    expect(shareFailureMessage('cloud.error.gofile.linkExpired')).toContain('expired');
+  });
+
   it('ignores unrelated text and shows task failures through the queue helper', async () => {
     expect(shareFailureMessage('something else')).toBeUndefined();
     expect(shareFailureMessage('constructor')).toBeUndefined();

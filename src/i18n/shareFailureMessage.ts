@@ -24,6 +24,8 @@ const fixedKeys: Readonly<Record<string, TranslationKey>> = {
   'cloud.error.mega.keysConflict': 'cloud.error.mega.keysConflict',
   'cloud.error.mega.keysUnsupported': 'cloud.error.mega.keysUnsupported',
   'cloud.error.mega.copyTooLarge': 'cloud.error.mega.copyTooLarge',
+  'cloud.error.gofile.linkExpired': 'cloud.error.gofile.linkExpired',
+  'cloud.error.gofile.openSharePage': 'cloud.error.gofile.openSharePage',
 };
 
 const quotaRetryKeys: Readonly<Record<string, TranslationKey>> = {

@@ -623,3 +623,52 @@ it.each([false, true])('keeps repeated URLs as independent scan rows (remove fir
   expect(result.current.items.find(item => item.id === originalIds[1])?.selected).toBe(false);
   expect(new Set(result.current.items.map(item => item.result?.confirmation?.taskId)).size).toBe(removeFirst ? 1 : 2);
 });
+
+const GOFILE_PAGE = 'https://gofile.io/d/AbC123';
+
+function mixedBatch() {
+  return renderHook(() => useDownloadDraftBatch({
+    scan: async () => [
+      { input: GOFILE_PAGE, valid: true, kind: 'cloud_share' },
+      { input: 'https://example.test/a.iso', valid: true, kind: 'direct' },
+    ],
+    prepare: async input => input === GOFILE_PAGE ? { browserShare: { provider: 'gofile', page: GOFILE_PAGE } } : ready('a'),
+    discard: vi.fn().mockResolvedValue(undefined),
+  }));
+}
+
+it('turns a browser-captured share into a neutral draft with nothing to submit', async () => {
+  const { result } = renderHook(() => useDownloadDraftBatch({
+    scan: async () => [{ input: GOFILE_PAGE, valid: true, kind: 'cloud_share' }],
+    prepare: async () => ({ browserShare: { provider: 'gofile', page: GOFILE_PAGE } }),
+    discard: vi.fn().mockResolvedValue(undefined),
+  }));
+  await act(async () => { await result.current.start(GOFILE_PAGE); });
+  await waitFor(() => expect(result.current.items[0].status).toBe('browser_share'));
+  expect(result.current.items[0]).toMatchObject({ selected: false, error: undefined, note: expect.stringContaining('Gofile') });
+  expect(result.current.canSubmit).toBe(false);
+});
+
+it('removes only the draft of the share that was taken over, leaving other drafts selectable', async () => {
+  const { result } = mixedBatch();
+  await act(async () => { await result.current.start('x'); });
+  await waitFor(() => expect(result.current.items.map(item => item.status)).toEqual(['browser_share', 'ready']));
+
+  let outcome = { removed: 0, remaining: 0 };
+  act(() => { outcome = result.current.resolveBrowserShare('https://gofile.io/d/Other'); });
+  expect(outcome).toEqual({ removed: 0, remaining: 2 });
+
+  act(() => { outcome = result.current.resolveBrowserShare(GOFILE_PAGE); });
+  expect(outcome).toEqual({ removed: 1, remaining: 1 });
+  expect(result.current.items.map(item => item.input)).toEqual(['https://example.test/a.iso']);
+  expect(result.current.canSubmit).toBe(true);
+});
+
+it('keeps the draft when its window closes without a capture and says how to continue', async () => {
+  const { result } = mixedBatch();
+  await act(async () => { await result.current.start('x'); });
+  await waitFor(() => expect(result.current.items).toHaveLength(2));
+  act(() => result.current.markBrowserShareClosed(GOFILE_PAGE));
+  expect(result.current.items[0]).toMatchObject({ status: 'browser_share', note: expect.stringContaining('重新打开分享页') });
+  expect(result.current.items[1].note).toBeUndefined();
+});

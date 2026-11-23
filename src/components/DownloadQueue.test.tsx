@@ -855,6 +855,687 @@ it('offers reauthorization instead of a normal retry for a cloud task blocked by
   expect(onCommand).toHaveBeenCalledWith('reauthorize-cloud-task', 'reauthorize');
 });
 
+it('offers reopening the share page for a browser-captured download whose link expired', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  const task = {
+    id: 'expired-gofile-task',
+    name: 'report.pdf',
+    kind: 'cloud',
+    status: 'failed',
+    progress: 0,
+    source: 'cloud-share://gofile/' + 'a'.repeat(64) + '/' + 'b'.repeat(64),
+    error: 'cloud.error.gofile.linkExpired',
+    failure_code: 'gofile_link_expired',
+    reauthorization_required: false,
+  } as unknown as import('../lib/types').QueueTask;
+  render(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onCommand={onCommand} />);
+
+  expect(screen.getByText('Gofile 下载链接已过期，请重新打开分享页')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '重新打开分享页 report.pdf' }));
+  expect(onCommand).toHaveBeenCalledWith('expired-gofile-task', 'reopen_share');
+  await user.click(screen.getByRole('button', { name: '更多操作 report.pdf' }));
+  expect(screen.getByRole('menuitem', { name: '重新打开分享页' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '重新下载' })).toBeVisible();
+});
+
+it('lets a completed browser-captured download reopen its share page for another file', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  const task = {
+    id: 'done-gofile-task', name: 'report.pdf', kind: 'cloud', status: 'completed', progress: 100,
+    source: 'cloud-share://gofile/' + 'a'.repeat(64) + '/' + 'b'.repeat(64),
+  } as unknown as import('../lib/types').QueueTask;
+  render(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onCommand={onCommand} />);
+
+  await user.click(screen.getByRole('button', { name: '更多操作 report.pdf' }));
+  await user.click(screen.getByRole('menuitem', { name: '重新打开分享页' }));
+  expect(onCommand).toHaveBeenCalledWith('done-gofile-task', 'reopen_share');
+});
+
+it('keeps the normal retry for other failed cloud tasks', () => {
+  const task = {
+    id: 'plain-failed', name: 'a.zip', kind: 'cloud', status: 'failed', progress: 0,
+    source: 'cloud://baidu/file', error: '网络请求失败', failure_code: 'network_error',
+  } as unknown as import('../lib/types').QueueTask;
+  render(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);
+  expect(screen.getByRole('button', { name: '重新下载 a.zip' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: /重新打开分享页/ })).not.toBeInTheDocument();
+});
+
+it('opens the directory when a completed task mixes video and other files', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  const completedTask = {
+    id: 'completed-video', name: '纪录片合集', kind: 'torrent' as const, status: 'completed' as const, progress: 100,
+    completed_at: 1_788_998_400,
+    files: [
+      { index: 1, path: 'D:/Downloads/documentary.mp4', length: 1_073_741_824, completed_length: 1_073_741_824, selected: true },
+      { index: 2, path: 'D:/Downloads/notes.txt', length: 524_288, completed_length: 524_288, selected: true },
+    ],
+  };
+  render(<DownloadQueue
+    tasks={[completedTask]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={onCommand}
+  />);
+
+  expect(screen.getByText('2026-09-10 08:00')).toBeVisible();
+  expect(screen.getByText('1.0 GB')).toBeVisible();
+  expect(screen.getByRole('progressbar', { name: '纪录片合集 下载进度' })).toHaveAttribute('aria-valuenow', '100');
+  expect(screen.getByText('下载完成')).toBeVisible();
+
+  await user.click(screen.getByRole('button', { name: '打开 纪录片合集 所在目录' }));
+  expect(onCommand).toHaveBeenCalledWith('completed-video', 'open_directory');
+});
+
+it.each([
+  ['video', '播放视频', 'play_videos', ['episode.mp4', 'trailer.mkv']],
+  ['audio', '播放音乐', 'play_videos', ['track.mp3', 'bonus.flac']],
+  ['image', '查看图片', 'open_file', ['cover.jpg', 'back.png']],
+] as const)('offers the %s action only when all selected files share that media type', async (type, label, command, names) => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  const task = {
+    id: `completed-${type}-collection`, name: `${type} collection`, kind: 'torrent' as const,
+    status: 'completed' as const, progress: 100,
+    files: [
+      ...names.map((name, index) => ({ index: index + 1, path: `D:/Downloads/${name}`, length: 100, completed_length: 100, selected: true })),
+      { index: 3, path: 'D:/Downloads/unselected.txt', length: 100, completed_length: 0, selected: false },
+    ],
+  };
+  render(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onCommand={onCommand} />);
+
+  await user.click(screen.getByRole('button', { name: `${label} ${task.name}` }));
+  expect(onCommand).toHaveBeenCalledWith(task.id, command);
+});
+
+it('opens the directory when completed selected files mix video and audio', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  const task = {
+    id: 'completed-mixed-media', name: 'mixed media', kind: 'torrent' as const,
+    status: 'completed' as const, progress: 100,
+    files: [
+      { index: 1, path: 'D:/Downloads/episode.mp4', length: 100, completed_length: 100, selected: true },
+      { index: 2, path: 'D:/Downloads/soundtrack.mp3', length: 100, completed_length: 100, selected: true },
+    ],
+  };
+  render(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onCommand={onCommand} />);
+
+  await user.click(screen.getByRole('button', { name: '打开 mixed media 所在目录' }));
+  expect(onCommand).toHaveBeenCalledWith(task.id, 'open_directory');
+});
+
+it.each([
+  ['image', '查看图片', 'open_file', ['cover.jpg', 'nested/back.png']],
+  ['video', '播放视频', 'play_videos', ['episode.mp4', 'nested/trailer.mkv']],
+  ['audio', '播放音乐', 'play_videos', ['track.mp3', 'nested/bonus.flac']],
+] as const)('classifies every descendant of a completed %s directory', async (type, label, command, names) => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  const task = {
+    id: `completed-${type}-directory`, name: `${type} directory`, kind: 'folder' as const,
+    status: 'completed' as const, progress: 100,
+    children: [
+      { id: `${type}-first`, name: names[0], kind: 'cloud' as const, status: 'completed' as const, progress: 100 },
+      { id: `${type}-nested`, name: 'nested', kind: 'folder' as const, status: 'completed' as const, progress: 100,
+        children: [{ id: `${type}-second`, name: names[1].split('/').at(-1)!, kind: 'cloud' as const, status: 'completed' as const, progress: 100 }] },
+    ],
+  };
+  render(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onCommand={onCommand} />);
+
+  await user.click(screen.getByRole('button', { name: `${label} ${task.name}` }));
+  expect(onCommand).toHaveBeenCalledWith(task.id, command);
+});
+
+it('opens a completed directory when descendant files have different types', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  const task = {
+    id: 'completed-mixed-directory', name: 'mixed directory', kind: 'folder' as const,
+    status: 'completed' as const, progress: 100,
+    children: [
+      { id: 'mixed-cover', name: 'cover.jpg', kind: 'cloud' as const, status: 'completed' as const, progress: 100 },
+      { id: 'mixed-subdir', name: 'subdir', kind: 'folder' as const, status: 'completed' as const, progress: 100,
+        children: [{ id: 'mixed-song', name: 'track.mp3', kind: 'cloud' as const, status: 'completed' as const, progress: 100 }] },
+    ],
+  };
+  render(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onCommand={onCommand} />);
+
+  await user.click(screen.getByRole('button', { name: '打开 mixed directory 所在目录' }));
+  expect(onCommand).toHaveBeenCalledWith(task.id, 'open_directory');
+});
+
+it('opens the download directory for a completed task without video files', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  render(<DownloadQueue
+    tasks={[{
+      id: 'completed-archive', name: 'archive.zip', kind: 'file', status: 'completed', progress: 100,
+      updated_at: 1_788_998_400,
+      files: [{ index: 1, path: 'D:/Downloads/archive.zip', length: 1_572_864, completed_length: 1_572_864, selected: true }],
+    }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={onCommand}
+  />);
+
+  expect(screen.getByText('1.5 MB')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: '打开 archive.zip 所在目录' }));
+  expect(onCommand).toHaveBeenCalledWith('completed-archive', 'open_directory');
+});
+
+it('opens only completed images with the associated application and other files by directory', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  render(<DownloadQueue
+    tasks={[
+      {
+        id: 'completed-text', name: 'notes.txt', kind: 'file', status: 'completed', progress: 100,
+        files: [{ index: 1, path: 'D:/Downloads/notes.txt', length: 128, completed_length: 128, selected: true }],
+      },
+      {
+        id: 'completed-image', name: 'cover.png', kind: 'file', status: 'completed', progress: 100,
+        files: [{ index: 1, path: 'D:/Downloads/cover.png', length: 256, completed_length: 256, selected: true }],
+      },
+      {
+        id: 'completed-pdf', name: 'guide.pdf', kind: 'file', status: 'completed', progress: 100,
+        files: [{ index: 1, path: 'D:/Downloads/guide.pdf', length: 512, completed_length: 512, selected: true }],
+      },
+      {
+        id: 'completed-office', name: 'report.docx', kind: 'file', status: 'completed', progress: 100,
+        files: [{ index: 1, path: 'D:/Downloads/report.docx', length: 1024, completed_length: 1024, selected: true }],
+      },
+    ]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={onCommand}
+  />);
+
+  await user.click(screen.getByRole('button', { name: '打开 notes.txt 所在目录' }));
+  expect(onCommand).toHaveBeenLastCalledWith('completed-text', 'open_directory');
+  await user.click(screen.getByRole('button', { name: '查看图片 cover.png' }));
+  expect(onCommand).toHaveBeenLastCalledWith('completed-image', 'open_file');
+  await user.click(screen.getByRole('button', { name: '打开 guide.pdf 所在目录' }));
+  expect(onCommand).toHaveBeenLastCalledWith('completed-pdf', 'open_directory');
+  await user.click(screen.getByRole('button', { name: '打开 report.docx 所在目录' }));
+  expect(onCommand).toHaveBeenLastCalledWith('completed-office', 'open_directory');
+});
+
+it('classifies completed local filenames without treating hash or question-mark characters as URL syntax', () => {
+  render(<DownloadQueue
+    tasks={[
+      {
+        id: 'completed-hash-text', name: 'notes#1.txt', kind: 'file', status: 'completed', progress: 100,
+        files: [{ index: 1, path: 'D:/Downloads/notes#1.txt', length: 128, completed_length: 128, selected: true }],
+      },
+      {
+        id: 'completed-disguised-executable', name: 'notes.txt#1.exe', kind: 'file', status: 'completed', progress: 100,
+        files: [{ index: 1, path: 'D:/Downloads/notes.txt#1.exe', length: 128, completed_length: 128, selected: true }],
+      },
+      {
+        id: 'completed-question-text', name: 'notes?1.txt', kind: 'file', status: 'completed', progress: 100,
+        files: [{ index: 1, path: 'D:/Downloads/notes?1.txt', length: 128, completed_length: 128, selected: true }],
+      },
+      {
+        id: 'completed-question-executable', name: 'notes.txt?1.exe', kind: 'file', status: 'completed', progress: 100,
+        files: [{ index: 1, path: 'D:/Downloads/notes.txt?1.exe', length: 128, completed_length: 128, selected: true }],
+      },
+    ]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  expect(screen.getByRole('button', { name: '打开 notes#1.txt 所在目录' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '打开 notes.txt#1.exe 所在目录' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '打开 notes?1.txt 所在目录' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '打开 notes.txt?1.exe 所在目录' })).toBeVisible();
+});
+
+it('offers cleanup retry only from the typed completed-task state', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  render(<DownloadQueue
+    tasks={[
+      {
+        id: 'cleanup-pending', name: 'pending.bin', kind: 'cloud', status: 'completed', progress: 100,
+        source: 'cloud-share://baidu/share/entry', cleanup_pending: true, error: 'opaque provider failure',
+      },
+      {
+        id: 'cleanup-done', name: 'done.bin', kind: 'cloud', status: 'completed', progress: 100,
+        source: 'cloud-share://baidu/share/other', cleanup_pending: false,
+        error: 'cleanup_pending：这段旧文案不能决定界面能力',
+      },
+    ]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={onCommand}
+  />);
+
+  await user.click(screen.getByRole('button', { name: '重试网盘清理 pending.bin' }));
+  expect(onCommand).toHaveBeenLastCalledWith('cleanup-pending', 'retry_cleanup');
+  expect(screen.queryByRole('button', { name: '重试网盘清理 done.bin' })).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('button', { name: '更多操作 pending.bin' }));
+  await user.click(screen.getByRole('menuitem', { name: '重试网盘清理' }));
+  expect(onCommand).toHaveBeenLastCalledWith('cleanup-pending', 'retry_cleanup');
+});
+
+it('keeps permanent deletion in the menu while the row exposes pause and more actions', async () => {
+  const user = userEvent.setup();
+  render(<DownloadQueue
+    tasks={[{ id: 'active-actions', name: 'game.zip', kind: 'file', status: 'downloading', progress: 25 }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  expect(screen.getByRole('button', { name: '暂停 game.zip' })).toBeVisible();
+  expect(screen.getByRole('button', { name: '更多操作 game.zip' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: '取消 game.zip' })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: '更多操作 game.zip' }));
+  expect(screen.getByRole('menu', { name: 'game.zip任务菜单' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '删除任务' })).toBeVisible();
+});
+
+it('offers real state-aware commands when an active task is right-clicked', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  render(<DownloadQueue
+    tasks={[{ id: 'active-1', name: 'game.zip', source: 'https://example.com/game.zip', kind: 'file', status: 'downloading', progress: 25 }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={onCommand}
+  />);
+
+  fireEvent.contextMenu(screen.getByText('game.zip'), { clientX: 280, clientY: 180 });
+  expect(screen.getByRole('menu', { name: 'game.zip任务菜单' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '暂停' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '删除任务' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '打开下载目录' })).toBeVisible();
+  expect(screen.queryByRole('menuitem', { name: '重新下载' })).not.toBeInTheDocument();
+
+  await user.click(screen.getByRole('menuitem', { name: '暂停' }));
+  expect(onCommand).toHaveBeenCalledWith('active-1', 'pause');
+  expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+});
+
+it.each([
+  ['下载中', 'downloading' as const],
+  ['已完成', 'completed' as const],
+  ['失败', 'failed' as const],
+  ['回收站', 'recycled' as const],
+])('shows the matching privacy move command for a normal %s task only when privacy downloads are enabled', (label, status) => {
+  const { container, rerender } = render(<DownloadQueue
+    tasks={[{ id: `${status}-normal`, name: `${label}-普通任务`, kind: 'file', status, progress: status === 'completed' || status === 'recycled' ? 100 : 0 }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+    privacyEnabled={false}
+  />);
+
+  fireEvent.contextMenu(container.querySelector(`[data-task-id="${status}-normal"] .task-row`)!);
+  expect(screen.queryByRole('menuitem', { name: '移入隐私下载' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '移入普通下载' })).not.toBeInTheDocument();
+
+  rerender(<DownloadQueue
+    tasks={[{ id: `${status}-normal`, name: `${label}-普通任务`, kind: 'file', status, progress: status === 'completed' || status === 'recycled' ? 100 : 0 }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+    privacyEnabled
+  />);
+  fireEvent.contextMenu(container.querySelector(`[data-task-id="${status}-normal"] .task-row`)!);
+  expect(screen.getByRole('menuitem', { name: '移入隐私下载' })).toBeVisible();
+  expect(screen.queryByRole('menuitem', { name: '移入普通下载' })).not.toBeInTheDocument();
+});
+
+it.each([
+  ['下载中', 'downloading' as const],
+  ['已完成', 'completed' as const],
+  ['失败', 'failed' as const],
+  ['回收站', 'recycled' as const],
+])('shows the matching privacy move command for a private %s task only when privacy downloads are enabled', (label, status) => {
+  const task = { id: `${status}-private`, name: `${label}-隐私任务`, kind: 'file' as const, status, progress: status === 'completed' || status === 'recycled' ? 100 : 0, is_private: true };
+  const { container, rerender } = render(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} privacyEnabled={false} />);
+
+  fireEvent.contextMenu(container.querySelector(`[data-task-id="${status}-private"] .task-row`)!);
+  expect(screen.queryByRole('menuitem', { name: '移入隐私下载' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '移入普通下载' })).not.toBeInTheDocument();
+
+  rerender(<DownloadQueue tasks={[task]} selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} privacyEnabled />);
+  fireEvent.contextMenu(container.querySelector(`[data-task-id="${status}-private"] .task-row`)!);
+  expect(screen.getByRole('menuitem', { name: '移入普通下载' })).toBeVisible();
+  expect(screen.queryByRole('menuitem', { name: '移入隐私下载' })).not.toBeInTheDocument();
+});
+
+it('shows both privacy actions for a mixed multi-selection and forwards the requested target state', () => {
+  const onBatchCommand = vi.fn();
+  render(<DownloadQueue
+    tasks={[
+      { id: 'ordinary', name: '普通任务', kind: 'file', status: 'downloading', progress: 10 },
+      { id: 'private', name: '隐私任务', kind: 'file', status: 'completed', progress: 100, is_private: true },
+    ]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+    onBatchCommand={onBatchCommand}
+    privacyEnabled
+  />);
+
+  fireEvent.click(screen.getByText('普通任务'));
+  fireEvent.click(screen.getByText('隐私任务'), { ctrlKey: true });
+  fireEvent.contextMenu(screen.getByText('普通任务'));
+  expect(screen.getByRole('menuitem', { name: '移入隐私下载' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '移入普通下载' })).toBeVisible();
+
+  fireEvent.click(screen.getByRole('menuitem', { name: '移入隐私下载' }));
+  expect(onBatchCommand).toHaveBeenCalledWith(['ordinary', 'private'], 'move_to_private');
+});
+
+it('offers permanent deletion for an invalid link left unsubmitted in parsing state', async () => {
+  const user = userEvent.setup();
+  const onCommand = vi.fn();
+  render(<DownloadQueue
+    tasks={[{ id: 'invalid-link', name: '非法下载链接', source: 'not-a-download-link', kind: 'file', status: 'parsing', progress: 0 }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={onCommand}
+  />);
+
+  fireEvent.contextMenu(screen.getByText('非法下载链接'));
+  await user.click(screen.getByRole('menuitem', { name: '删除任务' }));
+
+  expect(onCommand).toHaveBeenCalledWith('invalid-link', 'delete');
+});
+
+it('keeps modifier-selected tasks together and exposes only batch-safe menu actions', async () => {
+  const onSelect = vi.fn();
+  const onBatchCommand = vi.fn();
+  render(<DownloadQueue
+    tasks={[
+      { id: 'running-1', name: 'first.zip', source: 'https://example.com/first.zip', kind: 'file', status: 'downloading', progress: 25 },
+      { id: 'paused-2', name: 'second.zip', source: 'https://example.com/second.zip', kind: 'file', status: 'paused', progress: 50 },
+    ]}
+    selectedTaskId={null}
+    onSelect={onSelect}
+    onCommand={() => {}}
+    onBatchCommand={onBatchCommand}
+  />);
+
+  fireEvent.click(screen.getByText('first.zip'));
+  fireEvent.click(screen.getByText('second.zip'), { ctrlKey: true });
+
+  const firstRow = screen.getByText('first.zip').closest('.task-row');
+  const secondRow = screen.getByText('second.zip').closest('.task-row');
+  expect(firstRow).toHaveAttribute('aria-selected', 'true');
+  expect(secondRow).toHaveAttribute('aria-selected', 'true');
+
+  fireEvent.contextMenu(screen.getByText('first.zip'), { clientX: 280, clientY: 180 });
+  expect(screen.getByRole('menu', { name: '已选择 2 个任务任务菜单' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '开始下载' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '暂停' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '删除' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '复制下载链接' })).toBeVisible();
+  expect(screen.queryByRole('menuitem', { name: '打开下载目录' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '查看任务详情' })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole('menuitem', { name: '复制下载链接' }));
+  expect(onBatchCommand).toHaveBeenCalledWith(['running-1', 'paused-2'], 'copy_link');
+});
+
+it('reports the full Ctrl-click selection to its task-list parent', () => {
+  const onSelectionChange = vi.fn();
+  render(<DownloadQueue
+    tasks={[
+      { id: 'select-1', name: 'first.zip', kind: 'file', status: 'queued', progress: 0 },
+      { id: 'select-2', name: 'second.zip', kind: 'file', status: 'queued', progress: 0 },
+    ]}
+    privacyEnabled={false}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onSelectionChange={onSelectionChange}
+    onCommand={() => {}}
+  />);
+
+  fireEvent.click(screen.getByText('first.zip'));
+  fireEvent.click(screen.getByText('second.zip'), { ctrlKey: true });
+
+  expect(onSelectionChange).toHaveBeenLastCalledWith(['select-1', 'select-2']);
+});
+
+it('keeps the original selection anchor when Shift follows a Ctrl multi-selection', () => {
+  function ControlledQueue() {
+    const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
+    return <DownloadQueue
+      tasks={[
+        { id: 'controlled-1', name: 'first.zip', kind: 'file', status: 'queued', progress: 0 },
+        { id: 'controlled-2', name: 'second.zip', kind: 'file', status: 'queued', progress: 0 },
+        { id: 'controlled-3', name: 'third.zip', kind: 'file', status: 'queued', progress: 0 },
+      ]}
+      privacyEnabled={false}
+      selectedTaskId={selectedTaskIds.at(-1) ?? null}
+      selectedTaskIds={selectedTaskIds}
+      onSelect={() => {}}
+      onSelectionChange={(ids) => setSelectedTaskIds([...ids])}
+      onCommand={() => {}}
+      onReorder={() => {}}
+    />;
+  }
+
+  render(<ControlledQueue />);
+
+  fireEvent.click(screen.getByText('first.zip'));
+  fireEvent.click(screen.getByText('second.zip'), { ctrlKey: true });
+  expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(2);
+
+  fireEvent.click(screen.getByText('third.zip'), { shiftKey: true });
+  expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(3);
+});
+
+it('honors document-level modifier keys when a WebView click omits them', () => {
+  function ControlledQueue() {
+    const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
+    return <DownloadQueue
+      tasks={[
+        { id: 'native-modifier-1', name: 'first.zip', kind: 'file', status: 'queued', progress: 0 },
+        { id: 'native-modifier-2', name: 'second.zip', kind: 'file', status: 'queued', progress: 0 },
+        { id: 'native-modifier-3', name: 'third.zip', kind: 'file', status: 'queued', progress: 0 },
+      ]}
+      privacyEnabled={false}
+      selectedTaskId={selectedTaskIds.at(-1) ?? null}
+      selectedTaskIds={selectedTaskIds}
+      onSelect={() => {}}
+      onSelectionChange={(ids) => setSelectedTaskIds([...ids])}
+      onCommand={() => {}}
+      onReorder={() => {}}
+    />;
+  }
+
+  render(<ControlledQueue />);
+  fireEvent.click(screen.getByText('first.zip'));
+
+  fireEvent.keyDown(document, { key: 'Control' });
+  fireEvent.click(screen.getByText('second.zip'));
+  fireEvent.keyUp(document, { key: 'Control' });
+  expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(2);
+
+  fireEvent.keyDown(document, { key: 'Shift' });
+  fireEvent.click(screen.getByText('third.zip'));
+  fireEvent.keyUp(document, { key: 'Shift' });
+  expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(3);
+});
+
+it('does not turn a Ctrl-click into a task drag', () => {
+  class TestPointerEvent extends MouseEvent {
+    pointerId: number;
+    constructor(type: string, init: MouseEventInit & { pointerId?: number } = {}) {
+      super(type, init);
+      this.pointerId = init.pointerId ?? 0;
+    }
+  }
+  const originalPointerEvent = window.PointerEvent;
+  Object.defineProperty(window, 'PointerEvent', { configurable: true, value: TestPointerEvent });
+  function ControlledQueue() {
+    const [selectedTaskIds, setSelectedTaskIds] = useState<string[]>([]);
+    return <DownloadQueue
+      tasks={[
+        { id: 'drag-select-1', name: 'first.zip', kind: 'file', status: 'queued', progress: 0 },
+        { id: 'drag-select-2', name: 'second.zip', kind: 'file', status: 'queued', progress: 0 },
+      ]}
+      privacyEnabled={false}
+      selectedTaskId={selectedTaskIds.at(-1) ?? null}
+      selectedTaskIds={selectedTaskIds}
+      onSelect={() => {}}
+      onSelectionChange={(ids) => setSelectedTaskIds([...ids])}
+      onCommand={() => {}}
+      onReorder={() => {}}
+    />;
+  }
+
+  render(<ControlledQueue />);
+  const first = screen.getByText('first.zip').closest('.task-row')!;
+  const second = screen.getByText('second.zip').closest('.task-row')!;
+  const secondGroup = second.closest('.task-group')!;
+  vi.spyOn(secondGroup, 'getBoundingClientRect').mockReturnValue({ top: 0, bottom: 40, height: 40, left: 0, right: 100, width: 100, x: 0, y: 0, toJSON: () => ({}) });
+
+  fireEvent.click(first);
+  fireEvent.pointerDown(second, { pointerId: 18, button: 0, clientX: 5, clientY: 5, ctrlKey: true });
+  fireEvent.pointerMove(second, { pointerId: 18, clientX: 5, clientY: 18, ctrlKey: true });
+  fireEvent.pointerUp(second, { pointerId: 18, clientX: 5, clientY: 18, ctrlKey: true });
+  fireEvent.click(second, { ctrlKey: true });
+
+  expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(2);
+  expect(document.querySelector('.task-drag-preview')).not.toBeInTheDocument();
+  if (originalPointerEvent) Object.defineProperty(window, 'PointerEvent', { configurable: true, value: originalPointerEvent });
+  else delete (window as Window & { PointerEvent?: typeof window.PointerEvent }).PointerEvent;
+});
+
+it('selects a contiguous task range with Shift-click', () => {
+  render(<DownloadQueue
+    tasks={[
+      { id: 'range-1', name: 'one.zip', kind: 'file', status: 'queued', progress: 0 },
+      { id: 'range-2', name: 'two.zip', kind: 'file', status: 'queued', progress: 0 },
+      { id: 'range-3', name: 'three.zip', kind: 'file', status: 'queued', progress: 0 },
+    ]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  fireEvent.click(screen.getByText('one.zip'));
+  fireEvent.click(screen.getByText('three.zip'), { shiftKey: true });
+
+  expect(document.querySelectorAll('.task-row[aria-selected="true"]')).toHaveLength(3);
+});
+
+it('offers terminal-task deletion without showing invalid transfer commands', () => {
+  render(<DownloadQueue
+    tasks={[{ id: 'done-1', name: 'finished.iso', source: 'https://example.com/finished.iso', kind: 'file', status: 'completed', progress: 100 }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  fireEvent.contextMenu(screen.getByText('finished.iso'));
+  expect(screen.getByRole('menuitem', { name: '打开下载目录' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '复制下载链接' })).toBeVisible();
+  expect(screen.getByRole('menuitem', { name: '删除任务' })).toBeVisible();
+  expect(screen.queryByRole('menuitem', { name: '暂停' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '取消任务' })).not.toBeInTheDocument();
+});
+
+it('omits terminal status text from the more-menu header', () => {
+  render(<DownloadQueue
+    tasks={[{ id: 'done-menu-1', name: 'wallpaper 4.jpg', kind: 'file', status: 'completed', progress: 100 }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  fireEvent.contextMenu(screen.getByText('wallpaper 4.jpg'));
+
+  const menu = screen.getByRole('menu', { name: 'wallpaper 4.jpg任务菜单' });
+  expect(menu.querySelector('header')).toBeNull();
+  expect(menu).not.toHaveTextContent('下载完成');
+});
+
+it('dismisses the task menu with Escape', () => {
+  render(<DownloadQueue
+    tasks={[folderTask]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  fireEvent.contextMenu(screen.getByText('Season 1'));
+  expect(screen.getByRole('menu')).toBeVisible();
+  fireEvent.keyDown(document, { key: 'Escape' });
+  expect(screen.queryByRole('menu')).not.toBeInTheDocument();
+});
+
+it('uses the same deletion action for a legacy recycled task', () => {
+  render(<DownloadQueue
+    tasks={[{ id: 'recycled-1', name: 'old.iso', kind: 'file', status: 'recycled', progress: 100 }]}
+    selectedTaskId={null}
+    onSelect={() => {}}
+    onCommand={() => {}}
+  />);
+
+  fireEvent.contextMenu(screen.getByText('old.iso'));
+  expect(screen.getByRole('menuitem', { name: '删除任务' })).toBeVisible();
+  expect(screen.queryByRole('menuitem', { name: '移入回收站' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('menuitem', { name: '重新下载' })).not.toBeInTheDocument();
+});
+
+it('selects a task on ordinary click without emitting a task-details command', async () => {
+  const user = userEvent.setup();
+  const onSelect = vi.fn();
+  const onCommand = vi.fn();
+  render(<DownloadQueue
+    tasks={[{ id: 'task-1', name: 'archive.zip', kind: 'file', status: 'queued', progress: 0 }]}
+    selectedTaskId={null}
+    onSelect={onSelect}
+    onCommand={onCommand}
+  />);
+
+  await user.click(screen.getByText('archive.zip'));
+  expect(onSelect).toHaveBeenCalledWith('task-1');
+  expect(onCommand).not.toHaveBeenCalled();
+});
+
+it('emits details only after its right-click menu item is selected', async () => {
+  const user = userEvent.setup();
+  const onSelect = vi.fn();
+  const onCommand = vi.fn();
+  render(<DownloadQueue
+    tasks={[{ id: 'task-1', name: 'archive.zip', kind: 'file', status: 'queued', progress: 0 }]}
+    selectedTaskId={null}
+    onSelect={onSelect}
+    onCommand={onCommand}
+  />);
+
+  fireEvent.contextMenu(screen.getByText('archive.zip'));
+  expect(onSelect).toHaveBeenCalledWith('task-1');
+  expect(onCommand).not.toHaveBeenCalled();
+  await user.click(screen.getByRole('menuitem', { name: '查看任务详情' }));
+  expect(onCommand).toHaveBeenCalledTimes(1);
+  expect(onCommand).toHaveBeenCalledWith('task-1', 'details');
+});
+
+it.each([
+  ['download.xunlei.native', '迅雷原生通道'],
+  ['download.xunlei.accelerating', '迅雷会员通道'],
+])('localizes the Mac native channel status %s', (statusMessage, label) => {
+  render(<DownloadQueue tasks={[{ id: 'native', name: 'file.bin', source: 'cloud://xunlei/file', kind: 'cloud', status: 'downloading', progress: 20, statusMessage }]}
+    selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);
+  expect(screen.getByText(label)).toBeVisible();
+  expect(screen.queryByText(statusMessage)).not.toBeInTheDocument();
+});
+
 it('marks a public MEGA link download that uses the account quota', () => {
   render(<DownloadQueue tasks={[{ id: 'mega', name: 'file.bin', source: 'cloud-share://mega/file/AbC12345/AbC12345', kind: 'cloud', status: 'downloading', progress: 20, statusMessage: 'download.mega.accountQuota' }]}
     selectedTaskId={null} onSelect={() => {}} onCommand={() => {}} />);

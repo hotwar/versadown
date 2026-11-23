@@ -273,6 +273,16 @@ function isFetchingTaskMetadata(task: QueueTask, subtitle: string | undefined): 
   return metadataPending || isWaitingForCloudAuthorization(task) || isRecoveringCloudAuthorization(task);
 }
 
+/** A captured browser-share download whose request is no longer accepted: only the provider's page can issue a new one. */
+function needsShareReopen(task: QueueTask): boolean {
+  return task.status === 'failed' && task.failure_code === 'gofile_link_expired';
+}
+
+/** Tasks captured from a provider's own share window; that page can be opened again for another file. */
+function isBrowserShareTask(task: QueueTask): boolean {
+  return /^cloud-share:\/\/gofile\//.test(task.source ?? '');
+}
+
 function isWaitingForCloudAuthorization(task: QueueTask): boolean {
   return task.status === 'paused'
     && task.failure_code === 'authorization_pending'
@@ -301,12 +311,12 @@ function TaskKindIcon({ kind }: { kind: QueueTask['kind'] }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M12 3v12" /><path d="m7.5 11 4.5 4.5 4.5-4.5" /><path d="M5 20h14" /></svg>;
 }
 
-function ActionIcon({ action }: { action: 'pause' | 'resume' | 'cancel' | 'retry' | 'reauthorize' | 'play' | 'audio' | 'folder' | AssociatedFileType | 'more' }) {
+function ActionIcon({ action }: { action: 'pause' | 'resume' | 'cancel' | 'retry' | 'reauthorize' | 'reopen_share' | 'play' | 'audio' | 'folder' | AssociatedFileType | 'more' }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24">{action === 'pause'
     ? <><path d="M8 5v14" /><path d="M16 5v14" /></>
     : action === 'resume' ? <path d="m9 6 9 6-9 6z" />
       : action === 'cancel' ? <><circle cx="12" cy="12" r="8" /><path d="m9 9 6 6M15 9l-6 6" /></>
-        : action === 'retry' || action === 'reauthorize' ? <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>
+        : action === 'retry' || action === 'reauthorize' || action === 'reopen_share' ? <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>
           : action === 'play' ? <><circle cx="12" cy="12" r="8.5" /><path d="m10 8 5 4-5 4z" /></>
             : action === 'audio' ? <><path d="M10 17V5l9-2v12" /><ellipse cx="7" cy="18" rx="3" ry="2" /><ellipse cx="16" cy="16" rx="3" ry="2" /></>
             : action === 'folder' ? <><path d="M3.5 7.5h6l1.7 2h9.3v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.2l1.7 2h6.7" /></>
@@ -344,6 +354,7 @@ function contextCommands(task: QueueTask, privacyEnabled: boolean): Array<{ comm
   if (task.status === 'paused') commands.push(task.reauthorization_required
     ? { command: 'reauthorize', label: t('download.action.reauthorize') }
     : { command: 'resume', label: t('download.action.resume') });
+  if (isBrowserShareTask(task)) commands.push({ command: 'reopen_share', label: t('download.action.reopenShare') });
   if (task.status === 'failed') commands.push(task.reauthorization_required
     ? { command: 'reauthorize', label: t('download.action.reauthorize') }
     : { command: 'retry', label: t('download.action.retry') });
@@ -375,6 +386,7 @@ function MenuIcon({ command }: { command: TaskMenuCommand }) {
     pause: <><path d="M8 5v14" /><path d="M16 5v14" /></>, resume: <path d="m9 6 9 6-9 6z" />,
     cancel: <><circle cx="12" cy="12" r="8" /><path d="m9 9 6 6M15 9l-6 6" /></>, retry: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
     reauthorize: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
+    reopen_share: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
     retry_cleanup: <><path d="M4.5 10a8 8 0 1 1 1.8 6" /><path d="M4.5 5v5h5" /></>,
     open_directory: <><path d="M3.5 7.5h6l1.7 2h9.3v8.8a2.2 2.2 0 0 1-2.2 2.2H5.7a2.2 2.2 0 0 1-2.2-2.2z" /><path d="M3.5 7.5V5.7a2.2 2.2 0 0 1 2.2-2.2h4.2l1.7 2h6.7" /></>,
     open_file: <><path d="M7 3.5h7l3 3V20.5H7z" /><path d="M14 3.5v3h3M9.5 12h5M9.5 16h5" /></>,
@@ -781,10 +793,11 @@ export function DownloadQueue({ tasks, privacyEnabled, selectedTaskId, selectedT
         const recoveringCloudAuthorization = isRecoveringCloudAuthorization(task);
         const peerMetric = taskPeerMetric(task);
         const primaryAction = task.reauthorization_required ? 'reauthorize' as const
+          : needsShareReopen(task) ? 'reopen_share' as const
           : task.status === 'downloading' ? 'pause' as const
           : task.status === 'paused' ? 'resume' as const
           : task.status === 'failed' ? (task.reauthorization_required ? 'reauthorize' as const : 'retry' as const) : null;
-        const primaryLabel = primaryAction === 'pause' ? translate('download.action.pause') : primaryAction === 'resume' ? translate('download.action.resume') : primaryAction === 'reauthorize' ? translate('download.action.reauthorize') : translate('download.action.retry');
+        const primaryLabel = primaryAction === 'pause' ? translate('download.action.pause') : primaryAction === 'resume' ? translate('download.action.resume') : primaryAction === 'reauthorize' ? translate('download.action.reauthorize') : primaryAction === 'reopen_share' ? translate('download.action.reopenShare') : translate('download.action.retry');
         const completedSize = isCompleted ? completedTaskSize(task) : undefined;
         const completionTime = isCompleted ? completedAt(task.completed_at) : undefined;
         const completedAction = isCompleted ? completedQuickAction(task) : null;

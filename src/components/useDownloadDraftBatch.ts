@@ -2,8 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ConfirmResource, ParseDownloadResult, ScanDownloadProgress, ScanDownloadResult, VideoFormat, VideoPreview } from '../lib/types';
 import { videoConfirmation } from '../lib/webVideo';
 import { t } from '../i18n';
+import { cloudProviderLabel } from '../i18n/cloudProviderLabel';
 
-export type DownloadDraftStatus = 'parsing' | 'ready' | 'access_code_required' | 'failed';
+export type DownloadDraftStatus = 'parsing' | 'ready' | 'access_code_required' | 'failed' | 'browser_share';
 
 export interface DownloadDraftItem {
   id: string;
@@ -15,6 +16,8 @@ export interface DownloadDraftItem {
   selected: boolean;
   result?: ParseDownloadResult;
   error?: string;
+  /** Neutral hint for a `browser_share` draft; it is not an error. */
+  note?: string;
   accessCode: string;
   expanded: boolean;
   submitted: boolean;
@@ -191,6 +194,11 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4,
               if (next.shareAccessCodeRequired) {
                 return { ...candidate, result: next, status: 'access_code_required', error: next.shareAccessCodeRequired.message };
               }
+              if (next.browserShare) {
+                // The provider's own page is open; the user picks files there and
+                // they are queued as they start, so this draft has nothing to submit.
+                return { ...candidate, result: next, status: 'browser_share', selected: false, error: undefined, note: t('cloud.browserShare.opened', { provider: cloudProviderLabel(next.browserShare.provider, t) }) };
+              }
               return {
                 ...candidate,
                 id: index === 0 ? candidate.id : `${candidate.id}-video-${index}`,
@@ -324,6 +332,21 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4,
     for (const reference of references) void discard(reference).catch(() => undefined);
   }, [discard, replaceItems]);
 
+  // The share window took a file over: that draft has done its job. Matching is
+  // by the canonical share page the backend reported, never by position.
+  const resolveBrowserShare = useCallback((page: string) => {
+    const before = itemsRef.current.length;
+    replaceItems(current => current.filter(item => item.result?.browserShare?.page !== page));
+    return { removed: before - itemsRef.current.length, remaining: itemsRef.current.length };
+  }, [replaceItems]);
+
+  // The window was closed without a capture: keep the draft, point at the action.
+  const markBrowserShareClosed = useCallback((page: string) => {
+    replaceItems(current => current.map(item => item.result?.browserShare?.page === page
+      ? { ...item, note: t('cloud.browserShare.closed', { provider: cloudProviderLabel(item.result.browserShare.provider, t) }) }
+      : item));
+  }, [replaceItems]);
+
   const toggleItem = useCallback((id: string) => {
     replaceItems(current => current.map(item => item.id === id ? toggledItem(item) : item));
   }, [replaceItems]);
@@ -401,5 +424,5 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4,
       && (!item.result?.confirmation?.resources.length || item.result.confirmation.resources.some(resource => resource.selected)));
   }, [items]);
 
-  return { items, canSubmit, start, retry, remove, toggleItem, setAccessCode, toggleExpanded, toggleResource, updateResources, markSubmitted, applySubmissionFailures, discardAll };
+  return { items, canSubmit, start, retry, remove, resolveBrowserShare, markBrowserShareClosed, toggleItem, setAccessCode, toggleExpanded, toggleResource, updateResources, markSubmitted, applySubmissionFailures, discardAll };
 }

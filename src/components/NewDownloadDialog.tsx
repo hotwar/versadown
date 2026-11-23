@@ -1,11 +1,12 @@
 import { FormEvent, ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { isTauriRuntime, listPersistedTasks } from '../lib/api';
 import { formatBytes } from '../lib/downloadEvents';
-import { ConfirmResource, ParseDownloadResult, ScanDownloadProgress, ScanDownloadResult, VideoPreview } from '../lib/types';
+import { CloudShareProvider, ConfirmResource, ParseDownloadResult, ScanDownloadProgress, ScanDownloadResult, VideoPreview } from '../lib/types';
 import { ResourceFileRow } from './ResourceFileRow';
 import { VideoFormatCard } from './VideoFormatCard';
 import { canExpandDownloadDraft, DownloadDraftItem, DraftSubmissionFailure, useDownloadDraftBatch } from './useDownloadDraftBatch';
 import { t, useTranslation } from '../i18n';
+import type { BrowserShareSignal } from '../lib/browserShare';
 
 export type NewDownloadDialogPlacement = 'launcher' | 'modal' | 'header';
 
@@ -23,6 +24,10 @@ export interface NewDownloadDialogProps {
   downloadDirectory?: string;
   browseDirectory?(currentDirectory: string): Promise<string | null | undefined>;
   privacyEnabled?: boolean;
+  /** What a Gofile-style share window last reported; the matching draft reacts to it. */
+  browserShareSignals?: readonly BrowserShareSignal[];
+  /** Opens the share page of a `browser_share` draft again. */
+  onReopenBrowserShare?(provider: CloudShareProvider, page: string): void | Promise<void>;
 }
 
 // Parse errors currently cross IPC as text. All providers use the same action
@@ -287,6 +292,8 @@ function BatchNewDownloadDialog({
   downloadDirectory,
   browseDirectory,
   privacyEnabled = false,
+  browserShareSignals,
+  onReopenBrowserShare,
 }: NewDownloadDialogProps) {
   const { t } = useTranslation();
   const batch = useDownloadDraftBatch({
@@ -357,6 +364,25 @@ function BatchNewDownloadDialog({
     return () => { disposed = true; window.clearInterval(timer); };
   }, [batch.items, batch.updateResources]);
 
+  // A finished share leaves the list; once nothing else is left the dialog has
+  // no job and closes. A closed window only changes the hint on its draft.
+  // Signals already in the list when the dialog mounts are history.
+  const handledSignalRef = useRef(Math.max(0, ...(browserShareSignals ?? []).map(signal => signal.id)));
+  useEffect(() => {
+    let closeWhenEmpty = false;
+    for (const signal of browserShareSignals ?? []) {
+      if (signal.id <= handledSignalRef.current) continue;
+      handledSignalRef.current = signal.id;
+      if (signal.kind === 'closed') {
+        batch.markBrowserShareClosed(signal.sharePage);
+        continue;
+      }
+      const { removed, remaining } = batch.resolveBrowserShare(signal.sharePage);
+      if (removed > 0 && remaining === 0) closeWhenEmpty = true;
+    }
+    if (closeWhenEmpty) void requestClose();
+  });
+
   function scanManualInput(event: FormEvent) {
     event.preventDefault();
     if (!manualInput.trim() || scanning) return;
@@ -417,8 +443,10 @@ function BatchNewDownloadDialog({
     && (item.result.confirmation.fileListPending ?? batchItemResources(item).length === 0)
     && batchItemResources(item).length === 0);
   const canSubmit = batch.canSubmit && !hasUnresolvedBitTorrentFileList;
+  // Those drafts are finished in the provider's own window; nothing here to submit.
+  const onlyBrowserShares = batch.items.length > 0 && batch.items.every(item => item.status === 'browser_share');
   const dialog = <aside ref={dialogRef} className={`new-download-dialog batch-download-dialog ${placement}${batch.items.some(i => i.result?.confirmation?.video) ? ' has-video-options' : ''}`} role="dialog" aria-modal={placement === 'modal' || undefined} aria-label={t('download.new')} onKeyDown={trapFocus}>
-    <div className="launcher-title"><span>{t('download.newTask')}</span>{batch.items.length > 0 && <small>{selectedCount ? t('download.selection.count', { count: selectedCount }) : t('download.selectTasks')}</small>}<button type="button" aria-label={placement === 'modal' ? t('download.closeNew') : t('download.collapseInput')} disabled={submitting || closing} onClick={() => void requestClose()}>×</button></div>
+    <div className="launcher-title"><span>{t('download.newTask')}</span>{batch.items.length > 0 && !onlyBrowserShares && <small>{selectedCount ? t('download.selection.count', { count: selectedCount }) : t('download.selectTasks')}</small>}<button type="button" aria-label={placement === 'modal' ? t('download.closeNew') : t('download.collapseInput')} disabled={submitting || closing} onClick={() => void requestClose()}>×</button></div>
     {!batch.items.length && !scanning ? <form className="batch-manual-input" onSubmit={scanManualInput}><label htmlFor="batch-download-input">{t('download.content')}</label><textarea id="batch-download-input" aria-label={t('download.content')} value={manualInput} onChange={event => setManualInput(event.target.value)} placeholder={t('download.inputPlaceholder')} /><div className="new-download-actions"><button type="submit" className="primary" disabled={!manualInput.trim()}>{t('download.parseTask')}</button></div></form> : <section className="batch-download-list" aria-label={t('download.pendingTasks')}>
       {batch.items.map(item => {
         const title = batchItemTitle(item);
@@ -436,7 +464,7 @@ function BatchNewDownloadDialog({
           : !existingTask && waitingForBitTorrentFileList
             ? t('download.retrievingInfo')
             : undefined;
-        const itemStatus = item.status === 'ready'
+        const itemStatus = item.status === 'browser_share' ? item.note : item.status === 'ready'
           ? existingTask ? t('download.existingFiles', { count: resources.length }) : loadingStatus ?? t('download.availableItems', { count: resources.length || 1 })
           : item.error;
         const canExpand = item.result ? canExpandDownloadDraft(item.result) : false;
@@ -448,6 +476,7 @@ function BatchNewDownloadDialog({
             <span className={`batch-root-icon${item.result?.confirmation?.isBitTorrent ? ' torrent' : ''}`} aria-hidden="true">{item.result?.confirmation?.isBitTorrent ? 'BT' : resources.length > 1 ? '▱' : '↓'}</span>
             <div className="batch-download-name"><strong title={title}>{title}</strong><small>{loadingStatus ? <BatchLoadingStatus>{loadingStatus}</BatchLoadingStatus> : itemStatus}</small></div>
             {resources.length > 0 && <small className="batch-root-size">{formatBytes(resourceBytes)}</small>}
+            {item.status === 'browser_share' && item.result?.browserShare && onReopenBrowserShare && <button type="button" className="batch-retry-button" disabled={busy} onClick={() => void onReopenBrowserShare(item.result!.browserShare!.provider, item.result!.browserShare!.page)}>{t('download.action.reopenShare')}</button>}
             {item.status === 'failed' && <button type="button" className="batch-retry-button" disabled={busy} onClick={() => batch.retry(item.id)}>{t('common.retryAction')}</button>}
             <button type="button" aria-label={t('batch.removeNamed', { name: title })} disabled={busy} onClick={() => batch.remove(item.id)}>×</button>
           </div>;
@@ -474,7 +503,7 @@ function BatchNewDownloadDialog({
     {submitError && <p className="parse-failure" role="alert">{submitError}</p>}
     <footer className="batch-download-footer">
       <div className="batch-download-destination"><span>{t('download.to')} <strong>{destination || downloadDirectory || t('download.localDirectory')}</strong></span><button type="button" className="parse-destination" onClick={() => void browseDirectory?.(destination || downloadDirectory || '').then(value => { if (value) setDestination(value); })}>{t('settings.directory.change')}</button></div>
-      <div><button type="button" disabled={submitting || closing} onClick={() => void requestClose()}>{t('dialog.cancel')}</button>{privacyEnabled && <button type="button" disabled={!canSubmit || submitting} onClick={() => void submit(true)}>{t('download.newPrivateTask')}</button>}<button type="button" className="primary" disabled={!canSubmit || submitting} onClick={() => void submit(false)}>{submitting ? t('download.submitting') : t('download.newTask')}</button></div>
+      <div><button type="button" disabled={submitting || closing} onClick={() => void requestClose()}>{t('dialog.cancel')}</button>{!onlyBrowserShares && <>{privacyEnabled && <button type="button" disabled={!canSubmit || submitting} onClick={() => void submit(true)}>{t('download.newPrivateTask')}</button>}<button type="button" className="primary" disabled={!canSubmit || submitting} onClick={() => void submit(false)}>{submitting ? t('download.submitting') : t('download.newTask')}</button></>}</div>
     </footer>
   </aside>;
   if (placement !== 'modal') return dialog;

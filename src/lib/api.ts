@@ -5,6 +5,7 @@ import type { ScanDownloadProgress, VideoPreview } from './types';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type { ThemeId } from './theme';
 import { t, type TranslationKey } from '../i18n';
+import { openBrowserShare } from './browserShare';
 import { isXunleiVerificationFailure, isXunleiVerificationReason, xunleiVerificationMessage } from './xunleiVerification';
 
 function fileNameFrom(value: string) {
@@ -83,7 +84,13 @@ type NativeAccessCodeRequiredOutcome = {
   message: string;
 };
 
-type NativeParseOutcome = NativeTaskParseOutcome | NativeShareConfirmationOutcome | NativeAccessCodeRequiredOutcome | { kind: 'web_video'; videos: VideoPreview[] };
+type NativeBrowserShareOutcome = {
+  kind: 'browser_share';
+  provider: CloudShareAccessCodeRequired['provider'];
+  url: string;
+};
+
+type NativeParseOutcome = NativeTaskParseOutcome | NativeShareConfirmationOutcome | NativeAccessCodeRequiredOutcome | NativeBrowserShareOutcome | { kind: 'web_video'; videos: VideoPreview[] };
 
 function duplicateResult(result: NativeTaskOutcome): TaskActionResult {
   const { duplicate, queueTask, ...task } = result;
@@ -108,6 +115,10 @@ export async function parseDownload(input: string, accessCode?: string, requireC
       throw error;
     });
   if (result.kind === 'web_video') return { videos: result.videos };
+  if (result.kind === 'browser_share') {
+    await openBrowserShare(result.provider, result.url);
+    return { browserShare: { provider: result.provider, page: result.url } };
+  }
   if (result.kind === 'share_confirmation') {
     return {
       confirmation: {

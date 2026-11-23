@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
-import { afterEach, vi } from 'vitest';
+import { afterEach, describe, vi } from 'vitest';
 import { isTauriRuntime, listPersistedTasks } from '../lib/api';
 import { NewDownloadDialog } from './NewDownloadDialog';
 import type { ParseDownloadResult, ScanDownloadProgress, ScanDownloadResult } from '../lib/types';
@@ -1187,4 +1187,72 @@ it('keeps the explicit empty new-task command usable inside the unified dialog',
 
   expect(await screen.findByText('manual.zip')).toBeVisible();
   expect(onScan).toHaveBeenCalledWith('https://example.test/manual.zip', expect.any(Function));
+});
+
+describe('a Gofile share opened in its own window', () => {
+  const page = 'https://gofile.io/d/AbC123';
+  const scan = async () => [
+    { input: page, valid: true, kind: 'cloud_share' },
+    { input: 'https://example.test/a.iso', valid: true, kind: 'direct' },
+  ] as ScanDownloadResult[];
+  const parse = async (input: string) => input === page
+    ? { browserShare: { provider: 'gofile', page } } as ParseDownloadResult
+    : { confirmation: { taskId: 'a', title: 'a.iso', requiresConfirmation: true, resources: [], processing: [] } } as ParseDownloadResult;
+
+  function Harness({ onlyShare, signals, onClose, onReopen }: {
+    onlyShare?: boolean;
+    signals: readonly import('../lib/browserShare').BrowserShareSignal[];
+    onClose: () => void;
+    onReopen?: () => void;
+  }) {
+    return <NewDownloadDialog open placement="modal" initialInput={page} browserShareSignals={signals}
+      onScan={onlyShare ? async () => [{ input: page, valid: true, kind: 'cloud_share' }] : scan}
+      onParse={parse} onSubmitBatch={vi.fn()} onClose={onClose} onReopenBrowserShare={onReopen} />;
+  }
+
+  it('shows a neutral hint with a reopen action instead of an error with retry, and no submit button when it is alone', async () => {
+    const onReopen = vi.fn();
+    render(<Harness onlyShare signals={[]} onClose={vi.fn()} onReopen={onReopen} />);
+
+    expect(await screen.findByText(/已打开 Gofile 窗口/)).toBeVisible();
+    expect(screen.queryByRole('button', { name: '重试' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '新建任务' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '取消' })).toBeEnabled();
+    expect(document.querySelector('.batch-download-item.failed')).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: '重新打开分享页' }));
+    expect(onReopen).toHaveBeenCalledWith('gofile', page);
+  });
+
+  it('closes the dialog when the taken-over share was the only draft', async () => {
+    const onClose = vi.fn();
+    const { rerender } = render(<Harness onlyShare signals={[]} onClose={onClose} />);
+    await screen.findByText(/已打开 Gofile 窗口/);
+    rerender(<Harness onlyShare signals={[{ id: 1, sharePage: page, kind: 'finished' }]} onClose={onClose} />);
+    await waitFor(() => expect(onClose).toHaveBeenCalledOnce());
+  });
+
+  it('keeps the dialog open and the other link submittable when the share finishes', async () => {
+    const onClose = vi.fn();
+    const { rerender } = render(<Harness signals={[]} onClose={onClose} />);
+    await screen.findByText(/已打开 Gofile 窗口/);
+    await screen.findByText('a.iso');
+    rerender(<Harness signals={[{ id: 1, sharePage: page, kind: 'finished' }]} onClose={onClose} />);
+    await waitFor(() => expect(screen.queryByText(/已打开 Gofile 窗口/)).not.toBeInTheDocument());
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: '新建任务' })).toBeEnabled();
+  });
+
+  it('ignores another share and keeps the draft with a reopen hint when its window closes uncaptured', async () => {
+    const onClose = vi.fn();
+    const { rerender } = render(<Harness onlyShare signals={[]} onClose={onClose} />);
+    await screen.findByText(/已打开 Gofile 窗口/);
+    rerender(<Harness onlyShare signals={[{ id: 1, sharePage: 'https://gofile.io/d/Other', kind: 'finished' }]} onClose={onClose} />);
+    rerender(<Harness onlyShare signals={[
+      { id: 1, sharePage: 'https://gofile.io/d/Other', kind: 'finished' },
+      { id: 2, sharePage: page, kind: 'closed' },
+    ]} onClose={onClose} onReopen={vi.fn()} />);
+    expect(await screen.findByText(/窗口已关闭/)).toBeVisible();
+    expect(screen.getByRole('button', { name: '重新打开分享页' })).toBeVisible();
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });

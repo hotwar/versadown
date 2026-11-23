@@ -1,6 +1,6 @@
 import type { TaskActionResult } from './types';
 
-export type CloudProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc' | 'mega';
+export type CloudProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc' | 'mega' | 'gofile';
 export type CloudAuthMethod = 'web' | 'password';
 
 export interface ProviderCapabilities {

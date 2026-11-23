@@ -66,6 +66,20 @@ it('maps a share confirmation without inventing an aria2 task', async () => {
   });
 });
 
+it('opens the provider window for a browser-captured share instead of creating a task', async () => {
+  native.invoke
+    .mockResolvedValueOnce({ kind: 'browser_share', provider: 'gofile', url: 'https://gofile.io/d/AbC123' })
+    .mockResolvedValueOnce(undefined);
+  const { parseDownload } = await import('./api');
+
+  await expect(parseDownload('https://gofile.io/d/AbC123')).resolves.toEqual({ browserShare: { provider: 'gofile', page: 'https://gofile.io/d/AbC123' } });
+  expect(native.invoke).toHaveBeenLastCalledWith('cloud_open_browser_share', {
+    url: 'https://gofile.io/d/AbC123',
+    title: 'Gofile · 在页面里点击要下载的文件，软件会接管下载',
+    failureNotice: expect.stringContaining('没有被软件接管'),
+  });
+});
+
 it('maps an access-code requirement without creating a task', async () => {
   native.invoke.mockResolvedValueOnce({
     kind: 'access_code_required',

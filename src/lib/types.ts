@@ -1,7 +1,7 @@
 export type TaskStatus = 'draft' | 'parsing' | 'awaiting_user' | 'queued' | 'downloading' | 'processing' | 'completed' | 'failed' | 'cancelled' | 'recycled' | 'paused';
 export type TaskKind = 'file' | 'folder' | 'magnet' | 'torrent' | 'ed2k' | 'ftp' | 'hls' | 'dash' | 'cloud' | 'web_video';
 export type DuplicateDownloadState = 'existing_active' | 'resume_available' | 'completed_files_present' | 'completed_files_missing' | 'overwrite_required';
-export type TaskCommand = 'pause' | 'resume' | 'cancel' | 'retry' | 'reauthorize' | 'retry_cleanup' | 'open_directory' | 'open_file' | 'play_videos' | 'copy_link' | 'details' | 'delete' | 'move_to_private' | 'move_to_normal';
+export type TaskCommand = 'pause' | 'resume' | 'cancel' | 'retry' | 'reauthorize' | 'reopen_share' | 'retry_cleanup' | 'open_directory' | 'open_file' | 'play_videos' | 'copy_link' | 'details' | 'delete' | 'move_to_private' | 'move_to_normal';
 
 export interface QueueTask {
   id: string;
@@ -150,19 +150,27 @@ export interface ScanDownloadProgress {
   pending: string[];
 }
 
-export type CloudShareProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc' | 'mega';
+export type CloudShareProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc' | 'mega' | 'gofile';
 
 export interface CloudShareAccessCodeRequired {
   provider: CloudShareProvider;
   message: string;
 }
 
+export interface BrowserShareOpened {
+  provider: CloudShareProvider;
+  /** The canonical share page the window shows; capture events name the same page. */
+  page: string;
+}
+
 export type ParseDownloadResult =
-  | { task: QueueTask; confirmation?: never; shareAccessCodeRequired?: never; duplicate?: never; videos?: never }
-  | { confirmation: ParseResult; task?: never; shareAccessCodeRequired?: never; duplicate?: never; videos?: never }
-  | { shareAccessCodeRequired: CloudShareAccessCodeRequired; task?: never; confirmation?: never; duplicate?: never; videos?: never }
-  | { duplicate: DuplicateDownload; task?: never; confirmation?: never; shareAccessCodeRequired?: never; videos?: never }
-  | { videos: VideoPreview[]; task?: never; confirmation?: never; shareAccessCodeRequired?: never; duplicate?: never };
+  | { task: QueueTask; confirmation?: never; shareAccessCodeRequired?: never; duplicate?: never; videos?: never; browserShare?: never }
+  | { confirmation: ParseResult; task?: never; shareAccessCodeRequired?: never; duplicate?: never; videos?: never; browserShare?: never }
+  | { shareAccessCodeRequired: CloudShareAccessCodeRequired; task?: never; confirmation?: never; duplicate?: never; videos?: never; browserShare?: never }
+  | { duplicate: DuplicateDownload; task?: never; confirmation?: never; shareAccessCodeRequired?: never; videos?: never; browserShare?: never }
+  | { videos: VideoPreview[]; task?: never; confirmation?: never; shareAccessCodeRequired?: never; duplicate?: never; browserShare?: never }
+  /** The share opened in the provider's own browser window; the user picks files there. */
+  | { browserShare: BrowserShareOpened; task?: never; confirmation?: never; shareAccessCodeRequired?: never; duplicate?: never; videos?: never };
 
 export type ProxyProtocol = 'http' | 'https';
 export type LauncherVisibility = 'always' | 'downloading' | 'hidden';
