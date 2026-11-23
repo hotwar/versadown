@@ -234,6 +234,29 @@ pub fn refresh_tray_manager_visibility(app: &AppHandle) {
     }
 }
 
+/// The only way the manager window may be hidden. Tao has no visibility
+/// event, so nothing else would tell the tray label that the window is gone:
+/// every hide path (title-bar close button, native close request, tray/launcher
+/// menu, launcher double click) must come through here.
+pub fn hide_manager(app: &AppHandle) -> Result<(), String> {
+    let manager = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主界面窗口不存在".to_string())?;
+    crate::window_lifecycle::hide_window_immediately(&manager)?;
+    set_tray_manager_visibility(app, false);
+    Ok(())
+}
+
+/// Hides the manager for the title-bar close button. The renderer must not
+/// call the window API's `hide()` itself, which would leave the tray label stale.
+#[tauri::command]
+pub fn hide_manager_window(window: WebviewWindow) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("只能从主界面隐藏主界面".to_string());
+    }
+    hide_manager(window.app_handle())
+}
+
 pub fn set_tray_manager_visibility(app: &AppHandle, manager_visible: bool) {
     if let Some(state) = app.try_state::<TrayMenuState>() {
         let _ = state
@@ -257,9 +280,40 @@ fn require_background_ui_test() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        manager_is_shown, tray_manager_item_label, EXIT_ARIA2_SHUTDOWN_TIMEOUT,
-        EXIT_TRAY_REMOVE_DELAY,
+        manager_is_shown, tray_manager_item_label, tray_menu_entries, EXIT_ARIA2_SHUTDOWN_TIMEOUT,
+        EXIT_TRAY_REMOVE_DELAY, HIDE_MANAGER,
     };
+
+    #[test]
+    fn tray_first_item_follows_the_manager_visibility() {
+        assert_eq!(tray_manager_item_label(true), "隐藏主界面");
+        assert_eq!(tray_manager_item_label(false), "显示主界面");
+        assert_eq!(tray_menu_entries(false)[0], (HIDE_MANAGER, "显示主界面"));
+        assert_eq!(tray_menu_entries(true)[0], (HIDE_MANAGER, "隐藏主界面"));
+    }
+
+    #[test]
+    fn every_manager_hide_path_goes_through_the_tray_syncing_entry_point() {
+        let launcher = include_str!("launcher.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        // Before the test module only `hide_manager` may hide the window; no
+        // menu/launcher path hides it on its own.
+        assert_eq!(launcher.matches("hide_window_immediately(").count(), 1);
+        assert!(!launcher.contains("manager.hide()"));
+        let lifecycle = include_str!("window_lifecycle.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(lifecycle.contains("crate::launcher::hide_manager(&app)"));
+        assert!(!lifecycle.contains("set_tray_manager_visibility"));
+        // The title-bar close button must use the native command, not the JS
+        // window API, which would bypass the tray label sync.
+        let app_tsx = include_str!("../../src/App.tsx");
+        assert!(!app_tsx.contains("window.hide()"));
+        assert!(app_tsx.contains("'hide_manager_window'"));
+    }
 
     #[test]
     fn a_minimized_manager_is_offered_and_toggled_as_hidden() {
@@ -461,8 +515,7 @@ fn toggle_manager_visibility(app: &AppHandle) {
         return;
     };
     if manager_window_shown(&manager) {
-        let _ = manager.hide();
-        set_tray_manager_visibility(app, false);
+        let _ = hide_manager(app);
     } else {
         reveal_manager(app, None);
     }
@@ -490,8 +543,7 @@ pub fn toggle_manager_from_launcher(
         focus.manager_was_foreground(),
     );
     if hide {
-        manager.hide().map_err(|error| error.to_string())?;
-        set_tray_manager_visibility(app, false);
+        hide_manager(app)?;
         return Ok(false);
     }
     reveal_manager(app, None);

@@ -493,6 +493,8 @@ pub fn run() {
                 if let Some(main) = app.get_webview_window("main") {
                     main.set_min_size(Some(tauri::LogicalSize::new(960.0, 640.0)))?;
                     main.show()?;
+                    // The tray was built while the window was still hidden.
+                    launcher::refresh_tray_manager_visibility(app.handle());
                 }
                 if launcher_visibility == LauncherVisibility::Always {
                     if let Some(launcher) = launcher {
@@ -658,6 +660,7 @@ pub fn run() {
             launcher::run_launcher_menu_action,
             launcher::launcher_manager_visible,
             launcher::toggle_manager_from_launcher,
+            launcher::hide_manager_window,
             launcher::reveal_manager_from_launcher,
             launcher::launcher_interaction_snapshot,
             launcher::manager_window_snapshot,

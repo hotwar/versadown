@@ -272,7 +272,8 @@ async function runWindowAction(action: 'minimize' | 'maximize' | 'hide') {
     const window = getCurrentWindow();
     if (action === 'minimize') await window.minimize();
     if (action === 'maximize') await window.toggleMaximize();
-    if (action === 'hide') await window.hide();
+    // The native side hides the window and keeps the tray menu label in sync.
+    if (action === 'hide') await invoke('hide_manager_window');
   } catch {
     // Window chrome is inert in browser previews and during shutdown.
   }
