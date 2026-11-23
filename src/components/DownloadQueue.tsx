@@ -238,6 +238,7 @@ const cloudProviderTaskLabels: Record<string, string> = {
   aliyun: 'cloud.provider.aliyun',
   xunlei: 'cloud.provider.xunlei',
   uc: 'cloud.provider.uc',
+  mega: 'cloud.provider.mega',
 };
 
 function cloudTaskSubtitle(source: string | undefined): string | undefined {

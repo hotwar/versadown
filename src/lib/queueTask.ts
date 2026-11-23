@@ -1,4 +1,5 @@
 import { t } from '../i18n';
+import { shareFailureMessage } from '../i18n/shareFailureMessage';
 import { xunleiDownloadMessage } from '../i18n/xunleiDownloadMessage';
 import type { QueueTask, QueueTaskInput } from './types';
 
@@ -19,7 +20,8 @@ export function normalizeQueueTasks(tasks: readonly QueueTaskInput[]): QueueTask
 }
 
 export function downloadErrorMessage(message: string): string {
-  return message === 'download.error.transferredFileUnavailable' ? t(message) : xunleiDownloadMessage(message);
+  if (message === 'download.error.transferredFileUnavailable') return t(message);
+  return shareFailureMessage(message) ?? xunleiDownloadMessage(message);
 }
 
 export function isPrivateTask(task: QueueTask): boolean {

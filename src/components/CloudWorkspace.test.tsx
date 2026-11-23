@@ -186,7 +186,7 @@ it('defaults to the cloud management page and lists every supported provider the
   expect(screen.queryByRole('button', { name: '夸克网盘' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'PikPak 网盘' })).not.toBeInTheDocument();
   expect(screen.queryByRole('tree')).not.toBeInTheDocument();
-  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(7));
+  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(8));
 });
 
 it('keeps one provider workspace submenu after logout and login as a different account', async () => {
@@ -216,7 +216,70 @@ it('renders authorization cards for every newly supported cloud service', async 
   for (const label of ['百度网盘', '天翼云盘', '阿里云盘', '迅雷网盘']) {
     expect(await screen.findByRole('region', { name: `${label}账号授权` })).toBeVisible();
   }
+  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(8));
+});
+
+it('signs in to MEGA with its own form, including a two-factor code, and browses with full drive management', async () => {
+  const user = userEvent.setup();
+  const client = {
+    ...createClient(),
+    loginMega: vi.fn().mockResolvedValue({ id: 'mega-user', displayName: 'me@example.com', provider: 'mega', authMethod: 'password' }),
+  };
+  render(<CloudWorkspace client={client} />);
+
+  const card = await screen.findByRole('region', { name: 'MEGA账号授权' });
+  // No official web window and no generic username field: MEGA has its own form.
+  expect(within(card).queryByRole('button', { name: '使用网页授权' })).not.toBeInTheDocument();
+  expect(within(card).queryByLabelText('账号')).not.toBeInTheDocument();
+  await user.type(within(card).getByLabelText('MEGA 邮箱'), 'me@example.com');
+  await user.type(within(card).getByLabelText('密码'), 'secret');
+  await user.type(within(card).getByLabelText('两步验证码（未开启可留空）'), '123456');
+  await user.click(within(card).getByRole('button', { name: '登录' }));
+
+  expect(client.loginMega).toHaveBeenCalledWith({ email: 'me@example.com', password: 'secret', secondFactor: '123456' });
+  expect(client.loginCloudWithPassword).not.toHaveBeenCalled();
+  expect(await screen.findByText('· me@example.com')).toBeVisible();
+  await user.click(screen.getByRole('button', { name: 'MEGA' }));
+  expect(await screen.findByRole('tree', { name: 'MEGA文件' })).toBeVisible();
+  // Full management: upload, new folder, recycle bin, my shares and shared-with-me entries.
+  expect(await screen.findByRole('button', { name: '上传', exact: true })).toBeVisible();
+  expect(screen.getByRole('button', { name: '新建目录' })).toBeVisible();
+  expect(screen.getByText('回收站')).toBeVisible();
+  expect(screen.getByText('我的分享')).toBeVisible();
+  expect(screen.getByText('与我共享')).toBeVisible();
+});
+
+it('shows the localized MEGA failure and omits an empty two-factor code', async () => {
+  const user = userEvent.setup();
+  const client = {
+    ...createClient(),
+    loginMega: vi.fn().mockRejectedValue({ code: 'mega_mfa_required', message: 'cloud.error.mega.mfaRequired' }),
+  };
+  render(<CloudWorkspace client={client} />);
+
+  const card = await screen.findByRole('region', { name: 'MEGA账号授权' });
+  await user.type(within(card).getByLabelText('MEGA 邮箱'), 'me@example.com');
+  await user.type(within(card).getByLabelText('密码'), 'secret');
+  await user.click(within(card).getByRole('button', { name: '登录' }));
+
+  expect(client.loginMega).toHaveBeenCalledWith({ email: 'me@example.com', password: 'secret' });
+  expect(await within(card).findByText('此 MEGA 账号已开启两步验证，请填写验证码后重新登录。')).toBeVisible();
+  // The password is released after the attempt; the e-mail stays for a retry.
+  expect(within(card).getByLabelText('密码')).toHaveValue('');
+  expect(within(card).getByLabelText('MEGA 邮箱')).toHaveValue('me@example.com');
+});
+
+it('keeps account-less providers out of the drive cards, navigation and account recovery', async () => {
+  const client = createClient({ quark: { id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' } });
+  // The registry declares the provider account-less: it only serves public links.
+  client.getCloudProviderCatalog.mockResolvedValue(cloudCatalog.map(descriptor => descriptor.provider === 'mega' ? { ...descriptor, account: false } : descriptor));
+  render(<CloudWorkspace client={client as never} />);
+
+  await screen.findByRole('region', { name: '夸克网盘账号授权' });
+  expect(screen.queryByRole('region', { name: /MEGA/ })).not.toBeInTheDocument();
   await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(7));
+  expect(client.getCloudAccount).not.toHaveBeenCalledWith('mega');
+  expect(screen.queryByRole('button', { name: /MEGA/ })).not.toBeInTheDocument();
 });
 
 it('keeps the UC web authorization action available when the legacy capability endpoint is unavailable', async () => {
@@ -249,7 +312,7 @@ it('ignores a recovered account when the provider does not match the request', a
   client.getCloudAccount.mockResolvedValue({ id: 'p-1', displayName: 'p-alice', provider: 'pikpak', authMethod: 'password' });
   render(<CloudWorkspace client={client as never} />);
 
-  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(7));
+  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(8));
   expect(screen.getAllByRole('button', { name: 'PikPak 网盘' })).toHaveLength(1);
   expect(screen.queryByRole('button', { name: '夸克网盘' })).not.toBeInTheDocument();
 });
@@ -339,7 +402,7 @@ it('recovers accounts into submenus while still opening on cloud management', as
   expect(screen.getByRole('button', { name: '我的网盘' })).toHaveAttribute('aria-current', 'page');
   expect(screen.queryByRole('tree')).not.toBeInTheDocument();
   expect(client.listCloudDirectory).not.toHaveBeenCalled();
-  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(7));
+  await waitFor(() => expect(client.getCloudAccount).toHaveBeenCalledTimes(8));
 });
 
 it('shows only authorized provider submenus and switches their real directory views', async () => {

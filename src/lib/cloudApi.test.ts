@@ -76,6 +76,14 @@ it('keeps saved-password metadata separate from explicit and saved-handle login 
   expect(native.invoke).toHaveBeenLastCalledWith('cloud_login_password', { provider: 'baidu', username: 'bob', password: 'new-secret' });
 });
 
+it('signs in to MEGA through its own command, with the second factor only when given', async () => {
+  const api = await import('./cloudApi');
+  await api.loginMega({ email: 'me@example.com', password: 'secret', secondFactor: '123456' });
+  expect(native.invoke).toHaveBeenLastCalledWith('cloud_login_mega', { email: 'me@example.com', password: 'secret', secondFactor: '123456' });
+  await api.loginMega({ email: 'me@example.com', password: 'secret' });
+  expect(native.invoke).toHaveBeenLastCalledWith('cloud_login_mega', { email: 'me@example.com', password: 'secret' });
+});
+
 it('loads the catalog and uses its root when listing without a parent', async () => {
   const api = await import('./cloudApi');
   native.invoke.mockResolvedValueOnce([{ provider: 'baidu', rootDirectoryId: '/dynamic-root' }]);

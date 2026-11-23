@@ -2785,3 +2785,66 @@ it('keeps the signed-in card and withholds profile details belonging to another 
   expect(screen.queryByText('SVIP8')).not.toBeInTheDocument();
   expect(screen.queryByRole('heading', { name: /别的账号/ })).not.toBeInTheDocument();
 });
+
+const incomingSharesId = '__versa_down_mega_incoming_shares__';
+const megaAccount = { id: 'm', displayName: 'me@example.com', provider: 'mega' as const, authMethod: 'password' as const };
+
+function megaFake(overrides: Record<string, unknown> = {}) {
+  return createCloudFake({
+    listCloudDirectory: vi.fn().mockImplementation((_provider: string, parentId = '0') => Promise.resolve(parentId === incomingSharesId
+      ? { id: incomingSharesId, items: [{ id: 'shared-1', parentId: incomingSharesId, name: '朋友的资料', kind: 'folder' }] }
+      : parentId === 'shared-1'
+        ? { id: 'shared-1', items: [{ id: 'shared-file', parentId: 'shared-1', name: '共享说明.txt', kind: 'file', size: 10 }] }
+        : { id: '0', items: [{ id: 'file-1', parentId: '0', name: '报告.pdf', kind: 'file', size: 2048 }] })),
+    ...overrides,
+  });
+}
+
+it('shows the MEGA recycle bin and shared-with-me virtual folders at the root', async () => {
+  render(<CloudManager provider="mega" client={megaFake()} initialAccount={megaAccount} restoreOnMount={false} />);
+  expect(await screen.findByText('报告.pdf')).toBeVisible();
+  expect(screen.getByText('回收站')).toBeVisible();
+  expect(screen.getByText('与我共享')).toBeVisible();
+  expect(screen.getByRole('button', { name: '上传', exact: true })).toBeVisible();
+  expect(screen.getByRole('button', { name: '新建目录' })).toBeVisible();
+});
+
+it('opens MEGA shared-with-me read-only: no upload or new-folder entries, at any depth', async () => {
+  const user = userEvent.setup();
+  const client = megaFake();
+  render(<CloudManager provider="mega" client={client} initialAccount={megaAccount} restoreOnMount={false} />);
+  await user.dblClick(await screen.findByText('与我共享'));
+  expect(await screen.findByText('朋友的资料')).toBeVisible();
+  expect(client.listCloudDirectory).toHaveBeenCalledWith('mega', incomingSharesId);
+  expect(screen.queryByRole('button', { name: '上传', exact: true })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '新建目录' })).not.toBeInTheDocument();
+  await user.dblClick(screen.getByText('朋友的资料'));
+  expect(await screen.findByText('共享说明.txt')).toBeVisible();
+  expect(screen.queryByRole('button', { name: '上传', exact: true })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '新建目录' })).not.toBeInTheDocument();
+});
+
+it('creates a MEGA share without pass code or expiration controls', async () => {
+  const user = userEvent.setup();
+  const createCloudShare = vi.fn().mockResolvedValue({ id: 'share-m', url: 'https://mega.nz/file/abc#key', name: '报告.pdf', kind: 'file', sourceFileIds: ['file-1'], createdAt: '2026-09-17 10:00:00' });
+  render(<CloudManager provider="mega" client={megaFake({ createCloudShare })} initialAccount={megaAccount} restoreOnMount={false} />);
+  fireEvent.contextMenu(await screen.findByText('报告.pdf'));
+  await user.click(screen.getByRole('menuitem', { name: '分享' }));
+  const dialog = await screen.findByRole('dialog', { name: '创建分享链接' });
+  expect(within(dialog).queryByRole('textbox', { name: '提取码' })).not.toBeInTheDocument();
+  expect(within(dialog).queryByRole('combobox', { name: '有效期' })).not.toBeInTheDocument();
+  expect(dialog).toHaveTextContent(t('cloud.share.linkOnlyNote'));
+  await user.click(within(dialog).getByRole('button', { name: '创建分享链接' }));
+  expect(createCloudShare).toHaveBeenCalledWith('mega', ['file-1'], { name: '报告.pdf' });
+});
+
+it('keeps pass code and expiration controls in the Quark share dialog', async () => {
+  const user = userEvent.setup();
+  render(<CloudManager provider="quark" client={createCloudFake()} initialAccount={{ id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' }} restoreOnMount={false} />);
+  fireEvent.contextMenu(await screen.findByText('报告.pdf'));
+  await user.click(screen.getByRole('menuitem', { name: '分享' }));
+  const dialog = await screen.findByRole('dialog', { name: '创建分享链接' });
+  expect(within(dialog).getByRole('textbox', { name: '提取码' })).toBeVisible();
+  expect(within(dialog).getByRole('combobox', { name: '有效期' })).toBeVisible();
+  expect(dialog).not.toHaveTextContent(t('cloud.share.linkOnlyNote'));
+});

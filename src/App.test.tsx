@@ -14,6 +14,7 @@ const cloudApiMocks = vi.hoisted(() => ({
   getCompletedCloudAuthorization: vi.fn().mockResolvedValue(null),
   reauthorizeFailedCloudTask: vi.fn(),
   loginCloudWithPassword: vi.fn(),
+  loginMega: vi.fn(),
   getSavedCloudCredentials: vi.fn().mockResolvedValue(null),
   getCloudAccount: vi.fn().mockRejectedValue({ code: 'not_authorized', message: '未授权' }),
   getCloudAccountCapacity: vi.fn().mockImplementation((provider: string) => Promise.resolve({
@@ -81,7 +82,7 @@ it('places authorized cloud submenus below My Cloud and opens their files from a
     await user.click(within(navigation).getByRole('button', { name: '我的网盘' }));
     expect(screen.getByRole('region', { name: '网盘管理' })).toBeVisible();
     expect(within(navigation).getByRole('button', { name: '我的网盘' })).toHaveAttribute('aria-current', 'page');
-    expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledTimes(7);
+    expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledTimes(8);
   } finally {
     stylesheet.remove();
     cloudApiMocks.getCloudAccount.mockRejectedValue({ code: 'not_authorized', message: '未授权' });
@@ -209,7 +210,7 @@ it('opens the cloud management workspace and restores each provider once', async
 
   expect(await screen.findByRole('region', { name: '网盘管理' })).toBeVisible();
   expect(screen.getByRole('button', { name: '我的网盘' })).toHaveAttribute('aria-current', 'page');
-  expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledTimes(7);
+  expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledTimes(8);
   expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledWith('quark');
   expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledWith('pikpak');
   expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledWith('aliyun');
@@ -225,7 +226,7 @@ it('preloads cloud authorization before the user opens My Cloud', async () => {
 
   render(<App />);
 
-  await waitFor(() => expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledTimes(7));
+  await waitFor(() => expect(cloudApiMocks.getCloudAccount).toHaveBeenCalledTimes(8));
   expect(screen.queryByRole('region', { name: '网盘管理' })).not.toBeInTheDocument();
 
   await user.click(screen.getByRole('button', { name: /我的网盘/ }));

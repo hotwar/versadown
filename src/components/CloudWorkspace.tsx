@@ -125,8 +125,10 @@ export function CloudWorkspace({ client, activePage, onPageChange, onProvidersCh
     setCatalog([]);
     setPendingProviders([]);
     onPageChange('management');
-    void client.getCloudProviderCatalog().then((descriptors) => {
+    void client.getCloudProviderCatalog().then((catalogProviders) => {
       if (!active) return;
+      // Account-less providers (public share links only) have no drive to show.
+      const descriptors = catalogProviders.filter(descriptor => descriptor.account);
       setCatalog(descriptors);
       setPendingProviders(descriptors.map(d => d.provider));
       setLoadingCatalog(false);
