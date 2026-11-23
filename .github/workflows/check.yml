@@ -79,7 +79,7 @@ jobs:
         run: cargo test --locked --manifest-path src-tauri/Cargo.toml --test engine_binary --test aria2_live --test parser_policy --test window_config --test window_lifecycle --test engine_runtime --test ftp_download --test cloud_provider_contract --test cloud_baidu --test aria2_bt --test magnet_metadata
       - name: Check cloud range streaming and retry recovery
         run: |
-          cargo test --locked --manifest-path src-tauri/Cargo.toml --test baidu_range_gateway --test cloud_gateway_proxy --test downloader
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --test range_gateway --test cloud_gateway_proxy --test downloader
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib aria2::native_resume::tests
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib aria2::service::tests
       - name: Check Quark download cookie binding
