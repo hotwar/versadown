@@ -25,6 +25,7 @@ import { downloadErrorMessage, isPrivateTask, normalizeQueueTask, normalizeQueue
 import { sendDownloadNotification, shouldNotifyTask } from './lib/downloadNotifications';
 import { AiSettingsInput, AppSettings, AppUpdate, DownloadEngineState, DuplicateDownload, ParseResult, PrivacyTaskVisibility, QueueTask, QueueTaskInput, TaskActionResult, TaskCommand, VideoPreview } from './lib/types';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
+import { startNativeMenuLabelSync } from './lib/nativeMenuLabels';
 import darkMintIcon from './assets/launcher/dark_mint.svg';
 import mintWhiteIcon from './assets/launcher/mint_white.svg';
 import { getResolvedTheme, getResolvedThemeId, subscribeTheme } from './lib/theme';
@@ -403,6 +404,8 @@ export function App() {
     // icon.  Keep the native taskbar icon in step with the concrete palette.
     void syncMainWindowIcon(resolvedThemeId).catch(() => undefined);
   }, [resolvedThemeId]);
+  // The tray menu is drawn natively: hand it the localized text now and after each language change.
+  useEffect(() => startNativeMenuLabelSync(), []);
   useEffect(() => {
     if (!isTauriRuntime()) return;
     const mainWindow = getCurrentWindow();
