@@ -330,6 +330,9 @@ impl CloudHttpTransport for HttpRef<'_> {
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, CloudError> {
         self.0.send(request)
     }
+    fn send_detailed(&self, request: CloudHttpRequest) -> Result<CloudHttpDetail, CloudError> {
+        self.0.send_detailed(request)
+    }
     fn send_with_cookie_snapshot(
         &self,
         request: CloudHttpRequest,

@@ -29,8 +29,36 @@ pub struct CloudHttpResponse {
     /// only a provider-validated, URL-scoped snapshot may be persisted.
     pub set_cookies: Vec<String>,
 }
+/// A response together with the metadata that [`CloudHttpResponse`] omits:
+/// headers (names lower-cased) and the URL reached after redirects.
+#[derive(Clone, Debug, Default)]
+pub struct CloudHttpDetail {
+    pub response: CloudHttpResponse,
+    pub headers: Vec<(String, String)>,
+    pub final_url: String,
+}
+impl CloudHttpDetail {
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
+            .map(|(_, value)| value.as_str())
+    }
+}
+
 pub trait CloudHttpTransport: Send + Sync {
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError>;
+
+    /// Like [`Self::send`] but also reports headers and the final URL, and
+    /// reads only textual bodies (capped), so a probe of a file endpoint never
+    /// buffers the file. Transports that cannot report them return empty
+    /// metadata.
+    fn send_detailed(&self, request: CloudHttpRequest) -> Result<CloudHttpDetail, QuarkError> {
+        self.send(request).map(|response| CloudHttpDetail {
+            response,
+            ..Default::default()
+        })
+    }
 
     /// Return the cookie bound to this exact request, before its Set-Cookie
     /// response. Stateless transports leave callers' explicit headers intact.
@@ -327,10 +355,75 @@ impl ReqwestTransport {
         ))
     }
 }
+/// Probe bodies above this size are never textual API/HTML replies.
+const DETAILED_BODY_LIMIT: u64 = 2 * 1024 * 1024;
+
 impl CloudHttpTransport for ReqwestTransport {
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
         self.send_request(request, false)
             .map(|(response, _)| response)
+    }
+
+    fn send_detailed(&self, r: CloudHttpRequest) -> Result<CloudHttpDetail, QuarkError> {
+        use std::io::Read;
+        let mut builder = self
+            .client
+            .request(r.method.parse().map_err(|_| QuarkError::InvalidResponse)?, &r.url);
+        for (name, value) in r.headers {
+            builder = builder.header(name, value);
+        }
+        if let Some(body) = r.body {
+            builder = builder.body(body);
+        }
+        // URL-bearing errors may disclose signed credentials.
+        let response = builder.send().map_err(|error| {
+            QuarkError::Transport(
+                if error.is_timeout() {
+                    "连接超时"
+                } else if error.is_connect() {
+                    "连接失败"
+                } else {
+                    "HTTPS 请求失败"
+                }
+                .into(),
+            )
+        })?;
+        let status = response.status().as_u16();
+        let final_url = response.url().to_string();
+        let headers: Vec<(String, String)> = response
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                Some((name.as_str().to_owned(), value.to_str().ok()?.to_owned()))
+            })
+            .collect();
+        let textual = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| {
+                let value = value.to_ascii_lowercase();
+                value.starts_with("text/") || value.contains("json") || value.contains("xml")
+            });
+        // A file body is never read: dropping the response closes the stream.
+        let mut body = String::new();
+        if textual {
+            let mut bytes = Vec::new();
+            response
+                .take(DETAILED_BODY_LIMIT)
+                .read_to_end(&mut bytes)
+                .map_err(|_| QuarkError::InvalidResponse)?;
+            body = String::from_utf8_lossy(&bytes).into_owned();
+        }
+        Ok(CloudHttpDetail {
+            response: CloudHttpResponse {
+                status,
+                body,
+                set_cookies: Vec::new(),
+            },
+            headers,
+            final_url,
+        })
     }
 
     fn send_with_cookie_snapshot(
