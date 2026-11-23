@@ -5,7 +5,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
-use versadown_lib::cloud::baidu_range_gateway::BaiduRangeGateway;
+use versadown_lib::cloud::range_gateway::RangeGateway;
 
 /// Reverting the gateway's remote-target client to `no_proxy()` must fail this
 /// test: the fixture origin exists only behind this process-local HTTP proxy.
@@ -76,7 +76,7 @@ fn remote_cloud_range_uses_the_system_proxy() {
 #[ignore = "run only through remote_cloud_range_uses_the_system_proxy"]
 async fn system_proxy_child() {
     assert_eq!(std::env::var("VERSADOWN_PROXY_CHILD").as_deref(), Ok("1"));
-    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let gateway = RangeGateway::start().await.unwrap();
     let registration = gateway
         .register(
             uuid::Uuid::new_v4(),
