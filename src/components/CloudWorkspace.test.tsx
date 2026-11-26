@@ -115,7 +115,7 @@ it('adds the authorized workspace immediately from the completion event', async 
   let receive: ((event: any) => void) | undefined;
   const client = { ...createClient(), getCompletedCloudAuthorization: vi.fn().mockResolvedValue({ id: 'q', displayName: 'alice', provider: 'quark', authMethod: 'web' }), subscribeCloudAuthorization: vi.fn(async (_provider, callback) => { receive = callback; return vi.fn(); }) };
   client.getCloudProviderCatalog.mockResolvedValue([cloudCatalog[0]]);
-  client.getCloudAccount.mockRejectedValue(new Error('旧会话错误'));
+  client.getCloudAccount.mockRejectedValue({ code: 'web_auth_required', message: '请在官方网盘完成验证' });
   render(<CloudWorkspace client={client} />);
   fireEvent.click(await screen.findByRole('button', { name: '使用网页授权' }));
   await act(async () => {});
@@ -126,16 +126,54 @@ it('adds the authorized workspace immediately from the completion event', async 
   expect(screen.queryByText(/旧会话错误/)).not.toBeInTheDocument();
 });
 
-it('shows each failed account recovery on its provider card instead of above the cards', async () => {
+it('retries only the affected account after an inconclusive startup check without prompting for login', async () => {
+  const user = userEvent.setup();
   const client = createClient();
   client.getCloudProviderCatalog.mockResolvedValue([cloudCatalog[0], cloudCatalog[1]]);
-  client.getCloudAccount.mockImplementation((provider) => Promise.reject(new Error(provider === 'quark' ? '连接错误甲' : '连接错误乙')));
-  render(<CloudWorkspace client={client as never} />);
-  const quarkCard = await screen.findByRole('region', { name: '夸克网盘账号授权' });
-  const pikpakCard = await screen.findByRole('region', { name: 'PikPak 网盘账号授权' });
-  expect(within(quarkCard).getByText('授权过期，请重新登录')).toBeVisible();
-  expect(within(pikpakCard).getByText('授权过期，请重新登录')).toBeVisible();
-  expect(screen.queryByText(/恢复账号失败/)).not.toBeInTheDocument();
+  client.getCloudAccount.mockImplementation((provider) => Promise.reject(provider === 'quark'
+    ? new Error('网页验证服务连接中断')
+    : { code: 'credential_storage_error', message: '凭据存储暂不可用' }));
+  render(<CloudWorkspace client={client} />);
+  await screen.findByText('网页验证服务连接中断');
+  const quarkCard = screen.getByRole('region', { name: '夸克网盘账号恢复' });
+  const pikpakCard = screen.getByRole('region', { name: 'PikPak 网盘账号恢复' });
+  expect(within(pikpakCard).getByText('凭据存储暂不可用')).toBeVisible();
+  expect(screen.queryByText('授权过期，请重新登录')).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: '使用网页授权' })).not.toBeInTheDocument();
+  expect(screen.queryByLabelText('密码')).not.toBeInTheDocument();
+  client.getCloudAccount.mockResolvedValueOnce({ id: 'q1', displayName: 'alice', provider: 'quark', authMethod: 'web' });
+  await user.click(within(quarkCard).getByRole('button', { name: '重试' }));
+  expect(await screen.findByRole('button', { name: '夸克网盘' })).toBeVisible();
+  expect(within(pikpakCard).getByText('凭据存储暂不可用')).toBeVisible();
+  expect(client.getCloudAccount).toHaveBeenCalledTimes(3);
+  expect(client.getCloudAccount).toHaveBeenLastCalledWith('quark');
+  expect(client.loginCloudWithPassword).not.toHaveBeenCalled();
+  expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
+});
+
+it.each(['credentials_expired', 'web_auth_required'])('offers the specified authorization action for startup %s', async code => {
+  const client = createClient();
+  client.getCloudProviderCatalog.mockResolvedValue([cloudCatalog[1]]);
+  client.getCloudAccount.mockRejectedValue({ code });
+  render(<CloudWorkspace client={client} />);
+  const card = await screen.findByRole('region', { name: 'PikPak 网盘账号授权' });
+  expect(within(card).getByRole('button', { name: '使用网页授权' })).toBeVisible();
+  if (code === 'credentials_expired') {
+    expect(within(card).getByText('授权过期，请重新登录')).toBeVisible();
+  } else {
+    expect(within(card).queryByLabelText('密码')).not.toBeInTheDocument();
+    expect(within(card).queryByText('授权过期，请重新登录')).not.toBeInTheDocument();
+  }
+});
+
+it.each(['cloud.session.maintenanceDeferred', '网盘请求失败：cloud.session.maintenanceDeferred'])('localizes a temporary provider maintenance failure (%s)', async message => {
+  const client = createClient();
+  client.getCloudProviderCatalog.mockResolvedValue([cloudCatalog[1]]);
+  client.getCloudAccount.mockRejectedValue({ code: 'provider_error', message });
+  render(<CloudWorkspace client={client} />);
+  expect(await screen.findByRole('alert')).toHaveTextContent('网盘暂时无法更新登录状态，请稍后重试。');
+  expect(screen.getByRole('button', { name: '重试' })).toBeVisible();
+  expect(screen.queryByLabelText('密码')).not.toBeInTheDocument();
 });
 
 it('renders the backend catalog order and labels', async () => {

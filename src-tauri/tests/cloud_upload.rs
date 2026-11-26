@@ -556,12 +556,10 @@ fn upload_does_not_lock_account(block_init: bool) {
             })
         }
     }
-    let root =
-        std::env::temp_dir().join(format!("cloud-upload-concurrency-{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir(&root).unwrap();
-    let file = root.join("upload.txt");
+    let root = tempfile::tempdir().unwrap();
+    let file = root.path().join("upload.txt");
     std::fs::write(&file, b"hello").unwrap();
-    let state = Arc::new(CloudState::new(root.join("sessions")).unwrap());
+    let state = Arc::new(CloudState::new(root.path().join("sessions")).unwrap());
     state.with_provider(CloudProvider::Pikpak,|s|s.save("pikpak",br#"{"access_token":"access","refresh_token":"refresh","expires_at":9999999999,"device_id":"device","captcha_token":"cap","user_id":"same-account"}"#)).unwrap();
     let (started_tx, started_rx) = mpsc::channel();
     let (release_tx, release_rx) = mpsc::channel();
@@ -579,7 +577,16 @@ fn upload_does_not_lock_account(block_init: bool) {
         };
         upload_state.upload_pikpak_file(&http, "0", &upload_path)
     });
-    started_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+    match started_rx.recv_timeout(Duration::from_secs(3)) {
+        Ok(()) => (),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let result = upload.join().expect("upload thread panicked before initialization");
+            panic!("upload returned before signaling initialization: {result:?}");
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            panic!("upload did not signal initialization within three seconds");
+        }
+    }
     let (done_tx, done_rx) = mpsc::channel();
     let manage_state = state.clone();
     let manage = std::thread::spawn(move || {
@@ -597,9 +604,6 @@ fn upload_does_not_lock_account(block_init: bool) {
         .with_provider(CloudProvider::Pikpak, |s| s.load("pikpak"))
         .unwrap()
         .is_none());
-    std::fs::remove_file(file).unwrap();
-    std::fs::remove_dir(root.join("sessions")).unwrap();
-    std::fs::remove_dir(root).unwrap();
     assert!(
         during_transfer.is_ok(),
         "same-account list/logout must finish while upload network is blocked"
@@ -613,4 +617,6 @@ fn upload_does_not_lock_account(block_init: bool) {
     } else {
         assert_eq!(upload_result.unwrap().id, "real-file")
     }
+    drop(state);
+    root.close().unwrap();
 }

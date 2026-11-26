@@ -238,15 +238,12 @@ impl ProviderAuth for XunleiDriver<'_> {
 impl UploadOps for XunleiDriver<'_> {
     fn upload(
         &mut self,
-        s: &CloudState,
         upload_http: &dyn UploadHttp,
         parent_id: &str,
         path: &Path,
     ) -> Result<CloudFile, CloudError> {
         let h = UploadHttpRef(upload_http);
-        s.with_upload_session(CloudProvider::Xunlei, &h, |store| {
-            with_xunlei_client(store, &h, |client| client.upload_file(&parent_id, &path))
-        })
+        with_xunlei_client(&self.store, &h, |client| client.upload_file(parent_id, path))
     }
 }
 

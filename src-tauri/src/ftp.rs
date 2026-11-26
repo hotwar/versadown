@@ -31,6 +31,10 @@ const MIN_SEGMENT_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_SESSION_LIMIT_RETRIES_PER_SEGMENT: u8 = 3;
 const SESSION_LIMIT_RETRY_DELAY: Duration = Duration::from_millis(250);
 
+#[cfg(test)]
+#[path = "cli_ftp_tests.rs"]
+mod cli_tests;
+
 #[derive(Clone)]
 pub struct FtpTarget {
     host: String,
@@ -262,6 +266,14 @@ impl FtpDownloadEngine {
         source: &str,
         options: UriSubmissionOptions,
     ) -> Result<DownloadTask, FtpDownloadError> {
+        let (task, output) = self.prepare_submission(task_id, source, options).await?;
+        self.start_worker(task_id, source.to_owned(), output).await?;
+        Ok(task)
+    }
+
+    async fn prepare_submission(
+        &self, task_id: Uuid, source: &str, options: UriSubmissionOptions,
+    ) -> Result<(DownloadTask, PathBuf), FtpDownloadError> {
         if !self.accepting.load(Ordering::Acquire) {
             return Err(FtpDownloadError::Protocol("应用正在退出".into()));
         }
@@ -328,9 +340,66 @@ impl FtpDownloadEngine {
         task.progress = 0;
         task = self.persist(task, &output, 0, existing)?;
 
-        self.start_worker(task_id, source.to_owned(), output)
-            .await?;
-        Ok(task)
+        Ok((task, output))
+    }
+
+    /// CLI recovery is owned by the authorized dispatcher. The in-process FTP
+    /// scheduler identifies work by task ID, including the crash window after
+    /// preparing a file but before acknowledging submission in the journal.
+    pub(crate) async fn dispatch_cli_intent(
+        self: &Arc<Self>, intent: &crate::store::CliDispatchIntent,
+        authorize: &(dyn Fn(&Path) -> bool + Send + Sync),
+    ) -> Result<DownloadTask, FtpDownloadError> {
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err(FtpDownloadError::InvalidOption("engine is stopping"));
+        }
+        let mut task = self.store.find(intent.task_id)?;
+        if task.kind != "ftp" { return Err(FtpDownloadError::InvalidOption("task kind")); }
+        if !matches!(task.status, TaskStatus::Queued | TaskStatus::Downloading) {
+            if matches!(task.status, TaskStatus::Completed | TaskStatus::Cancelled | TaskStatus::Recycled | TaskStatus::Failed) {
+                self.store.finish_cli_dispatch(task.id)?;
+            }
+            return Ok(task);
+        }
+        if task.is_private || !intent.options.directory.as_ref().is_some_and(|path| authorize(path)) {
+            if self.has_worker(task.id).await {
+                return self.control(task.id, DownloadAction::Pause).await;
+            }
+            return Ok(task);
+        }
+        let output = match self.store.files(task.id)?.first() {
+            Some(file) => PathBuf::from(&file.path),
+            None => {
+                if let Some(path) = self.store.reserved_output_path(task.id)? {
+                    if !authorize(&path) { return Ok(task); }
+                    // A reserved payload with no persisted transfer record is
+                    // not enough evidence that its contents belong to us.
+                    if path.exists() { return Err(FtpDownloadError::InvalidOption("recovery checkpoint")); }
+                }
+                let prepared = self.prepare_submission(task.id, &task.source, intent.options.clone()).await?;
+                task = prepared.0;
+                prepared.1
+            }
+        };
+        let latest = self.store.find(task.id)?;
+        if latest.is_private || !matches!(latest.status, TaskStatus::Queued | TaskStatus::Downloading)
+            || !intent.options.directory.as_ref().is_some_and(|path| authorize(path))
+            || !authorize(&output)
+        {
+            if self.has_worker(task.id).await { return self.control(task.id, DownloadAction::Pause).await; }
+            return Ok(latest);
+        }
+        if self.store.reserved_output_path(task.id)?.as_ref() != Some(&output) {
+            return Err(FtpDownloadError::InvalidOption("recovery checkpoint"));
+        }
+        self.start_worker(task.id, task.source.clone(), output).await?;
+        self.store.finish_cli_dispatch(task.id)?;
+        Ok(latest)
+    }
+
+    async fn has_worker(&self, id: Uuid) -> bool {
+        let scheduler = self.scheduler.lock().await;
+        scheduler.active.contains_key(&id) || scheduler.queued.iter().any(|work| work.task_id == id)
     }
 
     pub async fn control(
@@ -391,6 +460,7 @@ impl FtpDownloadEngine {
         for task in self.store.list()? {
             if task.kind != "ftp"
                 || !matches!(task.status, TaskStatus::Queued | TaskStatus::Downloading)
+                || self.store.has_cli_intent(task.id)?
             {
                 continue;
             }

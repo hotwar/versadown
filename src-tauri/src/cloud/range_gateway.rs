@@ -627,10 +627,18 @@ async fn serve(
             Err(status) => return empty(status),
         }
     };
-    if method == Method::HEAD {
-        // The transform already knows the size; do not spend upstream quota.
-        if let Some(transform) = &target.transform {
-            return head_response(transform.total_size());
+    if let Some(transform) = &target.transform {
+        // Known-size HEAD and empty-file GET need no upstream byte range.
+        let total = transform.total_size();
+        if method == Method::HEAD || (total == 0 && !requested.partial) {
+            return head_response(total);
+        }
+        if total == 0 {
+            return Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, "bytes */0")
+                .body(Body::empty())
+                .unwrap();
         }
     }
     let first_end = requested

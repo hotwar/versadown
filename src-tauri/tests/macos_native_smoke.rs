@@ -48,7 +48,7 @@ fn main() {
     std::fs::create_dir_all(root.path().join("data")).unwrap();
     std::fs::write(root.path().join("data/settings.json"), settings.to_string()).unwrap();
     drop(port);
-    versadown_lib::run();
+    assert_eq!(versadown_lib::run(), 0, "native app startup or shutdown failed");
 }
 
 #[cfg(not(target_os = "macos"))]

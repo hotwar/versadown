@@ -1,5 +1,7 @@
 use serde::Serialize;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+use crate::native_menu_labels::{NativeMenuLabelStore, NativeMenuLabels};
 
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
@@ -68,8 +70,19 @@ pub struct LauncherInteractionState {
     input_region_update_requests: AtomicUsize,
 }
 
+/// Handles to every tray item whose text depends on the interface language,
+/// plus the manager visibility that picks the first item's label.
 pub struct TrayMenuState {
     manager_item: MenuItem<tauri::Wry>,
+    new_download: MenuItem<tauri::Wry>,
+    start_all: MenuItem<tauri::Wry>,
+    pause_all: MenuItem<tauri::Wry>,
+    launcher_visibility: Submenu<tauri::Wry>,
+    launcher_always: MenuItem<tauri::Wry>,
+    launcher_downloading: MenuItem<tauri::Wry>,
+    launcher_hidden: MenuItem<tauri::Wry>,
+    quit: MenuItem<tauri::Wry>,
+    manager_visible: AtomicBool,
 }
 
 impl LauncherInteractionState {
@@ -104,27 +117,25 @@ impl LauncherInteractionState {
     }
 }
 
-pub fn launcher_menu_entries() -> [(&'static str, &'static str); 6] {
-    [
-        (HIDE_MANAGER, "隐藏主界面"),
-        (NEW_DOWNLOAD, "新建下载"),
-        (START_ALL, "开始全部任务"),
-        (PAUSE_ALL, "暂停全部任务"),
-        (OPEN_SETTINGS, "悬浮球显示"),
-        (QUIT, "退出万能下载"),
-    ]
+/// Actions the floating launcher's own (renderer-drawn) menu may run. Its
+/// labels come from the renderer catalogs, so only the ids live here.
+pub fn launcher_menu_actions() -> [&'static str; 6] {
+    [HIDE_MANAGER, NEW_DOWNLOAD, START_ALL, PAUSE_ALL, OPEN_SETTINGS, QUIT]
 }
 
-pub fn tray_menu_entries(manager_visible: bool) -> [(&'static str, &'static str); 8] {
+pub fn tray_menu_entries(
+    labels: &NativeMenuLabels,
+    manager_visible: bool,
+) -> [(&'static str, &str); 8] {
     [
-        (HIDE_MANAGER, tray_manager_item_label(manager_visible)),
-        (NEW_DOWNLOAD, "新建下载"),
-        (START_ALL, "开始全部任务"),
-        (PAUSE_ALL, "暂停全部任务"),
-        (TRAY_LAUNCHER_ALWAYS, "总是显示"),
-        (TRAY_LAUNCHER_DOWNLOADING, "仅下载时显示"),
-        (TRAY_LAUNCHER_HIDDEN, "关闭显示"),
-        (QUIT, "退出万能下载"),
+        (HIDE_MANAGER, labels.manager_item(manager_visible)),
+        (NEW_DOWNLOAD, &labels.new_download),
+        (START_ALL, &labels.start_all),
+        (PAUSE_ALL, &labels.pause_all),
+        (TRAY_LAUNCHER_ALWAYS, &labels.launcher_always),
+        (TRAY_LAUNCHER_DOWNLOADING, &labels.launcher_downloading),
+        (TRAY_LAUNCHER_HIDDEN, &labels.launcher_hidden),
+        (QUIT, &labels.quit),
     ]
 }
 
@@ -141,19 +152,15 @@ fn manager_window_shown(manager: &WebviewWindow) -> bool {
     )
 }
 
-fn tray_manager_item_label(manager_visible: bool) -> &'static str {
-    if manager_visible {
-        "隐藏主界面"
-    } else {
-        "显示主界面"
-    }
-}
-
 pub fn setup_manager_tray(app: &AppHandle) -> Result<(), String> {
     let manager_visible = app
         .get_webview_window("main")
         .is_some_and(|window| manager_window_shown(&window));
-    let entries = tray_menu_entries(manager_visible);
+    let labels = app
+        .try_state::<NativeMenuLabelStore>()
+        .ok_or_else(|| "原生菜单文案尚未初始化".to_string())?
+        .current();
+    let entries = tray_menu_entries(&labels, manager_visible);
     let manager_item = MenuItem::with_id(app, entries[0].0, entries[0].1, true, None::<&str>)
         .map_err(|error| error.to_string())?;
     let new_download = MenuItem::with_id(app, entries[1].0, entries[1].1, true, None::<&str>)
@@ -175,7 +182,7 @@ pub fn setup_manager_tray(app: &AppHandle) -> Result<(), String> {
     let visibility_menu = Submenu::with_id_and_items(
         app,
         "tray.launcher.visibility",
-        "悬浮球显示",
+        &labels.launcher_visibility,
         true,
         &[&always, &downloading, &hidden],
     )
@@ -199,7 +206,7 @@ pub fn setup_manager_tray(app: &AppHandle) -> Result<(), String> {
         // and installer use.  A system-tray slot is much smaller, so use the
         // tight raster shared with the taskbar instead.
         .icon(crate::window_icon::icon_image("mint"))
-        .tooltip("万能下载")
+        .tooltip(&labels.tooltip)
         .menu(&menu)
         .show_menu_on_left_click(cfg!(target_os = "macos"))
         .on_tray_icon_event(|tray, event| {
@@ -222,7 +229,18 @@ pub fn setup_manager_tray(app: &AppHandle) -> Result<(), String> {
         })
         .build(app)
         .map_err(|error| error.to_string())?;
-    app.manage(TrayMenuState { manager_item });
+    app.manage(TrayMenuState {
+        manager_item,
+        new_download,
+        start_all,
+        pause_all,
+        launcher_visibility: visibility_menu,
+        launcher_always: always,
+        launcher_downloading: downloading,
+        launcher_hidden: hidden,
+        quit,
+        manager_visible: AtomicBool::new(manager_visible),
+    });
     Ok(())
 }
 
@@ -234,12 +252,80 @@ pub fn refresh_tray_manager_visibility(app: &AppHandle) {
     }
 }
 
+/// The only way the manager window may be hidden. Tao has no visibility
+/// event, so nothing else would tell the tray label that the window is gone:
+/// every hide path (title-bar close button, native close request, tray/launcher
+/// menu, launcher double click) must come through here.
+pub fn hide_manager(app: &AppHandle) -> Result<(), String> {
+    let manager = app
+        .get_webview_window("main")
+        .ok_or_else(|| "主界面窗口不存在".to_string())?;
+    crate::window_lifecycle::hide_window_immediately(&manager)?;
+    set_tray_manager_visibility(app, false);
+    Ok(())
+}
+
+/// Hides the manager for the title-bar close button. The renderer must not
+/// call the window API's `hide()` itself, which would leave the tray label stale.
+#[tauri::command]
+pub fn hide_manager_window(window: WebviewWindow) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("只能从主界面隐藏主界面".to_string());
+    }
+    hide_manager(window.app_handle())
+}
+
 pub fn set_tray_manager_visibility(app: &AppHandle, manager_visible: bool) {
     if let Some(state) = app.try_state::<TrayMenuState>() {
-        let _ = state
-            .manager_item
-            .set_text(tray_manager_item_label(manager_visible));
+        state.manager_visible.store(manager_visible, Ordering::Relaxed);
+        if let Some(labels) = app.try_state::<NativeMenuLabelStore>() {
+            let _ = state.manager_item.set_text(labels.current().manager_item(manager_visible));
+        }
     }
+}
+
+/// Rewrites every tray text from the stored labels, keeping the current
+/// show/hide state for the first item.
+fn apply_native_menu_labels(app: &AppHandle) {
+    let (Some(state), Some(store)) = (
+        app.try_state::<TrayMenuState>(),
+        app.try_state::<NativeMenuLabelStore>(),
+    ) else {
+        return;
+    };
+    let labels = store.current();
+    let entries = tray_menu_entries(&labels, state.manager_visible.load(Ordering::Relaxed));
+    let _ = state.manager_item.set_text(entries[0].1);
+    let _ = state.new_download.set_text(entries[1].1);
+    let _ = state.start_all.set_text(entries[2].1);
+    let _ = state.pause_all.set_text(entries[3].1);
+    let _ = state.launcher_always.set_text(entries[4].1);
+    let _ = state.launcher_downloading.set_text(entries[5].1);
+    let _ = state.launcher_hidden.set_text(entries[6].1);
+    let _ = state.quit.set_text(entries[7].1);
+    let _ = state.launcher_visibility.set_text(&labels.launcher_visibility);
+    if let Some(tray) = app.tray_by_id(TRAY_ID) {
+        let _ = tray.set_tooltip(Some(&labels.tooltip));
+    }
+}
+
+/// The manager renderer pushes its localized native-menu text at startup and
+/// on every language change; the tray follows immediately and the next launch
+/// starts from the cached text.
+#[tauri::command]
+pub fn set_native_menu_labels(
+    app: AppHandle,
+    window: WebviewWindow,
+    labels: NativeMenuLabels,
+    store: State<'_, NativeMenuLabelStore>,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("只能从主界面更新原生菜单文案".to_string());
+    }
+    if store.update(labels)? {
+        apply_native_menu_labels(&app);
+    }
+    Ok(())
 }
 
 fn background_ui_test_enabled() -> bool {
@@ -257,9 +343,97 @@ fn require_background_ui_test() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        manager_is_shown, tray_manager_item_label, EXIT_ARIA2_SHUTDOWN_TIMEOUT,
-        EXIT_TRAY_REMOVE_DELAY,
+        launcher_menu_actions, manager_is_shown, tray_menu_entries, EXIT_ARIA2_SHUTDOWN_TIMEOUT,
+        EXIT_TRAY_REMOVE_DELAY, HIDE_MANAGER, NEW_DOWNLOAD, OPEN_SETTINGS, PAUSE_ALL, QUIT,
+        START_ALL, TRAY_LAUNCHER_ALWAYS, TRAY_LAUNCHER_DOWNLOADING, TRAY_LAUNCHER_HIDDEN,
     };
+    use crate::native_menu_labels::NativeMenuLabels;
+
+    fn chinese() -> NativeMenuLabels {
+        NativeMenuLabels {
+            tooltip: "万能下载 VersaDown".into(),
+            hide_manager: "隐藏主界面".into(),
+            show_manager: "显示主界面".into(),
+            new_download: "新建下载".into(),
+            start_all: "开始全部任务".into(),
+            pause_all: "暂停全部任务".into(),
+            launcher_visibility: "悬浮球显示".into(),
+            launcher_always: "总是显示".into(),
+            launcher_downloading: "仅下载时显示".into(),
+            launcher_hidden: "关闭显示".into(),
+            quit: "退出万能下载".into(),
+        }
+    }
+
+    #[test]
+    fn tray_first_item_follows_the_manager_visibility() {
+        let labels = chinese();
+        assert_eq!(tray_menu_entries(&labels, false)[0], (HIDE_MANAGER, "显示主界面"));
+        assert_eq!(tray_menu_entries(&labels, true)[0], (HIDE_MANAGER, "隐藏主界面"));
+    }
+
+    #[test]
+    fn tray_entries_take_every_label_from_the_pushed_table() {
+        let mut labels = NativeMenuLabels::fallback();
+        assert_eq!(
+            tray_menu_entries(&labels, false),
+            [
+                (HIDE_MANAGER, "Show main window"),
+                (NEW_DOWNLOAD, "New download"),
+                (START_ALL, "Start all tasks"),
+                (PAUSE_ALL, "Pause all tasks"),
+                (TRAY_LAUNCHER_ALWAYS, "Always show"),
+                (TRAY_LAUNCHER_DOWNLOADING, "Show only while downloading"),
+                (TRAY_LAUNCHER_HIDDEN, "Turn off"),
+                (QUIT, "Quit VersaDown"),
+            ]
+        );
+        // A newly pushed table changes the text but keeps the visibility state.
+        labels = chinese();
+        let entries = tray_menu_entries(&labels, true);
+        assert_eq!(entries[0], (HIDE_MANAGER, "隐藏主界面"));
+        assert_eq!(entries[1].1, "新建下载");
+        assert_eq!(entries[7].1, "退出万能下载");
+    }
+
+    #[test]
+    fn the_launcher_menu_runs_only_its_known_actions() {
+        assert_eq!(
+            launcher_menu_actions(),
+            [HIDE_MANAGER, NEW_DOWNLOAD, START_ALL, PAUSE_ALL, OPEN_SETTINGS, QUIT]
+        );
+    }
+
+    #[test]
+    fn no_native_menu_text_is_hardcoded_in_the_tray_builder() {
+        let implementation = include_str!("launcher.rs").split("#[cfg(test)]").next().unwrap();
+        for literal in ["\"隐藏主界面\"", "\"显示主界面\"", "\"新建下载\"", "\"总是显示\"", "\"万能下载\""] {
+            assert!(!implementation.contains(literal), "{literal}");
+        }
+    }
+
+    #[test]
+    fn every_manager_hide_path_goes_through_the_tray_syncing_entry_point() {
+        let launcher = include_str!("launcher.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        // Before the test module only `hide_manager` may hide the window; no
+        // menu/launcher path hides it on its own.
+        assert_eq!(launcher.matches("hide_window_immediately(").count(), 1);
+        assert!(!launcher.contains("manager.hide()"));
+        let lifecycle = include_str!("window_lifecycle.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        assert!(lifecycle.contains("crate::launcher::hide_manager(&app)"));
+        assert!(!lifecycle.contains("set_tray_manager_visibility"));
+        // The title-bar close button must use the native command, not the JS
+        // window API, which would bypass the tray label sync.
+        let app_tsx = include_str!("../../src/App.tsx");
+        assert!(!app_tsx.contains("window.hide()"));
+        assert!(app_tsx.contains("'hide_manager_window'"));
+    }
 
     #[test]
     fn a_minimized_manager_is_offered_and_toggled_as_hidden() {
@@ -267,7 +441,10 @@ mod tests {
         // Minimized: visible to the windowing API, but off screen. The menu
         // must offer "show" and its toggle must restore, not hide, it.
         assert!(!manager_is_shown(true, true));
-        assert_eq!(tray_manager_item_label(manager_is_shown(true, true)), "显示主界面");
+        assert_eq!(
+            chinese().manager_item(manager_is_shown(true, true)),
+            "显示主界面"
+        );
         assert!(!manager_is_shown(false, false));
     }
 
@@ -287,7 +464,8 @@ mod tests {
 
     #[test]
     fn tray_clicks_are_dispatched_off_the_native_event_loop() {
-        let source = include_str!("launcher.rs");
+        // Git may check this source out with CRLF on Windows.
+        let source = include_str!("launcher.rs").replace("\r\n", "\n");
         assert!(source.contains(
             "tauri::async_runtime::spawn(async move {\n                    reveal_manager"
         ));
@@ -368,7 +546,7 @@ pub fn run_launcher_menu_action(
     if window.label() != "launcher" {
         return Err("悬浮球菜单动作只能从悬浮窗执行".to_string());
     }
-    if !launcher_menu_entries().iter().any(|(id, _)| *id == action) {
+    if !launcher_menu_actions().contains(&action.as_str()) {
         return Err("未知的悬浮球菜单动作".to_string());
     }
     handle_launcher_menu_action(&app, &action);
@@ -410,7 +588,7 @@ pub fn activate_launcher_menu_for_test(
     action: String,
 ) -> Result<Option<ExitWindowSnapshot>, String> {
     require_background_ui_test()?;
-    if !launcher_menu_entries().iter().any(|(id, _)| *id == action) {
+    if !launcher_menu_actions().contains(&action.as_str()) {
         return Err("未知的悬浮窗菜单动作".to_string());
     }
     handle_launcher_menu_action(&app, &action);
@@ -461,8 +639,7 @@ fn toggle_manager_visibility(app: &AppHandle) {
         return;
     };
     if manager_window_shown(&manager) {
-        let _ = manager.hide();
-        set_tray_manager_visibility(app, false);
+        let _ = hide_manager(app);
     } else {
         reveal_manager(app, None);
     }
@@ -490,8 +667,7 @@ pub fn toggle_manager_from_launcher(
         focus.manager_was_foreground(),
     );
     if hide {
-        manager.hide().map_err(|error| error.to_string())?;
-        set_tray_manager_visibility(app, false);
+        hide_manager(app)?;
         return Ok(false);
     }
     reveal_manager(app, None);
@@ -500,6 +676,26 @@ pub fn toggle_manager_from_launcher(
 }
 
 pub(crate) fn reveal_manager(app: &AppHandle, destination: Option<&str>) {
+    if crate::agent_runtime::defer_reveal(app, destination) {
+        return;
+    }
+    let target = app.clone();
+    let destination = destination.map(str::to_owned);
+    // WebView2 creation from a synchronous UI event can deadlock. A blocking
+    // worker creates the desktop; its native subclass is installed separately
+    // on the owner thread before the finished window is revealed there.
+    tauri::async_runtime::spawn_blocking(move || {
+        if crate::agent_runtime::ensure_desktop_ui_from_worker(&target).is_err() {
+            return;
+        }
+        let visible_app = target.clone();
+        let _ = target.run_on_main_thread(move || {
+            reveal_existing_manager(&visible_app, destination.as_deref());
+        });
+    });
+}
+
+fn reveal_existing_manager(app: &AppHandle, destination: Option<&str>) {
     let Some(manager) = app.get_webview_window("main") else {
         return;
     };

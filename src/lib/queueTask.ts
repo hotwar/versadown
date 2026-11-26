@@ -20,7 +20,7 @@ export function normalizeQueueTasks(tasks: readonly QueueTaskInput[]): QueueTask
 }
 
 export function downloadErrorMessage(message: string): string {
-  if (message === 'download.error.transferredFileUnavailable') return t(message);
+  if (message === 'download.error.transferredFileUnavailable' || message === 'cloud.verification.baidu.drive') return t(message);
   return shareFailureMessage(message) ?? xunleiDownloadMessage(message);
 }
 

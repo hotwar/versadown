@@ -11,5 +11,8 @@ fn main() {
         }
         return;
     }
-    versadown_lib::run();
+    let exit_code = versadown_lib::run();
+    if exit_code != 0 {
+        std::process::exit(exit_code);
+    }
 }

@@ -6,7 +6,7 @@ VersaDown 是一款本地优先的桌面下载客户端，支持 Windows、macOS
 
 [下载安装](https://github.com/liuwenhuan/versadown/releases/latest) · [更新日志](https://github.com/liuwenhuan/versadown/releases) · [问题反馈](https://github.com/liuwenhuan/versadown/issues) · [开发与构建](docs/development.md)
 
-[功能特性](#功能特性) · [视频解析与下载](#视频解析与下载) · [自动更新检测](#自动更新检测) · [功能截图](#功能截图)
+[功能特性](#功能特性) · [CLI 与 MCP](#cli-与-mcp) · [视频解析与下载](#视频解析与下载) · [自动更新检测](#自动更新检测) · [功能截图](#功能截图)
 
 ## 下载与安装
 
@@ -33,8 +33,80 @@ VersaDown 是一款本地优先的桌面下载客户端，支持 Windows、macOS
 | 并发、代理与限速 | 调整最大并发任务数、单任务连接数和 BT 分享率；配置下载代理、整体下载限速，以及 P2P 和网盘上传限速 |
 | 隐私任务 | 使用密码锁定和解锁隐私任务，在本次应用会话中控制其显示；下载文件本身不加密 |
 | 桌面使用体验 | 悬浮快捷入口、下载状态通知、多种明暗主题和中英文等多语言界面；可关联磁力、迅雷和电驴链接 |
+| Agent 调用（开发分支） | 通过 CLI 或本机 MCP 调用下载与网盘能力；按需启动后台宿主，文件读写与网盘授权由 VD 在任务需要时确认 |
 
 断点续传取决于来源服务、链接有效性和本地断点是否完整。网盘操作及下载速度受账号权限、会员权益、服务商接口和网络条件影响，具体可用操作以应用界面为准。
+
+## CLI 与 MCP
+
+当前开发分支已加入 Agent 调用能力，Windows Quick 已通过 CLI/MCP 定向测试和百度上传回读验证；已发布的 0.3.2 安装包不代表包含这套功能。请使用包含配套 `versadown`、`vd-cli` 和 `vd-mcp-server` 程序的构建，macOS/Linux 的端到端运行与配套分发仍待验收。
+
+CLI 供脚本或能执行命令的 Agent 调用，返回 JSON 结果；MCP 将 VD 的能力提供给支持本机 **stdio MCP** 的 AI 客户端。当前提供 22 个工具，可创建和管理下载、选择视频或网盘资源、浏览已授权网盘、上传本地文件，以及为网盘内文件创建分享。
+
+### 接入 MCP
+
+1. **启用调用**：打开 VD 的「设置 → 高级 → Agent 接入」，启用「允许本机 Agent 调用」，点击「保存调用与授权」。
+2. **复制配置**：点击「复制 MCP JSON」，使用 VD 当前配套程序的实际路径。保留完整程序目录，不单独移动 `vd-mcp-server`；更换构建或安装位置后重新复制配置。也可使用辅助提示词协助配置。
+3. **添加连接器**：在 AI 客户端添加本机 stdio MCP 服务并粘贴配置，保留原有的其他服务。完成客户端要求的信任确认与重新加载；不同客户端的配置入口和 JSON 格式可能不同。
+4. **验证连接**：让 Agent 实际调用 `vd_health`，检查宿主连接和下载引擎状态。看到 22 个工具表示客户端已发现 MCP 工具，还需实际调用和查询任务结果才能确认下载或上传成功。
+
+以下为用户提供的 Windows 真实界面截图，账号和个人路径已遮盖。第三方客户端截图展示一种配置方式，其入口与界面可能随客户端版本变化。
+
+![VD Agent 接入设置：启用调用、保存授权并复制 MCP JSON](docs/screenshots/agent-settings.png)
+
+<details>
+<summary>查看第三方客户端的 MCP 配置与工具列表</summary>
+
+将 VD 生成的配置加入客户端，完成信任确认并重新加载。图中的个人路径已遮盖，实际配置请复制自己这份 VD 生成的 JSON。
+
+![第三方客户端配置 VD 的本机 stdio MCP 服务](docs/screenshots/agent-mcp-config.png)
+
+客户端可发现 VD 的 22 个工具；随后实际调用 `vd_health` 验证连接。
+
+![第三方客户端已发现 VD MCP 服务及 22 个工具](docs/screenshots/agent-mcp-tools.png)
+
+</details>
+
+### 让 Agent 使用 VD
+
+完成接入后，可以直接用自然语言提出任务，例如：
+
+> 用 VD 下载这个链接，保存位置由我选择。完成后告诉我文件路径。
+
+> 用 VD 把 `C:\Documents\report.pdf` 上传到我的百度网盘根目录。需要授权时提醒我，上传结束后重新列目录确认文件。
+
+首次启用后，无需预先打开 VD 主界面：CLI/MCP 会按需启动后台宿主。后台仍依赖桌面运行环境，本阶段不提供无图形界面服务器或远程 MCP 部署。
+
+不用提前填写一整组目录权限。下载保存位置和上传文件读取在需要时由 **VD 窗口**请求确认；网盘未登录时，由 VD 打开对应的登录页面。网盘使用授权绑定实际账号，获准账号内的目录无需逐个授权。密码、短信验证码和网盘凭据不交给 Agent。
+
+需要用户操作时，工具返回 `USER_ACTION_REQUIRED` 和 `interaction_id`。Agent 等待你在 VD 完成操作，再通过 `vd_interaction_status` 取得原请求结果并继续；不要反复新建任务或重新打开登录窗口。上传和分享采用准备、确认、查询结果的流程，受理成功不等于传输完成，须检查最终状态与逐项失败。当前每批上传 1–20 个普通文件，不支持本地目录上传。
+
+### 使用 CLI
+
+在配套程序目录打开终端。下面使用 Windows PowerShell；请将示例 URL 和任务 ID 替换成实际值。
+
+```powershell
+# 只读诊断与可复制的 MCP 配置
+.\vd-cli.exe doctor --lang zh-CN
+.\vd-cli.exe mcp-config --lang zh-CN
+
+# 检查服务；未运行时按需启动后台宿主
+.\vd-cli.exe health
+
+# 创建下载，省略 directory 时由 VD 询问保存位置
+.\vd-cli.exe add "https://example.com/file.zip" --request-id readme-download-001
+
+# 若返回 USER_ACTION_REQUIRED，在 VD 确认后查询同一交互
+.\vd-cli.exe interaction status INTERACTION_ID
+
+# 接续结果中取得任务 ID 后，查询进度与最终文件
+.\vd-cli.exe status TASK_ID
+.\vd-cli.exe result TASK_ID
+```
+
+命令输出 JSON；`mcp-config` 生成配置时，将输出中的 `data.config` 加入客户端。重试同一提交时复用原 `request_id` 与参数。`doctor` 只读诊断且不会启动宿主，需检查报告中的 `ready` 与 `health`。出现 `HOST_UNAVAILABLE` 时，先检查当前这份 VD 是否已启用 Agent 调用、MCP 路径是否指向配套版本，不能只据此判断主程序没有启动。
+
+全部命令、MCP 工具、网盘上传参数、授权接续和错误处理见 [CLI 与 MCP 使用文档](docs/cli.md)；源码运行与配套构建见 [开发文档](docs/development.md#climcp-开发与验收)。
 
 ## 视频解析与下载
 
@@ -64,7 +136,7 @@ VD 启动后会在后台检查官网发布的版本信息，也可在「关于�
 
 ## 功能截图
 
-以下截图来自 macOS 实际运行界面；不同版本、平台和主题的外观可能略有差异。视频解析截图见[上方章节](#视频解析与下载)。
+本节截图来自 macOS 实际运行界面；不同版本、平台和主题的外观可能略有差异。视频解析截图见[视频章节](#视频解析与下载)，Windows Agent 接入截图见 [CLI 与 MCP](#cli-与-mcp)。
 
 ### 下载管理
 
@@ -129,6 +201,7 @@ VD 启动后会在后台检查官网发布的版本信息，也可在「关于�
 VD 使用 Tauri 2、React、TypeScript 和 Rust，桌面界面使用系统 WebView。文件与媒体下载由 aria2-next、Rust FTP 引擎及 yt-dlp / FFmpeg 等组件协作完成。
 
 - [开发与构建](docs/development.md)：环境准备、各平台 quick / Release 构建、产物位置和验证命令。
+- [CLI 与 MCP 使用文档](docs/cli.md)：Agent 接入、命令、网盘操作、任务授权与结果查询。
 - [开发与验证约定](AGENTS.md)：修改代码前的协作规则。
 - [第三方组件说明](THIRD_PARTY_NOTICES.md)：依赖、协议参考、许可证与对应源码。
 - [提交问题或建议](https://github.com/liuwenhuan/versadown/issues)：请附应用版本、操作系统和复现步骤，分享日志前移除账号凭据及私密链接。

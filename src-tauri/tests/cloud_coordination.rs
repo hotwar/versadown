@@ -9,8 +9,8 @@ use std::{
 
 #[test]
 fn logout_serializes_after_inflight_refresh_and_other_provider_remains_available() {
-    let root = std::env::temp_dir().join(format!("cloud-coordination-{}", uuid::Uuid::new_v4()));
-    let state = Arc::new(CloudState::new(root.clone()).unwrap());
+    let root = tempfile::tempdir().unwrap();
+    let state = Arc::new(CloudState::new(root.path().to_owned()).unwrap());
     state
         .with_provider(CloudProvider::Pikpak, |s| s.save("pikpak", b"old"))
         .unwrap();
@@ -62,7 +62,8 @@ fn logout_serializes_after_inflight_refresh_and_other_provider_remains_available
             .is_none(),
         "refresh cannot resurrect a logged-out session"
     );
-    std::fs::remove_dir(root).unwrap();
+    drop(state);
+    root.close().unwrap();
 }
 
 #[test]

@@ -52,6 +52,13 @@ fn main() {
         println!("cargo:rerun-if-changed={}", manifest.display());
         println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
         println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
+
+        // Polling the unoptimized HTTP request futures can exceed the default
+        // MSVC main-thread stack. Reserve extra stack for the Agent tools;
+        // Windows commits the pages as the programs need them.
+        for binary in ["vd-cli", "vd-mcp-server"] {
+            println!("cargo:rustc-link-arg-bin={binary}=/STACK:8388608");
+        }
     }
 
     tauri_build::try_build(attributes).expect("failed to build Tauri resources");

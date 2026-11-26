@@ -34,6 +34,30 @@ describe('share failure messages', () => {
     expect(shareFailureMessage('cloud.error.mega.copyTooLarge')).toContain('too many items');
   });
 
+  it('localizes MEGA service, upload and numeric failures without backend prose', async () => {
+    await setLocalePreference('zh-CN');
+    expect(shareFailureMessage('cloud.error.mega.serviceBusy')).toBe('MEGA 服务暂时繁忙，请稍后重试。');
+    expect(shareFailureMessage('cloud.error.mega.apiError:-99')).toBe('MEGA 返回错误码 -99。');
+    expect(shareFailureMessage('cloud.error.mega.uploadHttpError:403')).toBe('MEGA 上传服务返回 HTTP 403。');
+    expect(shareFailureMessage('cloud.error.mega.localFileUnreadable')).toContain('无法读取');
+    expect(shareFailureMessage('cloud.error.mega.invalidDestination')).toContain('回收站');
+    await setLocalePreference('en');
+    expect(shareFailureMessage('cloud.error.mega.serviceBusy')).toBe('MEGA is temporarily busy. Try again later.');
+    expect(shareFailureMessage('cloud.error.mega.serviceUnavailable')).toContain('temporarily unavailable');
+    expect(downloadErrorMessage('cloud.error.mega.apiError:-99')).toBe('MEGA returned error code -99.');
+    expect(downloadErrorMessage('cloud.error.mega.uploadHttpError:403')).toBe('The MEGA upload service returned HTTP 403.');
+    expect(shareFailureMessage('cloud.error.mega.localFileUnreadable')).toContain('could not be read');
+    expect(shareFailureMessage('cloud.error.mega.invalidDestination')).toContain('recycle bin');
+  });
+
+  it('keeps numeric diagnostics exact and ignores invalid diagnostic parameters', async () => {
+    await setLocalePreference('en');
+    expect(shareFailureMessage('cloud.error.mega.apiError:-9223372036854775808')).toContain('-9223372036854775808');
+    expect(shareFailureMessage('cloud.error.mega.apiError:private server text')).toBe('MEGA rejected the request.');
+    expect(shareFailureMessage('cloud.error.mega.uploadHttpError:<html>')).toBe('The MEGA upload service rejected the request.');
+    expect(shareFailureMessage('cloud.error.mega.apiError')).toBe('MEGA rejected the request.');
+  });
+
   it('turns the quota wait in seconds into whole minutes, rounding up', async () => {
     await setLocalePreference('zh-CN');
     expect(shareFailureMessage('cloud.error.mega.quotaExceeded:1800')).toContain('约 30 分钟后重试');
@@ -68,6 +92,9 @@ describe('share failure messages', () => {
     expect(shareFailureMessage('cloud.error.mega.integrityFailed')).toContain('完整性校验失败');
     await setLocalePreference('en');
     expect(downloadErrorMessage('cloud.error.mega.integrityFailed')).toContain('integrity check');
+    expect(downloadErrorMessage('cloud.error.mega.integrityUnavailable')).toBe('The MEGA file integrity check could not be completed. Retry the download.');
+    await setLocalePreference('zh-CN');
+    expect(shareFailureMessage('cloud.error.mega.integrityUnavailable')).toBe('无法完成 MEGA 文件完整性校验，请重试下载。');
   });
 
   it('ignores unrelated text and shows task failures through the queue helper', async () => {

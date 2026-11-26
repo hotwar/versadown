@@ -134,6 +134,10 @@ fn cloud_error_kind(error: &CloudError) -> &'static str {
         CloudError::BaiduTransferPending => "baidu-transfer-pending",
         CloudError::ShareTransferDownloadUnavailable => "transfer-saved-download-unavailable",
         CloudError::Mega(_) => "mega-link-error",
+        CloudError::BaiduOperationVerificationRequired => "baidu-operation-verification-required",
+        CloudError::BaiduDriveVerificationRequired => "baidu-operation-verification-required",
+        CloudError::BaiduUploadPrecreateRejected { .. } => "baidu-upload-precreate-rejected",
+        CloudError::BaiduUploadWebSessionRequired => "baidu-upload-web-session-required",
     }
 }
 

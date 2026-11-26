@@ -1253,7 +1253,7 @@ pub async fn list_tasks(
     list_queue_tasks_in_background(Arc::clone(&state.store), cloud, scope, include_private).await
 }
 
-async fn list_queue_tasks_in_background(
+pub(crate) async fn list_queue_tasks_in_background(
     store: Arc<TaskStore>,
     cloud: Option<Arc<crate::cloud::commands::CloudState>>,
     scope: Option<String>,
@@ -2073,6 +2073,16 @@ pub async fn task_action(
     action: String,
     app: AppHandle,
 ) -> Result<TaskActionOutcome, String> {
+    dispatch_task_action(task_id, action, app).await
+}
+
+/// Shared task routing for application entry points. Callers must enforce their
+/// own access policy before dispatch; GUI privacy checks remain in this path.
+pub(crate) async fn dispatch_task_action(
+    task_id: String,
+    action: String,
+    app: AppHandle,
+) -> Result<TaskActionOutcome, String> {
     if task_id.starts_with("group:") {
         return Err("目录节点仅用于展开，不能执行下载操作".to_string());
     }
@@ -2332,6 +2342,29 @@ async fn run_local_task_action(
     let id = Uuid::parse_str(&task_id).map_err(|_| "任务 ID 无效".to_string())?;
     let mut current = state.store.find(id).map_err(|error| error.to_string())?;
     ensure_private_task_access(&state, &current)?;
+    if matches!(action.as_str(), "pause" | "resume" | "cancel") {
+        if let Some(task) = crate::cli_resources::control_pending(&app, id, &action).await
+            .map_err(|code| format!("agent.error.{code}"))? {
+            let _ = emit_task_update_for_task(&app, &state.store, None, task.clone());
+            return task_action_outcome(&state.store, task, None);
+        }
+        // A resource submission may have finished while the control gate was held.
+        current = state.store.find(id).map_err(|error| error.to_string())?;
+    }
+    if let Some(dispatcher) = app.try_state::<Arc<crate::cli_dispatch::CliDispatcher>>() {
+        let control = match action.as_str() {
+            "pause" => Some(DownloadAction::Pause),
+            "resume" => Some(DownloadAction::Resume),
+            "cancel" => Some(DownloadAction::Cancel),
+            _ => None,
+        };
+        if let Some(control) = control {
+            if let Some(task) = dispatcher.control_pending(id, control).await.map_err(|e| e.to_string())? {
+                let _ = emit_task_update_for_task(&app, &state.store, None, task.clone());
+                return task_action_outcome(&state.store, task, None);
+            }
+        }
+    }
     if current.kind == "web_video" {
         let task = state.web_video.control(&state, current, &action).await?;
         return task_action_outcome(&state.store, task, None);
@@ -4068,6 +4101,7 @@ pub async fn update_settings(
         crate::web_video::validate_cookie_file(&settings.video_cookie_file)?;
     }
     settings.ai = previous.ai;
+    settings.agent_access = previous.agent_access;
     settings.privacy_download_enabled = previous.privacy_download_enabled;
     settings.privacy_password_configured = previous.privacy_password_configured;
     if settings.aria2 != previous.aria2 {
@@ -4108,11 +4142,14 @@ pub async fn update_settings(
     state
         .runtime
         .set_cloud_upload_limit(settings.cloud_upload_limit);
-    persist_settings(&state.settings_path, &settings)?;
-    *state
-        .settings
-        .lock()
-        .map_err(|_| "设置锁不可用".to_string())? = settings.clone();
+    {
+        let mut current = state.settings.lock().map_err(|_| "设置锁不可用".to_string())?;
+        // The dedicated automation grant may change while engine/link settings
+        // await. A stale general settings form must never undo a revocation.
+        settings.agent_access = current.agent_access.clone();
+        persist_settings(&state.settings_path, &settings)?;
+        *current = settings.clone();
+    }
     crate::launcher_window::sync_launcher_window(&app, settings.launcher_visibility);
     for label in ["launcher", "launcher-popup"] {
         let _ = app.emit_to(
