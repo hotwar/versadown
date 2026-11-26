@@ -348,17 +348,19 @@ impl ProviderAuth for TianyiDriver<'_> {
     }
 }
 impl UploadOps for TianyiDriver<'_> {
+    fn upload_no_replace(&mut self, _: &dyn UploadHttp, _: &str, _: &Path) -> Result<CloudFile, CloudError> {
+        // The disabled connector has no verified no-replacement contract.
+        Err(CloudError::ProviderUnsupported)
+    }
+
     fn upload(
         &mut self,
-        s: &CloudState,
         upload_http: &dyn UploadHttp,
         parent_id: &str,
         path: &Path,
     ) -> Result<CloudFile, CloudError> {
         let h = UploadHttpRef(upload_http);
-        s.with_upload_session(CloudProvider::Tianyi, &h, |store| {
-            tianyi::TianyiClient::new(load_provider_session(CloudProvider::Tianyi, store)?, &h)
-                .upload_file(&parent_id, &path, &h)
-        })
+        tianyi::TianyiClient::new(load_provider_session(CloudProvider::Tianyi, &self.store)?, &h)
+            .upload_file(parent_id, path, &h)
     }
 }

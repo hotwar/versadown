@@ -1,4 +1,4 @@
-import { AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, PrivacyTaskVisibility, QueueTask, ScanDownloadResult, TaskActionResult, TaskCommand } from './types';
+import { AgentConnectionInfo, AgentAccessSettings, AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, PrivacyTaskVisibility, QueueTask, ScanDownloadResult, TaskActionResult, TaskCommand } from './types';
 import { videoMessage } from './webVideo';
 import type { ScanDownloadProgress, VideoPreview } from './types';
 import { Channel, invoke } from '@tauri-apps/api/core';
@@ -232,6 +232,11 @@ export async function runTaskAction(taskId: string, action: Extract<TaskCommand,
   if (!isTauriRuntime()) return {};
   return duplicateResult(await invoke<NativeTaskOutcome>('task_action', { taskId, action }).catch(error => {
     if (typeof error === 'string' && error.startsWith('video.error.')) throw new Error(videoMessage(error));
+    if (typeof error === 'string' && error.startsWith('agent.error.')) {
+      const known = ['CLI_RECOVERY_REQUIRED', 'FORBIDDEN', 'ACTION_FAILED', 'INTERNAL_ERROR', 'INVALID_ARGUMENT', 'CLOUD_WRITE_REQUIRED'];
+      const key = known.includes(error.slice('agent.error.'.length)) ? error as TranslationKey : 'agent.error.ACTION_FAILED';
+      throw new Error(t(key));
+    }
     throw error;
   }));
 }
@@ -308,6 +313,7 @@ export const defaultSettings: AppSettings = {
   deleteTransferredShareFilesAfterDownload: true,
   privacyDownloadEnabled: false,
   privacyPasswordConfigured: false,
+  agentAccess: { enabled: false, allowedDirectories: [], uploadDirectories: [], cloudGrants: [] },
   cloudUploadLimit: 0,
   downloadStatusNotifications: true,
   associateDownloadLinks: true
@@ -342,6 +348,22 @@ export async function configurePrivacyDownload(enabled: boolean, currentPassword
     currentPassword: currentPassword || null,
     newPassword: newPassword || null
   });
+}
+
+export async function getAgentConnectionInfo(lang: string): Promise<AgentConnectionInfo> {
+  if (!isTauriRuntime()) throw new Error(t('settings.agent.error.desktopRequired'));
+  return invoke<AgentConnectionInfo>('get_agent_connection_info', { lang });
+}
+
+export async function configureAgentAccess(settings: AgentAccessSettings): Promise<AppSettings> {
+  if (!isTauriRuntime()) throw new Error(t('settings.agent.error.desktopRequired'));
+  try {
+    return await invoke<AppSettings>('configure_agent_access', { settings });
+  } catch (error) {
+    const key = typeof error === 'string' && error.startsWith('settings.agent.error.')
+      ? error as TranslationKey : 'settings.agent.error.save';
+    throw new Error(t(key));
+  }
 }
 
 export async function getPrivacyTaskVisibility(): Promise<PrivacyTaskVisibility> {

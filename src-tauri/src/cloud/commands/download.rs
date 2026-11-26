@@ -617,6 +617,8 @@ pub async fn queue_cloud_dispatch(
                 },
                 |resolved| async move {
                     let state = submit_app.state::<AppState>();
+                    crate::cli_resources::authorize_task(&submit_app,id)
+                        .map_err(|_|QuarkError::InvalidInput("agent.error.forbidden".into()))?;
                     if !share {
                         check_dispatch_owner(&submit_app, &state.store, provider, id)?;
                     }
@@ -1021,11 +1023,20 @@ pub(crate) fn directory_download_failure_fields(
             "pikpak_operation_verification_required",
             "PikPak 需要官方操作验证，请在我的网盘中完成验证后重试",
         ),
+        QuarkError::BaiduDriveVerificationRequired => (
+            "baidu_drive_verification_required",
+            "cloud.verification.baidu.drive",
+        ),
         QuarkError::BaiduOperationVerificationRequired => (
             "baidu_operation_verification_required",
             "baidu_operation_verification_required",
         ),
         QuarkError::BaiduUploadAuthorizationRequired(stage) => (stage.code(), stage.message()),
+        QuarkError::BaiduUploadWebSessionRequired => ("baidu_upload_web_session_required", "HTTP 200, errno -6"),
+        QuarkError::BaiduUploadPrecreateRejected { .. } => (
+            "baidu_upload_precreate_rejected",
+            "cloud.upload.baiduPrecreateRejected",
+        ),
         QuarkError::SourceFileMissing => (
             "source_file_missing",
             "网盘中的源文件已不存在，请刷新网盘列表后重新创建下载",

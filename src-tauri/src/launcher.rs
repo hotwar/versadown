@@ -464,7 +464,8 @@ mod tests {
 
     #[test]
     fn tray_clicks_are_dispatched_off_the_native_event_loop() {
-        let source = include_str!("launcher.rs");
+        // Git may check this source out with CRLF on Windows.
+        let source = include_str!("launcher.rs").replace("\r\n", "\n");
         assert!(source.contains(
             "tauri::async_runtime::spawn(async move {\n                    reveal_manager"
         ));
@@ -675,6 +676,26 @@ pub fn toggle_manager_from_launcher(
 }
 
 pub(crate) fn reveal_manager(app: &AppHandle, destination: Option<&str>) {
+    if crate::agent_runtime::defer_reveal(app, destination) {
+        return;
+    }
+    let target = app.clone();
+    let destination = destination.map(str::to_owned);
+    // WebView2 creation from a synchronous UI event can deadlock. A blocking
+    // worker creates the desktop; its native subclass is installed separately
+    // on the owner thread before the finished window is revealed there.
+    tauri::async_runtime::spawn_blocking(move || {
+        if crate::agent_runtime::ensure_desktop_ui_from_worker(&target).is_err() {
+            return;
+        }
+        let visible_app = target.clone();
+        let _ = target.run_on_main_thread(move || {
+            reveal_existing_manager(&visible_app, destination.as_deref());
+        });
+    });
+}
+
+fn reveal_existing_manager(app: &AppHandle, destination: Option<&str>) {
     let Some(manager) = app.get_webview_window("main") else {
         return;
     };

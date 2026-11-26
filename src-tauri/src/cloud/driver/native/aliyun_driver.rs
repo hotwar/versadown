@@ -155,14 +155,11 @@ impl ProviderAuth for AliyunDriver<'_> {
 impl UploadOps for AliyunDriver<'_> {
     fn upload(
         &mut self,
-        s: &CloudState,
         upload_http: &dyn UploadHttp,
         parent_id: &str,
         path: &Path,
     ) -> Result<CloudFile, CloudError> {
         let h = UploadHttpRef(upload_http);
-        s.with_upload_session(CloudProvider::Aliyun, &h, |store| {
-            aliyun::AliyunClient::new(store, &h).upload_file(&parent_id, &path)
-        })
+        aliyun::AliyunClient::new(&self.store, &h).upload_file(parent_id, path)
     }
 }

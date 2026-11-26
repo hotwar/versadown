@@ -7,6 +7,7 @@ import './styles.css';
 // Each window loads only its own UI: the launcher renderer never parses the
 // manager's code, and vice versa.
 async function loadWindowComponent(launcherWindow: boolean): Promise<React.ComponentType> {
+  if (new URLSearchParams(window.location.search).get('window') === 'agent-access') return (await import('./components/AgentInteractionWindow')).default;
   if (launcherWindow) return (await import('./components/LauncherWindow')).LauncherWindow;
   return (await import('./App')).App;
 }

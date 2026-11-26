@@ -181,8 +181,8 @@ it('retains the upload outcome even if refreshing the remote directory fails', a
   client.listCloudDirectory.mockRejectedValue(new Error('列表请求超时'));
   await user.click(screen.getByRole('button', { name: '上传', exact: true }));
   await confirmAllLocalUploads(user);
-  expect(await screen.findByText('已上传 1 项')).toBeVisible();
-  expect(screen.getByText('列表请求超时')).toBeVisible();
+  expect(await screen.findByText(/已上传 1 项.*列表刷新失败.*列表请求超时/)).toBeVisible();
+  expect(screen.getByRole('tree')).toBeVisible();
 });
 
 it('consumes external authorization received during upload after a delayed directory refresh settles', async () => {
@@ -410,6 +410,21 @@ it('replaces file details with a sharing dialog that submits the selected files 
   expect(createCloudShare).toHaveBeenCalledWith('quark', ['file-1'], { name: '报告.pdf', passCode: 'a7b2', expiresInDays: 7 });
   expect(within(await screen.findByRole('dialog', { name: '分享链接已创建' })).getByRole('textbox', { name: '分享链接' })).toHaveValue('https://pan.example/s/share-7');
   expect(screen.queryByRole('menuitem', { name: '文件详情' })).not.toBeInTheDocument();
+});
+
+it('submits the explicit provider-generated pass-code policy shown for Xunlei', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake();
+  render(<CloudManager provider="xunlei" client={client} initialAccount={{ id: 'xl', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} />);
+  fireEvent.contextMenu(await screen.findByText('报告.pdf'));
+  await user.click(screen.getByRole('menuitem', { name: '分享' }));
+  const dialog = await screen.findByRole('dialog', { name: '创建分享链接' });
+  expect(within(dialog).queryByRole('textbox', { name: '提取码' })).not.toBeInTheDocument();
+  await user.selectOptions(within(dialog).getByRole('combobox', { name: '有效期' }), '7');
+  await user.click(within(dialog).getByRole('button', { name: '创建分享链接' }));
+  expect(client.createCloudShare).toHaveBeenCalledWith('xunlei', ['file-1'], {
+    name: '报告.pdf', generatePassCode: true, expiresInDays: 7,
+  });
 });
 
 it('uses a share-specific vertical dialog layout', async () => {
@@ -2338,6 +2353,74 @@ it.each(['web_auth_required', 'credentials_expired'])('preserves the Xunlei dire
   expect(screen.getByRole('alert')).toHaveTextContent('读取目录需要网页验证');
 });
 
+it('keeps Baidu signed in and retries the same share listing after operation verification', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake();
+  client.listCloudShares.mockRejectedValueOnce({ code: 'baidu_drive_verification_required', message: '网页验证' });
+  render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'web' }} restoreOnMount={false} />);
+
+  await user.dblClick(await screen.findByText('我的分享'));
+  expect(await screen.findByRole('alert')).toHaveTextContent(t('cloud.verification.baidu.drive'));
+  expect(screen.getByRole('button', { name: '退出授权' })).toBeVisible();
+  expect(screen.queryByRole('button', { name: /重新网页授权|打开百度网盘官方回收站验证/ })).not.toBeInTheDocument();
+  await user.click(screen.getByRole('button', { name: t('common.retryAction') }));
+  expect(await screen.findByText(t('cloud.empty.myShares.title'))).toBeVisible();
+  expect(client.listCloudShares).toHaveBeenCalledTimes(2);
+  expect(client.listCloudDirectory).toHaveBeenCalledTimes(1);
+  expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
+});
+
+it.each(['provider_error', 'network_error', undefined])('keeps an operation failure with code %s separate from a login challenge', async code => {
+  const user = userEvent.setup();
+  const client = createCloudFake();
+  client.createCloudDirectory.mockRejectedValueOnce(code ? { code, message: '网页验证服务连接中断' } : new Error('网页验证服务连接中断'));
+  render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'web' }} restoreOnMount={false} />);
+  await screen.findByRole('tree');
+  await user.click(screen.getByRole('button', { name: '新建目录' }));
+  await user.type(screen.getByRole('textbox', { name: '目录名称' }), '资料');
+  await user.click(screen.getByRole('button', { name: '确认新建目录' }));
+  expect(await screen.findByRole('alert')).toHaveTextContent('网页验证服务连接中断');
+  expect(screen.queryByRole('button', { name: /重新网页授权|授权并继续/ })).not.toBeInTheDocument();
+  expect(client.createCloudDirectory).toHaveBeenCalledTimes(1);
+});
+
+it.each(['success', 'challenge'])('ignores a late share %s after the user returns to the root', async result => {
+  const user = userEvent.setup();
+  const client = createCloudFake();
+  render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'web' }} restoreOnMount={false} />);
+  await user.dblClick(await screen.findByText('我的分享'));
+  await screen.findByText(t('cloud.empty.myShares.title'));
+  let finish!: () => void;
+  client.listCloudShares.mockImplementationOnce(() => new Promise((resolve, reject) => {
+    finish = () => result === 'success' ? resolve([]) : reject({ code: 'credentials_expired' });
+  }));
+  await user.click(screen.getByRole('button', { name: '刷新' }));
+  await user.click(screen.getByRole('button', { name: t('cloud.root') }));
+  await screen.findByText('报告.pdf');
+  await act(async () => { finish(); });
+  expect(screen.getByText('报告.pdf')).toBeVisible();
+  expect(screen.queryByRole('button', { name: /重新网页授权|授权并继续/ })).not.toBeInTheDocument();
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+});
+
+it('ignores an earlier account restore and directory challenge after logout', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake();
+  const account = { id: 'b-1', displayName: 'alice', provider: 'baidu' as const, authMethod: 'web' as const };
+  let finishRestore!: (value: typeof account) => void;
+  let rejectDirectory!: (reason: unknown) => void;
+  client.getCloudAccount.mockImplementationOnce(() => new Promise(resolve => { finishRestore = resolve; }));
+  client.listCloudDirectory.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectDirectory = reject; }));
+  render(<CloudManager provider="baidu" client={client} initialAccount={account} />);
+  await user.click(screen.getByRole('button', { name: '退出授权' }));
+  await user.click(screen.getByRole('button', { name: '确认退出授权' }));
+  await screen.findByRole('region', { name: '百度网盘账号授权' });
+  await act(async () => { finishRestore(account); rejectDirectory({ code: 'credentials_expired' }); });
+  expect(screen.getByRole('region', { name: '百度网盘账号授权' })).toBeVisible();
+  expect(screen.queryByText(/读取目录需要|凭据已过期/)).not.toBeInTheDocument();
+  expect(client.listCloudDirectory).toHaveBeenCalledTimes(1);
+});
+
 it('resumes loading the requested nested directory instead of returning to the root after authorization', async () => {
   const user = userEvent.setup();
   const listCloudDirectory = vi.fn()
@@ -2433,15 +2516,49 @@ it('treats closing the upload picker as a cancellation instead of a success', as
   expect(screen.queryByText(/上传成功|已上传/)).not.toBeInTheDocument();
 });
 
+it.each([false, true])('preserves the upload receipt when directory confirmation asks for authorization (partial=%s)', async (partial) => {
+  const user = userEvent.setup();
+  const uploaded = [{ id: 'uploaded', parentId: '/', name: 'a.txt', kind: 'file' as const }];
+  const failures = partial
+    ? [{ inputIndex: 1, itemName: 'b.txt', code: 'baidu_upload_precreate_rejected', message: 'HTTP 200, errno -6' }]
+    : [];
+  const listCloudDirectory = vi.fn()
+    .mockResolvedValueOnce({ id: '/', items: [{ id: 'existing', parentId: '/', name: '现有文件.txt', kind: 'file' }] })
+    .mockRejectedValue({ code: 'credentials_expired', message: '会话失效' });
+  const client = createCloudFake({
+    listCloudDirectory,
+    uploadCloudFiles: vi.fn().mockResolvedValue({ uploaded, failures }),
+  });
+  render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'web' }} restoreOnMount={false} />);
+
+  await screen.findByText('现有文件.txt');
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await confirmAllLocalUploads(user);
+  const receipt = partial ? /成功 1 项，失败 1 项.*HTTP 200, errno -6/ : /已上传 1 项/;
+  expect((await screen.findAllByText(text => receipt.test(text) && text.includes('列表刷新失败')))[0]).toBeVisible();
+  expect(screen.getByText('现有文件.txt')).toBeVisible();
+  expect(listCloudDirectory).toHaveBeenCalledTimes(2);
+  expect(screen.queryByRole('button', { name: /授权并继续/ })).not.toBeInTheDocument();
+  expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
+  expect(client.uploadCloudFiles).toHaveBeenCalledTimes(1);
+
+  await user.click(screen.getByRole('button', { name: '刷新', exact: true }));
+  expect(await screen.findByRole('button', { name: /授权并继续加载目录/ })).toBeVisible();
+  expect(listCloudDirectory).toHaveBeenCalledTimes(3);
+});
+
 it.each([
-  ['baidu_upload_session_required', /百度上传会话未能自动恢复/],
-  ['baidu_upload_verification_required', /百度未接受上传请求/],
-  ['baidu_upload_result_uncertain', /百度未确认上传结果/],
-])('keeps the Baidu account and directory available after %s', async (code, notice) => {
+  ['baidu_upload_session_required', '', /百度上传会话未能自动恢复/],
+  ['baidu_upload_precreate_rejected', 'HTTP 200, errno -6', /百度拒绝创建上传任务，文件尚未开始传输。 HTTP 200, errno -6/],
+  ['baidu_upload_precreate_rejected', 'HTTP 401', /百度拒绝创建上传任务，文件尚未开始传输。 HTTP 401/],
+  ['baidu_upload_precreate_rejected', 'HTTP 401, unexpected response body', /百度拒绝创建上传任务，文件尚未开始传输。$/],
+  ['baidu_upload_verification_required', '', /百度要求在上传前完成网页验证/],
+  ['baidu_upload_result_uncertain', '', /百度未确认上传结果/],
+])('keeps the Baidu account and directory available after %s %s', async (code, message, notice) => {
   const user = userEvent.setup();
   const client = createCloudFake({
     uploadCloudFiles: vi.fn().mockResolvedValue({
-      uploaded: [], failures: [{ inputIndex: 0, itemName: 'a.txt', code, message: '需要网页验证' }],
+      uploaded: [], failures: [{ inputIndex: 0, itemName: 'a.txt', code, message }],
     }),
   });
   render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'web' }} restoreOnMount={false} />);
@@ -2453,6 +2570,77 @@ it.each([
   expect(screen.getByRole('tree')).toBeVisible();
   expect(screen.queryByRole('button', { name: /授权并继续上传|重新网页授权/ })).not.toBeInTheDocument();
   expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
+  expect(client.uploadCloudFiles).toHaveBeenCalledTimes(1);
+});
+
+it('resumes a Baidu password upload once after the user authorizes the same account, keeping only its original failed files and directory', async () => {
+  const user = userEvent.setup();
+  const failure = { inputIndex: 1, itemName: 'b.txt', code: 'baidu_upload_web_session_required', message: '' };
+  const uploadCloudFiles = vi.fn()
+    .mockResolvedValueOnce({ uploaded: [], failures: [
+      { inputIndex: 0, itemName: 'a.txt', code: 'baidu_upload_result_uncertain', message: '' }, failure,
+    ] })
+    .mockResolvedValueOnce({ uploaded: [], failures: [{ ...failure, inputIndex: 0 }] });
+  const client = createCloudFake({ uploadCloudFiles });
+  const account = { id: 'b-1', displayName: 'alice', provider: 'baidu' as const, authMethod: 'password' as const };
+  render(<CloudManager provider="baidu" client={client} initialAccount={account} restoreOnMount={false} />);
+  await user.dblClick(await screen.findByText('归档'));
+  await screen.findByText('说明.txt');
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await confirmAllLocalUploads(user);
+
+  const authorize = { name: /授权并继续上传/ };
+  expect(await screen.findByRole('button', authorize)).toBeVisible();
+  expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
+  expect(uploadCloudFiles).toHaveBeenNthCalledWith(1, 'baidu', 'folder-1', ['C:/a.txt', 'C:/b.txt'], expect.any(Function));
+  await user.click(screen.getByRole('button', authorize));
+  expect(client.beginCloudAuthorization).toHaveBeenCalledWith('baidu', 'b-1');
+  await act(async () => { client.emitAuthorization(account); });
+  expect(uploadCloudFiles).toHaveBeenCalledTimes(1);
+  await act(async () => { client.emitAuthorization({ ...account, id: 'another', authMethod: 'web' }); });
+  expect(await screen.findByText(/授权账号与当前会话不一致/)).toBeVisible();
+  expect(uploadCloudFiles).toHaveBeenCalledTimes(1);
+  await user.click(screen.getByRole('button', authorize));
+  await act(async () => { client.emitAuthorization({ ...account, authMethod: 'web' }); });
+  await waitFor(() => expect(uploadCloudFiles).toHaveBeenCalledTimes(2));
+  expect(uploadCloudFiles).toHaveBeenNthCalledWith(2, 'baidu', 'folder-1', ['C:/b.txt'], expect.any(Function), 'b-1');
+  expect(client.listLocalUploadEntries).toHaveBeenCalledTimes(1);
+  expect(client.listCloudDirectory).toHaveBeenCalledTimes(2);
+  expect(screen.queryByRole('button', authorize)).not.toBeInTheDocument();
+  expect(client.beginCloudAuthorization).toHaveBeenCalledTimes(2);
+});
+
+it('preserves the Baidu upload receipt when the account changes before the authorization window opens', async () => {
+  const user = userEvent.setup();
+  const client = createCloudFake({
+    uploadCloudFiles: vi.fn().mockResolvedValue({
+      uploaded: [], failures: [{ inputIndex: 0, itemName: 'a.txt', code: 'baidu_upload_web_session_required', message: '' }],
+    }),
+    beginCloudAuthorization: vi.fn().mockRejectedValue({ code: 'account_mismatch' }),
+  });
+  render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'password' }} restoreOnMount={false} />);
+  await screen.findByRole('tree');
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await confirmAllLocalUploads(user);
+  await user.click(await screen.findByRole('button', { name: /授权并继续上传/ }));
+  expect(await screen.findByText(/授权账号与当前会话不一致/)).toBeVisible();
+  expect(screen.getByText(/成功 0 项，失败 1 项/)).toBeVisible();
+  expect(client.uploadCloudFiles).toHaveBeenCalledTimes(1);
+});
+
+it.each([[undefined], [2], [0, 0]])('keeps a Baidu upload with unmatchable failed indexes out of the authorization continuation', async (...indexes) => {
+  const user = userEvent.setup();
+  const client = createCloudFake({
+    uploadCloudFiles: vi.fn().mockResolvedValue({ uploaded: [], failures: indexes.map(inputIndex => ({
+      inputIndex, itemName: 'fixture.txt', code: 'baidu_upload_web_session_required', message: '',
+    })) }),
+  });
+  render(<CloudManager provider="baidu" client={client} initialAccount={{ id: 'b-1', displayName: 'alice', provider: 'baidu', authMethod: 'password' }} restoreOnMount={false} />);
+  await screen.findByRole('tree');
+  await user.click(screen.getByRole('button', { name: '上传', exact: true }));
+  await confirmAllLocalUploads(user);
+  expect((await screen.findAllByText(/百度网盘登录已失效/))[0]).toBeVisible();
+  expect(screen.queryByRole('button', { name: /授权并继续上传/ })).not.toBeInTheDocument();
   expect(client.uploadCloudFiles).toHaveBeenCalledTimes(1);
 });
 
@@ -2491,7 +2679,7 @@ it('keeps selected upload paths and retries only authorization-failed files afte
 it.each([
   ['部分成功', [{ id: 'uploaded', parentId: '0', name: '成功.txt', kind: 'file' as const }]],
   ['全部失败', []]
-])('refreshes after an upload %s and reports the retained failures', async (_label, uploaded) => {
+])('refreshes only confirmed uploads after %s and reports the retained failures', async (_label, uploaded) => {
   const user = userEvent.setup();
   const listCloudDirectory = vi.fn()
     .mockResolvedValueOnce({ id: '0', items: [] })
@@ -2510,7 +2698,7 @@ it.each([
 
   await confirmAllLocalUploads(user);
   expect(await screen.findByRole('alert')).toHaveTextContent(`成功 ${uploaded.length} 项，失败 1 项：失败.txt：网络中断`);
-  expect(listCloudDirectory).toHaveBeenCalledTimes(2);
+  expect(listCloudDirectory).toHaveBeenCalledTimes(uploaded.length ? 2 : 1);
 });
 
 it('opens Baidu recycle-bin verification and waits for an explicit retry of permanent deletion', async () => {
@@ -2713,9 +2901,12 @@ it.each([
 });
 
 
-it.each(['shares', 'mkdir', 'upload'] as const)('reports Xunlei local verification failure without login loops: %s', async (operation) => {
+it.each([
+  ['shares', 'metadata_missing'], ['mkdir', 'metadata_missing'], ['upload', 'metadata_missing'],
+  ['shares', 'metadata_expired'], ['mkdir', 'metadata_expired'], ['upload', 'metadata_expired'],
+] as const)('reports Xunlei %s operation failure without asking for a login on %s', async (operation, reason) => {
   const user = userEvent.setup();
-  const failure = { code: 'xunlei_verification_unavailable', message: 'metadata_missing' };
+  const failure = { code: 'xunlei_verification_unavailable', message: reason };
   const client = createCloudFake({
     listCloudShares: vi.fn().mockRejectedValue(failure),
     createCloudDirectory: vi.fn().mockRejectedValue(failure),
@@ -2733,26 +2924,10 @@ it.each(['shares', 'mkdir', 'upload'] as const)('reports Xunlei local verificati
     await user.click(screen.getByRole('button', { name: '上传', exact: true }));
     await confirmAllLocalUploads(user);
   }
-  expect((await screen.findAllByText(/XL-LOCAL-MISSING/)).length).toBeGreaterThan(0);
-  expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
-  expect(client.logoutCloud).not.toHaveBeenCalled();
-});
-
-it('keeps the Xunlei file list and offers explicit authorization when operation verification expires', async () => {
-  const user = userEvent.setup();
-  const client = createCloudFake({
-    listCloudShares: vi.fn().mockRejectedValue({
-      code: 'xunlei_verification_unavailable',
-      message: 'metadata_expired',
-    }),
-  });
-  render(<CloudManager provider="xunlei" client={client} initialAccount={{ id: 'x-1', displayName: 'alice', provider: 'xunlei', authMethod: 'web' }} restoreOnMount={false} />);
-  await user.dblClick(await screen.findByText('我的分享'));
-  expect(await screen.findByText(/XL-LOCAL-EXPIRED/)).toBeVisible();
+  expect((await screen.findAllByText(reason === 'metadata_missing' ? /XL-LOCAL-MISSING/ : /XL-LOCAL-EXPIRED/)).length).toBeGreaterThan(0);
   expect(screen.getByText('报告.pdf')).toBeVisible();
+  expect(screen.queryByRole('button', { name: '重新网页授权' })).not.toBeInTheDocument();
   expect(client.beginCloudAuthorization).not.toHaveBeenCalled();
-  await user.click(screen.getByRole('button', { name: '重新网页授权' }));
-  expect(client.beginCloudAuthorization).toHaveBeenCalledWith('xunlei');
   expect(client.logoutCloud).not.toHaveBeenCalled();
 });
 

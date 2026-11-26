@@ -1,5 +1,4 @@
 //! Object-safe capabilities; protocol selection happens once in the native factory.
-use super::commands::CloudState;
 use super::*;
 use std::path::Path;
 
@@ -172,14 +171,21 @@ pub trait UploadHttp: CloudHttpTransport + CloudUploadTransport {}
 impl<T: CloudHttpTransport + CloudUploadTransport> UploadHttp for T {}
 
 pub trait UploadOps {
+    /// Upload with the credential snapshot bound when this driver was created.
+    /// The caller owns the mutation session; implementations must not reopen it.
     fn upload(
         &mut self,
-        _state: &CloudState,
         _http: &dyn UploadHttp,
         _parent: &str,
         _path: &Path,
     ) -> Result<CloudFile, CloudError> {
         Err(CloudError::ProviderUnsupported)
+    }
+
+    /// Most connectors create a new file identity. Path-addressed connectors
+    /// with an overwrite mode must override this to refuse replacement.
+    fn upload_no_replace(&mut self, http: &dyn UploadHttp, parent: &str, path: &Path) -> Result<CloudFile, CloudError> {
+        self.upload(http, parent, path)
     }
 }
 
@@ -291,13 +297,17 @@ impl<'a> ProviderDriver<'a> {
     }
     pub fn upload(
         &mut self,
-        state: &CloudState,
         http: &dyn UploadHttp,
         parent: &str,
         path: &Path,
     ) -> Result<CloudFile, CloudError> {
         require(self.capabilities.upload)?;
-        self.backend.upload(state, http, parent, path)
+        self.backend.upload(http, parent, path)
+    }
+
+    pub fn upload_no_replace(&mut self, http: &dyn UploadHttp, parent: &str, path: &Path) -> Result<CloudFile, CloudError> {
+        require(self.capabilities.upload)?;
+        self.backend.upload_no_replace(http, parent, path)
     }
 }
 

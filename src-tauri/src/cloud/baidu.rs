@@ -72,10 +72,30 @@ mod tests {
     }
 
     #[test]
+    fn baidu_block_hashes_cover_every_byte_across_short_reads() {
+        let first = vec![b'a'; BAIDU_UPLOAD_BLOCK_SIZE];
+        let tail = b"last block";
+        // The first read stops at 17 bytes, well before the block boundary.
+        let reader = first[..17].chain(&first[17..]).chain(tail.as_slice());
+        let hashes = hash_upload_blocks(reader, (first.len() + tail.len()) as u64).unwrap();
+        assert_eq!(hashes, [format!("{:x}", md5::compute(&first)), format!("{:x}", md5::compute(tail))]);
+    }
+
+    #[test]
+    fn baidu_block_hashes_reject_a_file_shorter_than_its_snapshot() {
+        assert!(matches!(hash_upload_blocks(b"short".as_slice(), 12), Err(QuarkError::InvalidInput(_))));
+    }
+
+    #[test]
     fn baidu_upload_token_rejection_leaves_listed_account_and_never_starts_a_write() {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), b"upload fixture").unwrap();
-        let http = Http::new(vec![json!({"errno":0,"list":[]}), json!({"errno":-6})]);
+        let http = Http::new(vec![
+            json!({"errno":0,"list":[]}),
+            json!({"errno":-6}),
+            json!({"errno":0,"user":{"uk":7}}),
+            json!({"errno":-6}),
+        ]);
         let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
         assert!(client.directory("/").is_ok());
         let error = client.upload_file("/", file.path(), &http).unwrap_err();
@@ -89,9 +109,160 @@ mod tests {
             "baidu_upload_session_required"
         );
         let requests = http.requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 4);
         assert!(requests.iter().all(|request| request.method == "GET"));
         assert!(requests[1].url.contains("/api/gettemplatevariable?"));
+        assert!(requests[2].url.contains("/rest/2.0/xpan/nas?method=uinfo"));
+        assert_eq!(requests[3].url, requests[1].url);
+    }
+
+    #[test]
+    fn baidu_empty_nested_directory_and_share_records_recover_a_cold_session() {
+        let parent = encode_reference(BaiduFileReference { fsid: "7".into(), path: "/a/b".into() }).unwrap();
+        let http = Http::new(vec![
+            json!({"errno":-6}), json!({"uk":7}), json!({"list":[]}),
+            json!({"errno":-6}), json!({"uk":7}), json!({"list":[]}),
+            json!({"errno":-6}), json!({"uk":7}), json!({"list":[]}),
+            json!({"errno":-6}), json!({"uk":7}), json!({"total":100,"used":20}),
+        ]);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
+        assert!(client.directory(&parent).unwrap().items.is_empty());
+        assert!(client.list_shares().unwrap().is_empty());
+        assert!(client.list_recycle_bin().unwrap().items.is_empty());
+        client.storage_capacity().unwrap();
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 12);
+        for group in requests.chunks_exact(3) {
+            assert!(group.iter().all(|request| request.method == "GET"));
+            assert_eq!(group[0].url, group[2].url);
+            assert_eq!(group[0].headers, group[2].headers);
+            assert!(group[1].url.contains("method=uinfo"));
+        }
+    }
+
+    #[test]
+    fn baidu_directory_retries_the_rejected_page_and_keeps_earlier_files() {
+        let batch = (1..=100).map(|id| json!({"fs_id":id,"path":format!("/{id}")})).collect::<Vec<_>>();
+        let http = Http::new(vec![
+            json!({"list":batch}), json!({"errno":-6}), json!({"uk":7}),
+            json!({"list":[{"fs_id":101,"path":"/last"}]}),
+        ]);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
+        let items = client.directory("/").unwrap().items;
+        assert_eq!(items.len(), 102); // Includes the virtual recycle bin.
+        assert_eq!(items[100].name, "last");
+        let requests = http.requests.lock().unwrap();
+        assert!(requests[0].url.contains("page=1"));
+        assert!(requests[1].url.contains("page=2"));
+        assert_eq!(requests[3].url, requests[1].url);
+    }
+
+    #[test]
+    fn baidu_private_reads_distinguish_an_expired_account_from_a_rejected_endpoint() {
+        let http = Http::new(vec![json!({"errno":-6}), json!({"errno":-6})]);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
+        assert!(matches!(client.list_shares(), Err(QuarkError::AuthorizationExpired)));
+        assert_eq!(http.requests.lock().unwrap().len(), 2);
+        let http = Http::new(vec![json!({"errno":-6}), json!({"uk":7}), json!({"errno":-6})]);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
+        assert!(matches!(client.list_shares(), Err(QuarkError::Provider(message)) if message.contains("-6")));
+        assert_eq!(http.requests.lock().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn baidu_write_recovers_only_the_prerequisite_and_does_not_replay_a_rejected_post() {
+        let http = Http::new(vec![
+            json!({"errno":-6}), json!({"uk":7}), json!({"result":{"bdstoken":"valid"}}),
+            json!({"errno":-6}), json!({"uk":7}),
+        ]);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
+        assert!(matches!(client.mkdir("/", "folder"), Err(QuarkError::Provider(message)) if message.contains("-6")));
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert!(requests[1].url.contains("method=uinfo"));
+        assert_eq!(requests[0].url, requests[2].url);
+        assert_eq!(requests.iter().filter(|r| r.method == "POST").count(), 1);
+        assert!(requests[3].url.contains("/api/create?"));
+        assert!(requests[4].url.contains("method=uinfo"));
+    }
+
+    #[test]
+    fn baidu_drive_challenge_stops_without_repeating_the_request_or_asking_for_login() {
+        let http = Http::new(vec![json!({"errno":-20}), json!({"errno":-20}), json!({"errno":-20})]);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
+        assert!(matches!(client.directory("/"), Err(QuarkError::BaiduDriveVerificationRequired)));
+        assert!(matches!(client.mkdir("/", "folder"), Err(QuarkError::BaiduDriveVerificationRequired)));
+        assert!(matches!(client.cancel_shares(&["11".into()]), Err(QuarkError::BaiduDriveVerificationRequired)));
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[2].method, "POST");
+    }
+
+    #[test]
+    fn baidu_explicit_challenge_on_http_401_keeps_login_and_drive_actions_distinct() {
+        let response = CloudHttpResponse {
+            status: 401,
+            body: json!({"errno":-20}).to_string(),
+            ..Default::default()
+        };
+        assert!(matches!(baidu_json(&response), Err(QuarkError::WebAuthorizationRequired)));
+        assert!(matches!(baidu_personal_json(&response, None), Err(QuarkError::BaiduDriveVerificationRequired)));
+        assert!(matches!(share_json(&response), Err(QuarkError::BaiduDriveVerificationRequired)));
+    }
+
+    #[test]
+    fn baidu_upload_initializes_a_cold_session_before_sending_writes() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"upload fixture").unwrap();
+        let http = Http::new(vec![
+            json!({"errno":-6}),
+            json!({"errno":0,"user":{"uk":7}}),
+            json!({"errno":0,"result":{"bdstoken":"token"}}),
+            json!({"errno":0,"uploadid":"upload-fixture","block_list":[]}),
+            json!({"errno":0,"fs_id":42}),
+        ]);
+
+        BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http)
+            .upload_file("/", file.path(), &http)
+            .unwrap();
+
+        let requests = http.requests.lock().unwrap();
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[0].method, "GET");
+        assert!(requests[0].url.contains("/api/gettemplatevariable?"));
+        assert_eq!(requests[1].method, "GET");
+        assert!(requests[1].url.contains("/rest/2.0/xpan/nas?method=uinfo"));
+        assert_eq!(requests[2].method, "GET");
+        assert_eq!(requests[2].url, requests[0].url);
+        assert_eq!(requests[3].method, "POST");
+        assert!(requests[3].url.contains("/api/precreate?"));
+        assert_eq!(requests[4].method, "POST");
+        assert!(requests[4].url.contains("/api/create?"));
+    }
+
+    #[test]
+    fn baidu_upload_distinguishes_expired_account_and_operation_verification() {
+        let http = Http::new(vec![json!({"errno":-6}), json!({"errno":-6})]);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
+        assert!(matches!(client.upload_web_token(), Err(QuarkError::AuthorizationExpired)));
+        assert_eq!(http.requests.lock().unwrap().len(), 2);
+
+        let http = Http::new(vec![json!({"errno":-20})]);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
+        assert!(matches!(client.upload_web_token(), Err(QuarkError::BaiduDriveVerificationRequired)));
+        assert_eq!(http.requests.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn baidu_upload_propagates_malformed_account_response_without_requesting_login() {
+        let http = Http::new(vec![json!({"errno":-6}), json!({"errno":0})]);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
+
+        assert!(matches!(
+            client.upload_web_token(),
+            Err(QuarkError::InvalidResponse)
+        ));
+        assert_eq!(http.requests.lock().unwrap().len(), 2);
     }
 
     #[test]
@@ -99,7 +270,10 @@ mod tests {
         let file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(file.path(), b"upload fixture").unwrap();
         let token = json!({"errno":0,"result":{"bdstoken":"token"}});
-        let http = Http::new(vec![token.clone(), json!({"errno":-20})]);
+        let http = Http::new(vec![
+            token.clone(),
+            json!({"errno":-20,"vcode_str":"fixture-challenge"}),
+        ]);
         let error = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http)
             .upload_file("/", file.path(), &http)
             .unwrap_err();
@@ -127,6 +301,108 @@ mod tests {
         assert_eq!(requests.len(), 3);
         assert_eq!(requests[2].method, "POST");
         assert!(requests[2].url.contains("/api/create?"));
+    }
+
+    #[test]
+    fn baidu_upload_precreate_denial_preserves_status_without_replaying_or_expiring_the_session() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"upload fixture").unwrap();
+        for errno in [-6, 6, -20, 110, 31045] {
+            let mut responses = vec![
+                json!({"errno":0,"result":{"bdstoken":"fixture"}}),
+                json!({"errno":errno,"vcode":"0","errmsg":"untrusted response"}),
+            ];
+            if errno == -6 {
+                responses.push(json!({"errno":0,"user":{"uk":7}}));
+            }
+            responses.push(json!({"errno":0,"list":[]}));
+            let http = Http::new(responses);
+            let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
+            let error = client.upload_file("/", file.path(), &http).unwrap_err();
+            assert!(!error.is_session_level());
+            assert_eq!(
+                serde_json::to_value(&error).unwrap(),
+                json!({"code":"baidu_upload_precreate_rejected","message":format!("HTTP 200, errno {errno}")}),
+            );
+            client.directory("/").unwrap();
+            let requests = http.requests.lock().unwrap();
+            assert_eq!(requests.len(), if errno == -6 { 4 } else { 3 });
+            assert_eq!(requests.iter().filter(|r| r.method == "POST").count(), 1);
+            assert!(requests[1].url.contains("/api/precreate?"));
+        }
+    }
+
+    #[test]
+    fn baidu_upload_checks_account_before_requesting_login_for_a_rejected_precreate() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"upload fixture").unwrap();
+        for method in [CloudAuthMethod::Password, CloudAuthMethod::Web] {
+            for (account_response, expired) in [
+                (json!({"errno":0,"user":{"uk":7}}), false),
+                (json!({"errno":0}), false),
+                (json!({"errno":-6}), true),
+            ] {
+                let session = BaiduSession { auth_method: method, ..BaiduSession::cookie("BDUSS=fixture") };
+                let http = Http::new(vec![
+                    json!({"errno":0,"result":{"bdstoken":"fixture"}}),
+                    json!({"errno":-6}),
+                    account_response,
+                ]);
+                let error = BaiduClient::new(session, &http).upload_file("/", file.path(), &http).unwrap_err();
+                if expired {
+                    assert!(matches!(error, QuarkError::BaiduUploadWebSessionRequired));
+                } else {
+                    assert!(matches!(error, QuarkError::BaiduUploadPrecreateRejected { status: 200, errno: Some(-6) }));
+                }
+                let requests = http.requests.lock().unwrap();
+                assert_eq!(requests.len(), 3);
+                assert_eq!(requests.iter().filter(|r| r.method == "POST").count(), 1);
+                assert!(requests[1].url.contains("/api/precreate?"));
+                assert!(requests[2].method == "GET" && requests[2].url.contains("method=uinfo"));
+            }
+        }
+    }
+
+    #[test]
+    fn baidu_account_outages_never_invalidate_authorization() {
+        for status in [408, 429, 500, 502, 503, 504] {
+            for body in [r#"{"errno":-6}"#, r#"{"errno":-20,"captcha":true}"#, "upstream unavailable"] {
+                let response = CloudHttpResponse { status, body: body.into(), ..Default::default() };
+                assert!(matches!(baidu_json(&response), Err(QuarkError::Transport(_))));
+            }
+        }
+        let expired = CloudHttpResponse { status: 200, body: r#"{"errno":-6}"#.into(), ..Default::default() };
+        assert!(matches!(baidu_json(&expired), Err(QuarkError::AuthorizationExpired)));
+    }
+
+    #[test]
+    fn baidu_upload_precreate_uses_only_explicit_challenges_and_numeric_diagnostics() {
+        for (status, body, code, message) in [
+            (401, "not JSON", "baidu_upload_precreate_rejected", "HTTP 401"),
+            (403, r#"{"error_code":"6","msg":"CAPTCHA"}"#, "baidu_upload_precreate_rejected", "HTTP 403, errno 6"),
+            (503, "upstream", "baidu_upload_precreate_rejected", "HTTP 503"),
+            (401, r#"{"errno":-6,"verify_url":"https://example.invalid/private"}"#,
+                "baidu_upload_verification_required", BaiduUploadAuthStage::Precreate.message()),
+        ] {
+            let response = CloudHttpResponse { status, body: body.into(), ..Default::default() };
+            let error = baidu_json_at_stage(&response, Some(BaiduUploadAuthStage::Precreate)).unwrap_err();
+            assert_eq!(serde_json::to_value(&error).unwrap(), json!({"code": code, "message": message}));
+        }
+    }
+
+    #[test]
+    fn baidu_malformed_commit_receipt_is_uncertain_and_never_replayed() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"fixture").unwrap();
+        let http = Http::new(vec![
+            json!({"errno":0,"result":{"bdstoken":"fixture"}}),
+            json!({"errno":0,"uploadid":"fixture","block_list":[]}),
+            json!({"errno":0,"info":{}}),
+        ]);
+        let result = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http)
+            .upload_file("/", file.path(), &http);
+        assert!(matches!(result, Err(QuarkError::BaiduUploadAuthorizationRequired(BaiduUploadAuthStage::Commit))));
+        assert_eq!(http.requests.lock().unwrap().len(), 3);
     }
 
     #[test]
@@ -165,6 +441,8 @@ mod tests {
                 let stage = match (request.method, endpoint.scheme(), endpoint.host_str(), endpoint.path()) {
                     ("GET", "https", Some("pan.baidu.com"), "/api/list") => "directory",
                     ("GET", "https", Some("pan.baidu.com"), "/api/gettemplatevariable") => "upload_token",
+                    ("GET", "https", Some("pan.baidu.com"), "/rest/2.0/xpan/nas")
+                        if endpoint.query_pairs().any(|(key, value)| key == "method" && value == "uinfo") => "account",
                     _ => return Err(QuarkError::InvalidInput("unexpected probe request".into())),
                 };
                 let response = self.0.send(request)?;
@@ -205,13 +483,30 @@ mod tests {
                 .expect("the selected profile has no saved Baidu session"),
         );
         store.save("baidu", &saved).expect("copy session to memory");
-        let http = ReadOnlyProbe(crate::cloud::ReqwestTransport::new()
-            .unwrap_or_else(|error| panic!("transport unavailable: {}", safe_code(&error))));
-        let session = load_provider_session(CloudProvider::Baidu, &store)
+        let transport = || {
+            ReadOnlyProbe(crate::cloud::ReqwestTransport::new()
+                .unwrap_or_else(|error| panic!("transport unavailable: {}", safe_code(&error))))
+        };
+        let session: BaiduSession = load_provider_session(CloudProvider::Baidu, &store)
             .unwrap_or_else(|error| panic!("session unavailable: {}", safe_code(&error)));
-        let directory = BaiduClient::new(session, &http).directory("/");
-        let upload_token = verify_baidu_upload_session(&store, &http);
-        for (stage, result) in [("directory", directory.map(|_| ())), ("upload_token", upload_token)] {
+        let direct_http = transport();
+        let direct_client = BaiduClient::new(session.clone(), &direct_http);
+        let direct_token = direct_http.send(CloudHttpRequest {
+            method: "GET",
+            url: format!("{PAN}{WEB_TOKEN_PATH}"),
+            headers: direct_client.web_headers(),
+            body: None,
+        }).and_then(|response| baidu_json(&response)).and_then(|value| {
+            required(&value["result"], "bdstoken").map(|_| ())
+        });
+        let upload_token = verify_baidu_upload_session(&store, &transport());
+        let directory_http = transport();
+        let directory = BaiduClient::new(session, &directory_http).directory("/");
+        for (stage, result) in [
+            ("upload_token_without_initialization", direct_token),
+            ("upload_token_with_initialization", upload_token),
+            ("directory_from_fresh_http_session", directory.map(|_| ())),
+        ] {
             match result {
                 Ok(()) => eprintln!("[baidu-live-probe] {stage}=ok"),
                 Err(error) => eprintln!("[baidu-live-probe] {stage}={}", safe_code(&error)),
@@ -239,7 +534,7 @@ mod tests {
         let context =
             json!({"shorturl":"share123","shareid":22,"uk":33,"bdclnd":"verified-cookie"});
         let value = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http)
-            .transfer_share_file(&context, "11")
+            .transfer_share_file(&context, "11", None)
             .unwrap();
         assert_eq!(value["extra"]["list"][0]["to_fs_id"], 99);
         let requests = http.requests.lock().unwrap();
@@ -284,7 +579,7 @@ mod tests {
         let http = running_forever(8);
         let error = BaiduClient::new(BaiduSession::cookie("BDUSS=timeout"), &http)
             .with_poll_sleep(record_sleep)
-            .transfer_share_file(&transfer_context(7001), "11")
+            .transfer_share_file(&transfer_context(7001), "11", None)
             .unwrap_err();
         assert!(matches!(error, QuarkError::BaiduTransferPending), "{error:?}");
         assert!(!error.to_string().contains("无效"));
@@ -299,7 +594,7 @@ mod tests {
         assert!(matches!(
             client(&first)
                 .with_poll_sleep(record_sleep)
-                .transfer_share_file(&transfer_context(7002), "11"),
+                .transfer_share_file(&transfer_context(7002), "11", None),
             Err(QuarkError::BaiduTransferPending)
         ));
         let second = Http::new(vec![
@@ -307,7 +602,7 @@ mod tests {
             json!({"errno":0,"status":"success","task_errno":0,"list":[{"from_fs_id":11,"to_fs_id":99}]}),
         ]);
         let value = client(&second)
-            .transfer_share_file(&transfer_context(7002), "11")
+            .transfer_share_file(&transfer_context(7002), "11", None)
             .unwrap();
         assert_eq!(value["extra"]["list"][0]["to_fs_id"], 99);
         let requests = second.requests.lock().unwrap();
@@ -316,19 +611,59 @@ mod tests {
     }
 
     #[test]
+    fn share_transfer_resumes_after_a_poll_error_and_cookie_rotation_for_the_same_account() {
+        let context = transfer_context(7088);
+        let first = Http::new(vec![
+            json!({"result":{"bdstoken":"one"}}), json!({"errno":0,"task_id":98}),
+            json!({"errno":-20}),
+        ]);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=one"), &first);
+        assert!(matches!(
+            client.transfer_share_file(&context, "11", Some("owner-a")),
+            Err(QuarkError::BaiduDriveVerificationRequired)
+        ));
+        let second = Http::new(vec![
+            json!({"result":{"bdstoken":"two"}}),
+            json!({"errno":0,"status":"success","list":[{"from_fs_id":11,"to_fs_id":99}]}),
+        ]);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=rotated"), &second);
+        assert_ne!(client.transfer_memo_key(&context, "11", Some("owner-a")).unwrap(),
+            client.transfer_memo_key(&context, "11", Some("owner-b")).unwrap());
+        let value = client.transfer_share_file(&context, "11", Some("owner-a")).unwrap();
+        assert_eq!(value["extra"]["list"][0]["to_fs_id"], 99);
+        let requests = second.requests.lock().unwrap();
+        assert!(requests.iter().all(|request| request.method == "GET"));
+        assert!(requests[1].url.contains("taskid=98"));
+    }
+
+    #[test]
+    fn share_transfer_in_progress_blocks_an_overlapping_submit_for_the_same_request() {
+        let http = Http::new(vec![json!({"result":{"bdstoken":"ok"}})]);
+        let client = BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http);
+        let context = transfer_context(7089);
+        let key = client.transfer_memo_key(&context, "11", Some("owner-a")).unwrap();
+        let _active = TransferAttempt::begin(key).unwrap();
+        assert!(matches!(
+            client.transfer_share_file(&context, "11", Some("owner-a")),
+            Err(QuarkError::BaiduTransferPending)
+        ));
+        assert!(http.requests.lock().unwrap().iter().all(|request| request.method == "GET"));
+    }
+
+    #[test]
     fn share_transfer_retry_resubmits_when_the_remembered_task_failed() {
         let first = running_forever(10);
         let client = |http| BaiduClient::new(BaiduSession::cookie("BDUSS=failed"), http);
         let _ = client(&first)
             .with_poll_sleep(record_sleep)
-            .transfer_share_file(&transfer_context(7003), "11");
+            .transfer_share_file(&transfer_context(7003), "11", None);
         let second = Http::new(vec![
             json!({"errno":0,"result":{"bdstoken":"token"}}),
             json!({"errno":0,"status":"failed","task_errno":2}),
             json!({"errno":0,"extra":{"list":[{"from_fs_id":11,"to_fs_id":77}]}}),
         ]);
         let value = client(&second)
-            .transfer_share_file(&transfer_context(7003), "11")
+            .transfer_share_file(&transfer_context(7003), "11", None)
             .unwrap();
         assert_eq!(value["extra"]["list"][0]["to_fs_id"], 77);
         assert!(second.requests.lock().unwrap()[2].url.contains("/share/transfer?"));
@@ -342,10 +677,10 @@ mod tests {
             json!({"errno":0,"status":"failed","task_errno":2}),
         ]);
         let context =
-            json!({"shorturl":"share123","shareid":22,"uk":33,"bdclnd":"verified-cookie"});
+            json!({"shorturl":"share123","shareid":7022,"uk":33,"bdclnd":"verified-cookie"});
         assert!(
             BaiduClient::new(BaiduSession::cookie("BDUSS=fixture"), &http)
-                .transfer_share_file(&context, "11")
+                .transfer_share_file(&context, "11", None)
                 .is_err()
         );
         assert_eq!(http.requests.lock().unwrap().len(), 3);
@@ -883,14 +1218,15 @@ mod tests {
             (json!({"errno":0}), "invalid"),
         ] {
             let credentials = credentials();
+            let mut replies = vec![
+                share_response("<html/>", &[]),
+                share_response(&response.to_string(), &[]),
+            ];
+            if expected == "auth" {
+                replies.push(share_response(r#"{"errno":-6}"#, &[]));
+            }
             let http = ShareHttp {
-                replies: Mutex::new(
-                    vec![
-                        share_response("<html/>", &[]),
-                        share_response(&response.to_string(), &[]),
-                    ]
-                    .into(),
-                ),
+                replies: Mutex::new(replies.into()),
                 requests: Mutex::new(vec![]),
             };
             let adapter =
@@ -902,40 +1238,41 @@ mod tests {
                 match expected {
                     "code" => matches!(result, Err(QuarkError::InvalidInput(_))),
                     "auth" => matches!(result, Err(QuarkError::AuthorizationExpired)),
-                    "web" => matches!(result, Err(QuarkError::WebAuthorizationRequired)),
-                    "captcha" => matches!(result, Err(QuarkError::CaptchaRequired)),
+                    "web" | "captcha" => matches!(result, Err(QuarkError::BaiduDriveVerificationRequired)),
                     _ => matches!(result, Err(QuarkError::InvalidResponse)),
                 },
                 "unexpected verification outcome: {:?}",
                 result.as_ref().err()
             );
             let requests = http.requests.lock().unwrap();
-            assert_eq!(requests.len(), 2);
+            assert_eq!(requests.len(), if expected == "auth" { 3 } else { 2 });
             assert!(requests[1].url.contains("/share/verify?"));
         }
     }
     #[test]
     fn protected_share_list_rejection_is_not_reported_as_wrong_code() {
-        let credentials = credentials();
-        let http = ShareHttp {
-            replies: Mutex::new(
-                vec![
-                    share_response("<html/>", &[]),
-                    share_response(r#"{"errno":0,"randsk":"verified"}"#, &[]),
-                    share_response(r#"{"errno":-9}"#, &[]),
-                ]
-                .into(),
-            ),
-            requests: Mutex::new(vec![]),
-        };
-        let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
-        let mut input = candidate();
-        input.access_code = Some("a123".into());
-        assert!(matches!(
-            adapter.inspect(&input),
-            Err(QuarkError::Provider(_))
-        ));
-        assert_eq!(http.requests.lock().unwrap().len(), 3);
+        for code in [-9, -62] {
+            let credentials = credentials();
+            let http = ShareHttp {
+                replies: Mutex::new(
+                    vec![
+                        share_response("<html/>", &[]),
+                        share_response(r#"{"errno":0,"randsk":"verified"}"#, &[]),
+                        share_response(&json!({"errno":code}).to_string(), &[]),
+                    ]
+                    .into(),
+                ),
+                requests: Mutex::new(vec![]),
+            };
+            let adapter = provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
+            let mut input = candidate();
+            input.access_code = Some("a123".into());
+            assert!(matches!(
+                adapter.inspect(&input),
+                Err(QuarkError::Provider(msg)) if msg.contains(&code.to_string()) && !msg.contains("授权")
+            ));
+            assert_eq!(http.requests.lock().unwrap().len(), 3);
+        }
     }
 
     #[test]
@@ -1123,6 +1460,7 @@ mod tests {
         let http = Http::new(vec![
             json!({"errno":-9}),
             json!({"errno":-6}),
+            json!({"errno":-6}), // Account endpoint confirms expiry.
             json!({"errno":-20}),
             json!({"errno":9019}),
         ]);
@@ -1139,13 +1477,13 @@ mod tests {
         ));
         assert!(matches!(
             adapter.inspect(&candidate()),
-            Err(QuarkError::WebAuthorizationRequired)
+            Err(QuarkError::BaiduDriveVerificationRequired)
         ));
         assert!(matches!(
             adapter.inspect(&candidate()),
-            Err(QuarkError::CaptchaRequired)
+            Err(QuarkError::BaiduDriveVerificationRequired)
         ));
-        assert_eq!(http.requests.lock().unwrap().len(), 4);
+        assert_eq!(http.requests.lock().unwrap().len(), 5);
     }
     #[test]
     fn baidu_share_pages_nested_paths_and_empty_folder_stays_empty() {
@@ -1441,12 +1779,17 @@ mod tests {
             json!({"errno":0,"list":{}}),
         ] {
             let credentials = credentials();
-            let http = Http::new(vec![
+            let confirm_account = error["errno"] == -6;
+            let mut replies = vec![
                 listing(),
                 json!({"user":{"uk":"account-7"}}),
                 json!({"errno":0,"result":{"bdstoken":"write-token"}}),
                 error,
-            ]);
+            ];
+            if confirm_account {
+                replies.push(json!({"user":{"uk":"account-7"}}));
+            }
+            let http = Http::new(replies);
             let adapter =
                 provider_share_adapter(CloudProvider::Baidu, &credentials, &http).unwrap();
             let ShareInspection::Plan(plan) = adapter.inspect(&candidate()).unwrap() else {
@@ -1465,12 +1808,14 @@ mod tests {
                 .plan
                 .transfers
                 .is_empty());
-            assert_eq!(http.requests.lock().unwrap().len(), 4);
+            assert_eq!(http.requests.lock().unwrap().len(), if confirm_account { 5 } else { 4 });
         }
     }
 }
 
 const PAN: &str = "https://pan.baidu.com";
+const WEB_TOKEN_PATH: &str =
+    "/api/gettemplatevariable?clienttype=0&app_id=250528&web=1&fields=%5B%22bdstoken%22%5D";
 const PASSPORT: &str = "https://passport.baidu.com";
 const BAIDU_HOME: &str = "https://www.baidu.com/";
 const BAIDU_WEB_USER_AGENT: &str =
@@ -1531,6 +1876,29 @@ pub struct BaiduSession {
 }
 
 impl BaiduSession {
+    /// Publish exactly the candidate a fresh VD process can use. A successful
+    /// request on the existing HTTP connection may rely on its in-memory jar.
+    pub(crate) fn validated_login_receipt(
+        &self,
+        http: &impl CloudHttpTransport,
+        root: &str,
+        expected_owner: Option<&str>,
+        mut report_stage: impl FnMut(&'static str),
+    ) -> Result<(CloudAccount, Vec<u8>), QuarkError> {
+        let bytes = serde_json::to_vec(self).map_err(|_| QuarkError::Storage)?;
+        let client = BaiduClient::new(self.clone(), http);
+        let account = client.validate_login_for_owner(root, expected_owner, &mut report_stage)?;
+        if let Some(fresh) = http.isolated_session()? {
+            let restored = serde_json::from_slice(&bytes).map_err(|_| QuarkError::Storage)?;
+            BaiduClient::new(restored, fresh.as_ref()).validate_login_for_owner(
+                root, Some(&account.id), report_stage,
+            )?;
+        } else if http.manages_cookie_session() {
+            return Err(QuarkError::InvalidResponse);
+        }
+        Ok((account, bytes))
+    }
+
     pub fn cookie(cookie: impl Into<String>) -> Self {
         Self {
             cookie: cookie.into(),
@@ -1547,7 +1915,7 @@ pub(crate) fn verify_baidu_upload_session(
 ) -> Result<(), QuarkError> {
     let session = load_provider_session(CloudProvider::Baidu, store)?;
     BaiduClient::new(session, http)
-        .web_token_at_stage(Some(BaiduUploadAuthStage::Token))
+        .upload_web_token()
         .map(|_| ())
 }
 
@@ -1851,42 +2219,56 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         headers
     }
 
-    fn request(
+    /// Only authenticated, read-only Pan requests may be replayed here. A
+    /// fresh transport can return -6 until an account GET initializes its
+    /// cookie jar. Preserve the failed page or token request exactly.
+    fn personal_get(
         &self,
-        method: &'static str,
         url: String,
-        body: Option<Value>,
+        headers: BTreeMap<String, String>,
+        stage: Option<BaiduUploadAuthStage>,
     ) -> Result<Value, QuarkError> {
-        let response = self.http.send(CloudHttpRequest {
-            method,
+        let request = CloudHttpRequest {
+            method: "GET",
             url,
-            headers: self.pan_headers(),
-            body: body.map(|value| value.to_string()),
-        })?;
-        baidu_json(&response)
+            headers,
+            body: None,
+        };
+        let response = self.http.send(request.clone())?;
+        match baidu_personal_json(&response, stage) {
+            Err(QuarkError::AuthorizationExpired) => {
+                self.account()?;
+                let response = self.http.send(request)?;
+                match baidu_personal_json(&response, stage) {
+                    Err(QuarkError::AuthorizationExpired) => match stage {
+                        Some(stage) => Err(QuarkError::BaiduUploadAuthorizationRequired(stage)),
+                        None => Err(baidu_request_rejected(&response)),
+                    },
+                    result => result,
+                }
+            }
+            result => result,
+        }
     }
 
-    fn web_request(
+    /// A rejection by a private operation alone does not invalidate the
+    /// account. Confirm expiry via the account endpoint without replaying
+    /// the submitted request.
+    fn personal_operation_result(
         &self,
-        method: &'static str,
-        url: String,
-        body: Option<Value>,
+        response: &CloudHttpResponse,
+        result: Result<Value, QuarkError>,
     ) -> Result<Value, QuarkError> {
-        baidu_json(&self.web_request_response(method, url, body)?)
-    }
-
-    fn web_request_response(
-        &self,
-        method: &'static str,
-        url: String,
-        body: Option<Value>,
-    ) -> Result<CloudHttpResponse, QuarkError> {
-        self.http.send(CloudHttpRequest {
-            method,
-            url,
-            headers: self.web_headers(),
-            body: body.map(|value| value.to_string()),
-        })
+        match result {
+            Err(QuarkError::AuthorizationExpired) => {
+                self.account()?;
+                Err(baidu_request_rejected(response))
+            }
+            Err(QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired) => {
+                Err(QuarkError::BaiduDriveVerificationRequired)
+            }
+            other => other,
+        }
     }
 
     pub fn account(&self) -> Result<CloudAccount, QuarkError> {
@@ -1912,11 +2294,11 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
     }
 
     pub fn storage_capacity(&self) -> Result<CloudStorageCapacity, QuarkError> {
-        let value = self.request(
-            "GET",
+        let value = self.personal_get(
             format!(
                 "{PAN}/api/quota?checkexpire=1&checkfree=1&channel=chunlei&web=1&app_id=250528&clienttype=0"
             ),
+            self.pan_headers(),
             None,
         )?;
         CloudStorageCapacity::from_json(&value["total"], &value["used"], false)
@@ -1932,15 +2314,72 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             .filter(|id| !id.is_empty()))
     }
 
+    fn owner_fingerprint(&self) -> Result<Option<String>, QuarkError> {
+        self.stable_account_id()?
+            .map(|id| super::share::stable_owner_fingerprint(CloudProvider::Baidu, &id))
+            .transpose()
+    }
+
     fn account_value(&self) -> Result<Value, QuarkError> {
-        self.request(
-            "GET",
-            format!("{PAN}/rest/2.0/xpan/nas?method=uinfo&web=1"),
-            None,
-        )
+        // This is the authority for confirming expiry. It must never enter
+        // personal_get, which can call back into account on a rejected page.
+        let response = self.http.send(CloudHttpRequest {
+            method: "GET",
+            url: format!("{PAN}/rest/2.0/xpan/nas?method=uinfo&web=1"),
+            headers: self.pan_headers(),
+            body: None,
+        })?;
+        baidu_json(&response)
     }
 
     pub fn directory(&self, parent: &str) -> Result<CloudDirectory, QuarkError> {
+        self.list_directory(parent, false, |url| self.personal_get(url, self.pan_headers(), None))
+    }
+
+    /// A new login must identify the account and read the root without the
+    /// recovery used by an already-authorized directory listing.
+    pub(crate) fn validate_login_candidate(
+        &self,
+        root: &str,
+        report_stage: impl FnMut(&'static str),
+    ) -> Result<CloudAccount, QuarkError> {
+        self.validate_login_for_owner(root, None, report_stage)
+    }
+
+    fn validate_login_for_owner(
+        &self,
+        root: &str,
+        expected_owner: Option<&str>,
+        mut report_stage: impl FnMut(&'static str),
+    ) -> Result<CloudAccount, QuarkError> {
+        report_stage("账号信息校验");
+        let account = self.account()?;
+        if expected_owner.is_some_and(|id| id != account.id) {
+            return Err(QuarkError::AccountMismatch);
+        }
+        report_stage("目录访问校验");
+        self.validate_login_directory(root)?;
+        Ok(account)
+    }
+
+    fn validate_login_directory(&self, parent: &str) -> Result<(), QuarkError> {
+        self.list_directory(parent, true, |url| {
+            let response = self.http.send(CloudHttpRequest {
+                method: "GET",
+                url,
+                headers: self.pan_headers(),
+                body: None,
+            })?;
+            baidu_json(&response)
+        }).map(|_| ())
+    }
+
+    fn list_directory(
+        &self,
+        parent: &str,
+        first_page_only: bool,
+        read_page: impl Fn(String) -> Result<Value, QuarkError>,
+    ) -> Result<CloudDirectory, QuarkError> {
         let parent = parse_parent_reference(parent)?;
         // BaiduPCS-Go's current directory implementation uses the Pan web
         // listing route (not xpan/file) with this small, fixed query shape.
@@ -1949,14 +2388,10 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         let mut files = Vec::new();
         let mut seen = BTreeSet::new();
         for page in 1..=10_000 {
-            let value = self.request(
-                "GET",
-                format!(
-                    "{PAN}/api/list?dir={}&order=name&desc=0&clienttype=0&num=100&page={page}",
-                    encoded(&parent.path)
-                ),
-                None,
-            )?;
+            let value = read_page(format!(
+                "{PAN}/api/list?dir={}&order=name&desc=0&clienttype=0&num=100&page={page}",
+                encoded(&parent.path)
+            ))?;
             let batch = value
                 .get("list")
                 .and_then(Value::as_array)
@@ -1972,7 +2407,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
                 }
                 files.push(file.clone());
             }
-            if batch.len() < 100 {
+            if first_page_only || batch.len() < 100 {
                 break;
             }
             if page == 10_000 {
@@ -2038,9 +2473,9 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         let mut items = Vec::new();
         let mut seen = BTreeSet::new();
         for page in 1..=10_000 {
-            let value = self.web_request(
-                "GET",
+            let value = self.personal_get(
                 format!("{PAN}/api/recycle/list/?num=100&page={page}&web=1"),
+                self.web_headers(),
                 None,
             )?;
             let files = value
@@ -2136,19 +2571,25 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         baidu_share_from_value(&value, Some(file_ids), Some(&pass_code))
     }
 
-    fn transfer_share_file(&self, context: &Value, file_id: &str) -> Result<Value, QuarkError> {
+    fn transfer_share_file(
+        &self,
+        context: &Value,
+        file_id: &str,
+        owner: Option<&str>,
+    ) -> Result<Value, QuarkError> {
         let token = self.web_token()?;
-        let key = self.transfer_memo_key(context, file_id)?;
-        if let Some(task_id) = remembered_transfer_task(&key) {
+        let key = self.transfer_memo_key(context, file_id, owner)?;
+        let mut attempt = TransferAttempt::begin(key)?;
+        if let Some(task_id) = &attempt.task_id {
             // A previous attempt timed out while the server may still be
             // copying. Resume that task instead of creating a `name(1)` copy.
-            match self.poll_transfer_task(context, &token, &task_id)? {
+            match self.poll_transfer_task(context, &token, task_id)? {
                 TransferPoll::Done(value) => {
-                    forget_transfer_task(&key);
+                    attempt.task_id = None;
                     return Ok(value);
                 }
                 TransferPoll::Pending => return Err(QuarkError::BaiduTransferPending),
-                TransferPoll::Failed => forget_transfer_task(&key),
+                TransferPoll::Failed => attempt.task_id = None,
             }
         }
         let value = self.submit_share_transfer(context, &token, file_id)?;
@@ -2166,23 +2607,41 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             .ok_or(QuarkError::InvalidResponse)?;
         // Valid asynchronous transfers may return only a task ID. Resolve the
         // exact resulting file ID before journalling it or requesting bytes.
+        // Keep the receipt even if a later poll fails due to a network error,
+        // an expired session or malformed response. Retrying must poll this ID.
+        attempt.task_id = Some(task_id.clone());
         match self.poll_transfer_task(context, &token, &task_id)? {
-            TransferPoll::Done(value) => Ok(value),
-            TransferPoll::Failed => Err(QuarkError::Provider("百度分享无效或请求被拒绝".into())),
-            TransferPoll::Pending => {
-                remember_transfer_task(&key, &task_id);
-                Err(QuarkError::BaiduTransferPending)
+            TransferPoll::Done(value) => {
+                attempt.task_id = None;
+                Ok(value)
             }
+            TransferPoll::Failed => {
+                attempt.task_id = None;
+                Err(QuarkError::Provider("百度分享无效或请求被拒绝".into()))
+            }
+            TransferPoll::Pending => Err(QuarkError::BaiduTransferPending),
         }
     }
 
-    fn transfer_memo_key(&self, context: &Value, file_id: &str) -> Result<String, QuarkError> {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.session.cookie.hash(&mut hasher);
+    fn transfer_memo_key(
+        &self,
+        context: &Value,
+        file_id: &str,
+        owner: Option<&str>,
+    ) -> Result<String, QuarkError> {
+        let identity = match owner {
+            Some(owner) => format!("account:{owner}"),
+            None => {
+                // If the provider omitted its account ID, never share a receipt
+                // between two different credential snapshots.
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                self.session.cookie.hash(&mut hasher);
+                format!("session:{:x}", hasher.finish())
+            }
+        };
         Ok(format!(
-            "{:x}:{}:{}:{}",
-            hasher.finish(),
+            "{identity}:{}:{}:{}",
             numeric_field(context, "shareid")?,
             numeric_field(context, "uk")?,
             file_id
@@ -2215,7 +2674,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             bdclnd,
             Some(&referer),
         )?;
-        share_json(&response)
+        self.personal_operation_result(&response, share_json(&response))
     }
 
     /// Polls with exponential backoff until the task finishes, fails
@@ -2243,7 +2702,8 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
                 bdclnd,
                 Some(&referer),
             )?;
-            if let Some(outcome) = classify_transfer_task(&share_json(&response)?)? {
+            let value = self.personal_operation_result(&response, share_json(&response))?;
+            if let Some(outcome) = classify_transfer_task(&value)? {
                 return Ok(outcome);
             }
             let delay = transfer_poll_delay(attempt);
@@ -2259,11 +2719,11 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
     pub fn list_shares(&self) -> Result<Vec<CloudShare>, QuarkError> {
         let mut shares = Vec::new();
         for page in 1..=10_000 {
-            let value = self.web_request(
-                "GET",
+            let value = self.personal_get(
                 format!(
                     "{PAN}/share/record?channel=chunlei&clienttype=0&app_id=250528&web=1&page={page}&num=100&order=time&desc=1"
                 ),
+                self.web_headers(),
                 None,
             )?;
             let records = value
@@ -2358,7 +2818,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         {
             return Err(QuarkError::BaiduOperationVerificationRequired);
         }
-        baidu_json(&response).map(|_| ())
+        self.personal_operation_result(&response, baidu_json(&response)).map(|_| ())
     }
 
     pub(crate) fn trash_transferred_files(&self, ids: &[String]) -> Result<(), QuarkError> {
@@ -2454,6 +2914,25 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         local_path: &Path,
         upload_http: &U,
     ) -> Result<CloudFile, QuarkError> {
+        self.upload_file_inner(parent, local_path, upload_http, false)
+    }
+
+    pub fn upload_file_no_replace<U: CloudUploadTransport>(
+        &self,
+        parent: &str,
+        local_path: &Path,
+        upload_http: &U,
+    ) -> Result<CloudFile, QuarkError> {
+        self.upload_file_inner(parent, local_path, upload_http, true)
+    }
+
+    fn upload_file_inner<U: CloudUploadTransport>(
+        &self,
+        parent: &str,
+        local_path: &Path,
+        upload_http: &U,
+        no_replace: bool,
+    ) -> Result<CloudFile, QuarkError> {
         let snapshot = super::UploadFileSnapshot::capture(local_path)?;
         let parent = parse_parent_reference(parent)?;
         let (name, size) = local_file_metadata(local_path)?;
@@ -2470,7 +2949,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
                 ("size", size.to_string()),
                 ("isdir", "0".into()),
                 ("autoinit", "1".into()),
-                ("rtype", "3".into()),
+                ("rtype", if no_replace { "0" } else { "3" }.into()),
                 ("block_list", json!(blocks).to_string()),
             ]),
         )?;
@@ -2507,19 +2986,26 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             validate_slice_response(&response, &blocks[part])?;
         }
         snapshot.validate()?;
+        let mut commit = vec![
+            ("path", path),
+            ("size", size.to_string()),
+            ("isdir", "0".into()),
+            ("uploadid", upload_id),
+            ("block_list", json!(blocks).to_string()),
+        ];
+        // Keep the existing desktop policy, but never fall back to replacement
+        // when an Agent request races with another writer after preflight.
+        if no_replace {
+            commit.push(("rtype", "0".into()));
+        }
         let committed = self.upload_form(
             BaiduUploadAuthStage::Commit,
             "/api/create",
             &write_query(&token, "a=commit"),
-            form(&[
-                ("path", path),
-                ("size", size.to_string()),
-                ("isdir", "0".into()),
-                ("uploadid", upload_id),
-                ("block_list", json!(blocks).to_string()),
-            ]),
+            form(&commit),
         )?;
         upload_file_result(&committed, &parent, &name, size)
+            .map_err(|error| baidu_upload_auth_error(BaiduUploadAuthStage::Commit, error))
     }
 
     pub fn download(&self, id: &str) -> Result<BaiduDownload, QuarkError> {
@@ -2637,7 +3123,13 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
             ("devuid", devuid.as_str()),
             ("cuid", devuid.as_str()),
         ]);
-        let value = self.request("POST", endpoint.into(), None)?;
+        let response = self.http.send(CloudHttpRequest {
+            method: "POST",
+            url: endpoint.into(),
+            headers: self.pan_headers(),
+            body: None,
+        })?;
+        let value = self.personal_operation_result(&response, baidu_json(&response))?;
         let urls = value
             .get("urls")
             .and_then(Value::as_array)
@@ -2676,20 +3168,11 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
     }
 
     fn upload_web_token(&self) -> Result<String, QuarkError> {
-        let stage = BaiduUploadAuthStage::Token;
-        self.web_token_at_stage(Some(stage))
-            .map_err(|error| baidu_upload_auth_error(stage, error))
+        self.web_token_at_stage(Some(BaiduUploadAuthStage::Token))
     }
 
     fn web_token_at_stage(&self, stage: Option<BaiduUploadAuthStage>) -> Result<String, QuarkError> {
-        let response = self.web_request_response(
-            "GET",
-            format!(
-                "{PAN}/api/gettemplatevariable?clienttype=0&app_id=250528&web=1&fields=%5B%22bdstoken%22%5D"
-            ),
-            None,
-        )?;
-        let value = baidu_json_at_stage(&response, stage)?;
+        let value = self.personal_get(format!("{PAN}{WEB_TOKEN_PATH}"), self.web_headers(), stage)?;
         required(
             value.get("result").ok_or(QuarkError::InvalidResponse)?,
             "bdstoken",
@@ -2728,7 +3211,8 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
     }
 
     fn web_form(&self, path: &str, query: &str, body: String) -> Result<Value, QuarkError> {
-        baidu_json(&self.web_form_response(path, query, body)?)
+        let response = self.web_form_response(path, query, body)?;
+        self.personal_operation_result(&response, baidu_json(&response))
     }
 
     fn upload_form(
@@ -2738,9 +3222,23 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         query: &str,
         body: String,
     ) -> Result<Value, QuarkError> {
-        self.web_form_response(path, query, body)
-            .and_then(|response| baidu_json_at_stage(&response, Some(stage)))
-            .map_err(|error| baidu_upload_auth_error(stage, error))
+        let result = self.web_form_response(path, query, body)
+            .and_then(|response| {
+                if stage == BaiduUploadAuthStage::Commit && response.status >= 500 {
+                    return Err(QuarkError::BaiduUploadAuthorizationRequired(stage));
+                }
+                baidu_json_at_stage(&response, Some(stage))
+            })
+            .map_err(|error| baidu_upload_auth_error(stage, error));
+        if matches!(result, Err(QuarkError::BaiduUploadPrecreateRejected { status: 200, errno: Some(-6) })) {
+            // A rejected write can coexist with a valid login. Only the account
+            // endpoint can confirm expiry. Never replay the POST to diagnose it.
+            let identity = self.account();
+            if matches!(identity, Err(QuarkError::AuthorizationExpired | QuarkError::NotAuthorized)) {
+                return Err(QuarkError::BaiduUploadWebSessionRequired);
+            }
+        }
+        result
     }
 
     fn web_form_response(
@@ -2960,8 +3458,7 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         } else {
             BaiduClient::new(session.clone(), http)
         };
-        let validated_account = client.account()?;
-        client.directory("/")?;
+        let validated_account = client.validate_login_candidate("/", |_| {})?;
         let final_cookies = http.cookies_for_url(PAN)?;
         if !final_cookies.is_empty() {
             session = parse_baidu_web_session(&final_cookies)?;
@@ -2972,11 +3469,15 @@ impl<'a, T: CloudHttpTransport + ?Sized> BaiduClient<'a, T> {
         // different host/domain duplicate than the final serialized snapshot;
         // accepting only the jar-backed requests can persist a session that
         // immediately fails with errno -6 in a fresh production transport.
-        let persisted = BaiduClient::new(session.clone(), http);
-        if persisted.account()?.id != validated_account.id {
-            return Err(QuarkError::AuthorizationExpired);
+        if let Some(fresh) = http.isolated_session()? {
+            BaiduClient::new(session.clone(), fresh.as_ref())
+                .validate_login_for_owner("/", Some(&validated_account.id), |_| {})?;
+        } else if !http.manages_cookie_session() {
+            BaiduClient::new(session.clone(), http)
+                .validate_login_for_owner("/", Some(&validated_account.id), |_| {})?;
+        } else {
+            return Err(QuarkError::InvalidResponse);
         }
-        persisted.directory("/")?;
         Ok(session)
     }
 }
@@ -2997,26 +3498,30 @@ fn local_file_metadata(path: &Path) -> Result<(String, u64), QuarkError> {
 }
 
 fn baidu_block_hashes(path: &Path, size: u64) -> Result<Vec<String>, QuarkError> {
-    let mut file = std::fs::File::open(path)
+    let file = std::fs::File::open(path)
         .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
-    let block_count = usize::try_from(
-        (size + BAIDU_UPLOAD_BLOCK_SIZE as u64 - 1) / BAIDU_UPLOAD_BLOCK_SIZE as u64,
-    )
-    .map_err(|_| QuarkError::InvalidInput("文件过大，无法上传".into()))?;
-    if block_count == 0 {
+    hash_upload_blocks(file, size)
+}
+
+fn hash_upload_blocks(mut reader: impl Read, size: u64) -> Result<Vec<String>, QuarkError> {
+    if size == 0 {
         return Err(QuarkError::InvalidInput("不能上传空文件".into()));
     }
-    let mut hashes = Vec::with_capacity(block_count);
-    for _ in 0..block_count {
-        let mut bytes = vec![0; BAIDU_UPLOAD_BLOCK_SIZE];
-        let read = file
-            .read(&mut bytes)
-            .map_err(|_| QuarkError::InvalidInput("无法读取选中的本地文件".into()))?;
-        if read == 0 {
-            return Err(QuarkError::InvalidInput("本地文件在上传前发生变化".into()));
-        }
-        bytes.truncate(read);
-        hashes.push(format!("{:x}", md5::compute(bytes)));
+    let mut remaining = size;
+    let mut buffer = vec![0; size.min(BAIDU_UPLOAD_BLOCK_SIZE as u64) as usize];
+    let mut hashes = Vec::new();
+    while remaining > 0 {
+        let len = remaining.min(buffer.len() as u64) as usize;
+        let block = &mut buffer[..len];
+        reader.read_exact(block).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::UnexpectedEof {
+                QuarkError::InvalidInput("本地文件在上传前发生变化".into())
+            } else {
+                QuarkError::InvalidInput("无法读取选中的本地文件".into())
+            }
+        })?;
+        hashes.push(format!("{:x}", md5::compute(block)));
+        remaining -= len as u64;
     }
     Ok(hashes)
 }
@@ -3072,16 +3577,47 @@ fn upload_file_result(
     })
 }
 
+fn baidu_personal_json(
+    response: &CloudHttpResponse,
+    stage: Option<BaiduUploadAuthStage>,
+) -> Result<Value, QuarkError> {
+    match baidu_json_at_stage(response, stage) {
+        Err(QuarkError::WebAuthorizationRequired | QuarkError::CaptchaRequired) => {
+            Err(QuarkError::BaiduDriveVerificationRequired)
+        }
+        result => result,
+    }
+}
+
+fn baidu_request_rejected(response: &CloudHttpResponse) -> QuarkError {
+    let errno = serde_json::from_str::<Value>(&response.body).ok()
+        .and_then(|value| baidu_response_errno(&value));
+    match errno {
+        Some(errno) => QuarkError::Provider(format!(
+            "百度网盘拒绝请求（错误码 {errno}，HTTP {}）", response.status
+        )),
+        None => QuarkError::Provider(format!("HTTP {}", response.status)),
+    }
+}
+
 fn baidu_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
     baidu_json_at_stage(response, None)
 }
 
 fn baidu_upload_auth_error(stage: BaiduUploadAuthStage, error: QuarkError) -> QuarkError {
     match error {
-        QuarkError::AuthorizationExpired
-        | QuarkError::NotAuthorized
+        QuarkError::Transport(_) | QuarkError::InvalidResponse if stage == BaiduUploadAuthStage::Commit => {
+            QuarkError::BaiduUploadAuthorizationRequired(stage)
+        }
+        QuarkError::AuthorizationExpired | QuarkError::NotAuthorized => {
+            QuarkError::BaiduUploadAuthorizationRequired(stage)
+        }
+        QuarkError::BaiduDriveVerificationRequired
         | QuarkError::WebAuthorizationRequired
-        | QuarkError::CaptchaRequired => QuarkError::BaiduUploadAuthorizationRequired(stage),
+        | QuarkError::CaptchaRequired => match stage {
+            BaiduUploadAuthStage::Token => QuarkError::BaiduDriveVerificationRequired,
+            _ => QuarkError::BaiduUploadAuthorizationRequired(stage),
+        },
         other => other,
     }
 }
@@ -3096,30 +3632,47 @@ fn baidu_json_at_stage(
             eprintln!("[baidu-upload] stage={stage:?} http={} errno={errno:?}", response.status);
         }
     };
-    if response.status == 401 {
+    let precreate = upload_stage == Some(BaiduUploadAuthStage::Precreate);
+    let successful_http = (200..300).contains(&response.status);
+    if !precreate && (matches!(response.status, 408 | 429) || response.status >= 500) {
         log_upload(None);
-        return Err(QuarkError::AuthorizationExpired);
+        return Err(QuarkError::Transport(format!("百度网盘暂时不可用（HTTP {}）", response.status)));
     }
+    let precreate_rejection = |errno| QuarkError::BaiduUploadPrecreateRejected {
+        status: response.status,
+        errno,
+    };
     let value: Value = serde_json::from_str(&response.body).map_err(|_| {
         log_upload(None);
-        QuarkError::InvalidResponse
+        if precreate && !successful_http {
+            precreate_rejection(None)
+        } else if response.status == 401 {
+            QuarkError::AuthorizationExpired
+        } else {
+            QuarkError::InvalidResponse
+        }
     })?;
-    let errno = ["errno", "error_code", "err_no"]
-        .iter()
-        .filter_map(|key| value.get(key).and_then(baidu_error_number))
-        .find(|code| *code != 0);
+    let errno = baidu_response_errno(&value);
     log_upload(errno);
+    if precreate {
+        // Passport error numbers have different meanings on the drive upload endpoint.
+        // Require challenge details from this operation before asking the user to verify.
+        if challenge_fields(&value) {
+            return Err(QuarkError::BaiduUploadAuthorizationRequired(BaiduUploadAuthStage::Precreate));
+        }
+        if errno.is_some() || !successful_http {
+            return Err(precreate_rejection(errno));
+        }
+        return Ok(value);
+    }
     if challenge(&value) {
         return Err(QuarkError::WebAuthorizationRequired);
     }
+    if response.status == 401 {
+        return Err(QuarkError::AuthorizationExpired);
+    }
     if let Some(errno) = errno {
         if matches!(errno, -6 | -7 | 110 | 111 | 31045) {
-            if diagnostic && upload_stage.is_none() {
-                return Err(QuarkError::Provider(format!(
-                    "百度授权拒绝（errno {errno}，HTTP {}）",
-                    response.status
-                )));
-            }
             return Err(QuarkError::AuthorizationExpired);
         }
         return Err(QuarkError::Provider(format!(
@@ -3139,7 +3692,11 @@ fn challenge(value: &Value) -> bool {
             value.get(key).and_then(baidu_error_number),
             Some(-20 | 6 | 16 | 257 | 9019 | 120021 | 400031 | 400023 | 400101 | 500001 | 500002)
         )
-    }) || [
+    }) || challenge_fields(value)
+}
+
+fn challenge_fields(value: &Value) -> bool {
+    [
         "captcha",
         "vcode",
         "vcode_str",
@@ -3151,9 +3708,24 @@ fn challenge(value: &Value) -> bool {
     .any(|key| {
         value
             .get(key)
-            .is_some_and(|field| field.as_str().is_some_and(|s| !s.is_empty()))
+            .is_some_and(|field| match field {
+                Value::String(text) => {
+                    let text = text.trim();
+                    !text.is_empty() && text != "0" && !text.eq_ignore_ascii_case("false")
+                }
+                Value::Bool(flag) => *flag && matches!(*key, "captcha" | "vcode"),
+                _ => false,
+            })
     })
 }
+
+fn baidu_response_errno(value: &Value) -> Option<i64> {
+    ["errno", "error_code", "err_no"]
+        .iter()
+        .filter_map(|key| value.get(key).and_then(baidu_error_number))
+        .find(|code| *code != 0)
+}
+
 fn baidu_error_number(value: &Value) -> Option<i64> {
     value.as_i64().or_else(|| value.as_str()?.parse().ok())
 }
@@ -3431,9 +4003,6 @@ impl<T: CloudHttpTransport + ?Sized> BaiduClient<'_, T> {
             headers: page_headers,
             body: None,
         })?;
-        if page.status == 401 {
-            return Err(QuarkError::AuthorizationExpired);
-        }
         if !(200..300).contains(&page.status) {
             return Err(QuarkError::Provider(
                 "百度分享验证页面暂时无法访问，请稍后重试".into(),
@@ -3461,7 +4030,7 @@ impl<T: CloudHttpTransport + ?Sized> BaiduClient<'_, T> {
                 ("vcode_str", "".into()),
             ])),
         })?;
-        let value = share_json(&response).map_err(|error| {
+        let value = self.personal_operation_result(&response, share_json(&response)).map_err(|error| {
             // Do not turn login expiry or a captcha challenge into a password error.
             let errno = serde_json::from_str::<Value>(&response.body)
                 .ok()
@@ -3568,7 +4137,12 @@ fn classify_transfer_task(value: &Value) -> Result<Option<TransferPoll>, QuarkEr
     Ok(Some(TransferPoll::Done(json!({"extra":{"list":list}}))))
 }
 
-type TransferTasks = std::collections::HashMap<String, String>;
+enum TransferTaskState {
+    InFlight,
+    Pending(String),
+}
+
+type TransferTasks = std::collections::HashMap<String, TransferTaskState>;
 static TRANSFER_TASKS: std::sync::Mutex<Option<TransferTasks>> = std::sync::Mutex::new(None);
 
 fn with_transfer_tasks<R>(f: impl FnOnce(&mut TransferTasks) -> R) -> R {
@@ -3576,52 +4150,54 @@ fn with_transfer_tasks<R>(f: impl FnOnce(&mut TransferTasks) -> R) -> R {
     f(guard.get_or_insert_with(Default::default))
 }
 
-fn remembered_transfer_task(key: &str) -> Option<String> {
-    with_transfer_tasks(|tasks| tasks.get(key).cloned())
+struct TransferAttempt {
+    key: String,
+    task_id: Option<String>,
 }
 
-fn remember_transfer_task(key: &str, task_id: &str) {
-    with_transfer_tasks(|tasks| {
-        tasks.insert(key.to_owned(), task_id.to_owned());
-    });
+impl TransferAttempt {
+    fn begin(key: String) -> Result<Self, QuarkError> {
+        with_transfer_tasks(|tasks| {
+            let task_id = match tasks.insert(key.clone(), TransferTaskState::InFlight) {
+                Some(TransferTaskState::InFlight) => return Err(QuarkError::BaiduTransferPending),
+                Some(TransferTaskState::Pending(id)) => Some(id),
+                None => None,
+            };
+            Ok(Self { key, task_id })
+        })
+    }
 }
 
-fn forget_transfer_task(key: &str) {
-    with_transfer_tasks(|tasks| {
-        tasks.remove(key);
-    });
+impl Drop for TransferAttempt {
+    fn drop(&mut self) {
+        with_transfer_tasks(|tasks| {
+            if let Some(id) = self.task_id.take() {
+                tasks.insert(self.key.clone(), TransferTaskState::Pending(id));
+            } else {
+                tasks.remove(&self.key);
+            }
+        });
+    }
 }
 
 fn share_json(response: &CloudHttpResponse) -> Result<Value, QuarkError> {
+    let value: Value = match serde_json::from_str(&response.body) {
+        Ok(value) => value,
+        Err(_) if response.status == 401 => return Err(QuarkError::AuthorizationExpired),
+        Err(_) => return Err(QuarkError::InvalidResponse),
+    };
+    if challenge(&value) {
+        return Err(QuarkError::BaiduDriveVerificationRequired);
+    }
     if response.status == 401 {
         return Err(QuarkError::AuthorizationExpired);
     }
-    let value: Value =
-        serde_json::from_str(&response.body).map_err(|_| QuarkError::InvalidResponse)?;
     let code = value["errno"].as_i64().ok_or(QuarkError::InvalidResponse)?;
-    if code == -20
-        || matches!(
-            value["err_no"].as_i64(),
-            Some(6 | 16 | 257 | 120021 | 400031)
-        )
-        || ["captcha", "vcode", "vcode_str", "codeString"]
-            .iter()
-            .any(|key| {
-                value
-                    .get(key)
-                    .is_some_and(|v| v.as_str().is_some_and(|s| !s.is_empty()))
-            })
-    {
-        return Err(QuarkError::WebAuthorizationRequired);
-    }
     if matches!(code, -6 | -7 | 111) {
         return Err(QuarkError::AuthorizationExpired);
     }
-    if code == 9019 {
-        return Err(QuarkError::CaptchaRequired);
-    }
     if code != 0 || !(200..300).contains(&response.status) {
-        return Err(QuarkError::Provider("百度分享无效或请求被拒绝".into()));
+        return Err(baidu_request_rejected(response));
     }
     Ok(value)
 }
@@ -3677,18 +4253,16 @@ impl ShareInspect for BaiduShareAdapter<'_> {
                     context["bdclnd"].as_str().unwrap_or(""),
                     None,
                 )?;
-                let raw: Value = serde_json::from_str(&response.body)
-                    .map_err(|_| QuarkError::InvalidResponse)?;
-                if response.status == 200 && raw["errno"].as_i64() == Some(-9) {
-                    return if context["bdclnd"].as_str().unwrap_or("").is_empty() {
-                        Ok(ShareInspection::AccessCodeRequired)
-                    } else {
-                        Err(QuarkError::Provider(
-                            "百度分享验证已通过，但文件列表访问失败，请重试或重新网页授权".into(),
-                        ))
-                    };
+                let result = share_json(&response);
+                if matches!(result, Err(QuarkError::Provider(_)))
+                    && response.status == 200
+                    && context["bdclnd"].as_str().unwrap_or("").is_empty()
+                    && serde_json::from_str::<Value>(&response.body).ok()
+                        .and_then(|raw| raw["errno"].as_i64()) == Some(-9)
+                {
+                    return Ok(ShareInspection::AccessCodeRequired);
                 }
-                let value = share_json(&response)?;
+                let value = client.personal_operation_result(&response, result)?;
                 // `/share/list` is the currently supported endpoint.  Unlike
                 // the retired `/share/wxlist`, it returns the file list and
                 // share metadata at the top level rather than in `data`.
@@ -3777,19 +4351,20 @@ impl ShareTransfer for BaiduShareAdapter<'_> {
         &self,
         _: &CloudShareResolvedEntry,
     ) -> Result<Option<String>, QuarkError> {
-        self.client()?
-            .stable_account_id()?
-            .map(|id| super::share::stable_owner_fingerprint(CloudProvider::Baidu, &id))
-            .transpose()
+        self.client()?.owner_fingerprint()
     }
     fn transfer(
         &self,
         entry: &CloudShareResolvedEntry,
         store: &CloudSharePlanStore,
     ) -> Result<super::commands::ResolvedCloudDownload, QuarkError> {
-        let owner = self.transfer_owner_fingerprint(entry)?;
         let client = self.client()?;
-        let value = client.transfer_share_file(&entry.plan.provider_context, &entry.entry.entry_id)?;
+        let owner = client.owner_fingerprint()?;
+        let value = client.transfer_share_file(
+            &entry.plan.provider_context,
+            &entry.entry.entry_id,
+            owner.as_deref(),
+        )?;
         let files = value
             .pointer("/extra/list")
             .and_then(Value::as_array)

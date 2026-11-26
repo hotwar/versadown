@@ -1862,6 +1862,36 @@ fn baidu_web_authorization_keeps_the_window_open_until_the_root_directory_is_rea
 }
 
 #[test]
+fn baidu_browser_password_waits_for_a_new_candidate_after_the_first_directory_rejection() {
+    let store = MemoryCredentialStore::default();
+    let previous = b"previous-verified-session";
+    store.save("baidu", previous).unwrap();
+    let http = SequenceTransport(Mutex::new(VecDeque::from([
+        r#"{"errno":0,"user":{"uk":"b1"}}"#,
+        r#"{"errno":-6}"#,
+        r#"{"errno":0,"user":{"uk":"b1"}}"#,
+        r#"{"errno":0,"list":[]}"#,
+    ])));
+
+    let capture = |cookie: &str| {
+        super::validate_browser_password_session(
+            CloudProvider::Baidu, &store, &http, &[cookie.into()], None, Some("b1"), |_| {},
+        )
+    };
+    assert!(matches!(capture("BDUSS=first"), Err(QuarkError::AuthorizationExpired)));
+    assert_eq!(store.load("baidu").unwrap().as_deref(), Some(previous.as_slice()));
+    assert_eq!(http.0.lock().unwrap().len(), 2);
+
+    let account = capture("BDUSS=second").unwrap();
+    assert_eq!(account.auth_method, CloudAuthMethod::Password);
+    let bytes = store.load("baidu").unwrap().unwrap();
+    let saved: BaiduSession = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(saved.auth_method, CloudAuthMethod::Password);
+    assert_eq!(saved.cookie, "BDUSS=second");
+    assert!(http.0.lock().unwrap().is_empty());
+}
+
+#[test]
 fn browser_password_session_never_replaces_a_different_accounts_credentials() {
     let credentials = MemoryCredentialStore::default();
     credentials.save("baidu", b"previous-session").unwrap();
@@ -2171,6 +2201,47 @@ fn browser_password_session_reports_tianyi_rejection_without_replacing_credentia
             b"previous-session"
         );
     }
+}
+
+#[test]
+fn baidu_web_authorization_waits_for_a_restorable_candidate_before_publication() {
+    struct LoginTransport { cold: bool }
+    impl CloudHttpTransport for LoginTransport {
+        fn isolated_session(&self) -> Result<Option<Box<dyn CloudHttpTransport>>, QuarkError> {
+            Ok(Some(Box::new(Self { cold: true })))
+        }
+        fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+            assert_eq!(request.method, "GET");
+            let credential = request.headers.get("Cookie").unwrap().as_str();
+            let body = if self.cold && credential == "BDUSS=first" {
+                r#"{"errno":-6}"#
+            } else if request.url.contains("method=uinfo") {
+                if self.cold && credential == "BDUSS=switched" { r#"{"errno":0,"uk":"other"}"# }
+                else { r#"{"errno":0,"uk":"owner"}"# }
+            } else {
+                assert!(request.url.contains("/api/list?"));
+                r#"{"errno":0,"list":[]}"#
+            };
+            Ok(CloudHttpResponse { status: 200, body: body.into(), ..Default::default() })
+        }
+    }
+    let store = MemoryCredentialStore::default();
+    let provider = CloudProvider::Baidu;
+    let descriptor = crate::cloud::ProviderRegistry::global().get(provider);
+    let previous = serde_json::to_vec(&BaiduSession::cookie("BDUSS=previous")).unwrap();
+    store.save("baidu", &previous).unwrap();
+    let finish = |candidate| super::finalize_baidu_web_authorization(
+        descriptor, BaiduSession::cookie(candidate), &store, &LoginTransport { cold: false },
+    );
+    assert!(matches!(finish("BDUSS=first"), Err(QuarkError::AuthorizationPending)));
+    assert_eq!(store.load("baidu").unwrap().as_deref(), Some(previous.as_slice()));
+    assert!(matches!(finish("BDUSS=switched"), Err(QuarkError::AccountMismatch)));
+    assert_eq!(store.load("baidu").unwrap().as_deref(), Some(previous.as_slice()));
+    // The still-open authorization flow supplies the provider's current candidate.
+    assert_eq!(finish("BDUSS=second").unwrap().id, "owner");
+    let reopened = LoginTransport { cold: true };
+    assert_eq!(super::restore_account(provider, &store, &reopened).unwrap().id, "owner");
+    assert!(super::list_cloud_directory(provider, &store, &reopened, "/").is_ok());
 }
 
 #[test]

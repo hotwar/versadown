@@ -1646,6 +1646,35 @@ fn fixture(id: &str) -> CloudSharePlan {
     )
 }
 
+#[test]
+fn agent_resource_share_transfer_requirement_never_calls_transfer_or_recorded_refresh() {
+    let (store, _, _) = memory_store();
+    let plan = fixture("agent-direct-only");
+    let source = plan.source_for("f1");
+    store.upsert(&plan).unwrap();
+    // Even an old personal transfer must not widen the Agent's direct-only grant.
+    store.record_transfer_with_owner(&source,"personal-id",&recorded_transfer_owner()).unwrap();
+    let adapter = RecordedTransferAdapter {resolve_calls:AtomicU64::new(0),transfer_calls:AtomicU64::new(0),refresh_calls:AtomicU64::new(0)};
+    assert!(matches!(resolve_agent_share_read_only_with(&store,&adapter,&source),Err(QuarkError::InvalidInput(message)) if message=="agent.error.cloudWriteRequired"));
+    assert_eq!(adapter.resolve_calls.load(Ordering::SeqCst),1);
+    assert_eq!(adapter.transfer_calls.load(Ordering::SeqCst),0);
+    assert_eq!(adapter.refresh_calls.load(Ordering::SeqCst),0);
+    assert_eq!(store.resolve_entry(&source).unwrap().plan.transfers.len(),1);
+}
+
+#[test]
+fn agent_resource_share_direct_link_and_expired_login_do_not_mutate_cloud() {
+    let (store, _, _) = memory_store();let plan=fixture("agent-direct");let source=plan.source_for("f1");store.upsert(&plan).unwrap();
+    for fail_resolve in [false,true] {
+        let adapter=SagaAdapter{resolve_calls:AtomicU64::new(0),transfer_calls:AtomicU64::new(0),fail_resolve};
+        let result=resolve_agent_share_read_only_with(&store,&adapter,&source);
+        if fail_resolve {assert!(matches!(result,Err(QuarkError::AuthorizationExpired)));}
+        else {assert_eq!(result.unwrap().url,"https://cdn.example/file");}
+        assert_eq!(adapter.transfer_calls.load(Ordering::SeqCst),0);
+        assert!(store.resolve_entry(&source).unwrap().plan.transfers.is_empty());
+    }
+}
+
 fn memory_store() -> (
     CloudSharePlanStore,
     Arc<MemoryCredentialStore>,

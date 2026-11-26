@@ -86,17 +86,38 @@ try {
 
     $alternatePublish = & (Join-Path $PSScriptRoot 'build-windows.ps1') -Mode Quick -QuickPublishName quick-next -DryRun 6>&1
     Assert-True -Condition (($alternatePublish -join "`n") -match 'artifacts[\\/]quick-next[\\/]versadown\.exe') -Message 'A quick build must be able to publish beside a running executable.'
+    Assert-True -Condition (($alternatePublish -join "`n") -match 'artifacts[\\/]quick-next[\\/]vd-cli\.exe') -Message 'A quick build must publish the console client beside the GUI.'
+    Assert-True -Condition (($alternatePublish -join "`n") -match 'artifacts[\\/]quick-next[\\/]vd-mcp-server\.exe') -Message 'A quick build must publish the MCP server beside the GUI.'
+
+    $originalTargetDir = $env:CARGO_TARGET_DIR
+    try {
+        $env:CARGO_TARGET_DIR = Join-Path $testRoot 'isolated target'
+        $isolatedBuild = & (Join-Path $PSScriptRoot 'build-windows.ps1') -Mode Quick -DryRun 6>&1
+        Assert-True -Condition (($isolatedBuild -join "`n").Contains("Cargo target: $env:CARGO_TARGET_DIR")) -Message 'Quick builds must honor the explicit Cargo target directory.'
+    } finally {
+        $env:CARGO_TARGET_DIR = $originalTargetDir
+    }
 
     $projectRoot = $testRoot
     $vcvars = Join-Path $testRoot 'vcvars64.bat'
     $compileMarker = Join-Path $testRoot 'frontend-signature.txt'
+    $compileArgs = Join-Path $testRoot 'compile-args.txt'
     $compileCargo = Join-Path $testRoot 'compile-cargo.cmd'
     Write-TestFile -Path $vcvars -Content '@echo off'
-    Write-TestFile -Path $compileCargo -Content "@echo off`r`necho %VERSADOWN_FRONTEND_SIGNATURE% > `"$compileMarker`"`r`nexit /b 0"
+    Write-TestFile -Path $compileCargo -Content "@echo off`r`necho %VERSADOWN_FRONTEND_SIGNATURE% > `"$compileMarker`"`r`necho %* > `"$compileArgs`"`r`nexit /b 0"
 
     Invoke-MsvcBuild -VcvVars $vcvars -CargoCommand $compileCargo -PnpmCommand 'pnpm' -TargetRoot $targetRoot -Profile quick -FrontendSignature $changedFrontendSignature
 
     Assert-True -Condition ((Get-Content -LiteralPath $compileMarker -Raw).Trim() -eq $changedFrontendSignature) -Message 'The quick Cargo build must receive the current frontend signature.'
+    Assert-True -Condition ((Get-Content -LiteralPath $compileArgs -Raw) -match '--profile quick --bin versadown --bin vd-cli --bin vd-mcp-server') -Message 'Quick builds must select the GUI, CLI and MCP binaries.'
+    Write-Host 'PASS: Quick selects all three binaries and honors the isolated Cargo target.'
+
+    $builtCli = Join-Path $testRoot 'target/quick/vd-cli.exe'
+    $publishedCli = Join-Path $testRoot 'artifacts/quick/vd-cli.exe'
+    Write-TestFile -Path $builtCli -Content 'console-binary-fixture'
+    Publish-ConsoleBinary -BuiltBinary $builtCli -PublishedBinary $publishedCli
+    Assert-True -Condition ((Get-FileSha256 -Path $builtCli) -eq (Get-FileSha256 -Path $publishedCli)) -Message 'The published CLI must match its build output.'
+    Write-Host 'PASS: CLI publication preserves the binary hash.'
 
     $installerMarker = Join-Path $testRoot 'installer-args.txt'
     $fakePnpm = Join-Path $testRoot 'fake-pnpm.cmd'
@@ -117,6 +138,11 @@ try {
     Write-Host 'PASS: frontend-only changes preserve the incremental Rust target.'
 } finally {
     if (Test-Path -LiteralPath $testRoot) {
+        $resolvedTestRoot = [System.IO.Path]::GetFullPath($testRoot)
+        $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+        if (-not $resolvedTestRoot.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Refusing to remove a test directory outside the temporary root.'
+        }
         Remove-Item -LiteralPath $testRoot -Recurse -Force
     }
 }

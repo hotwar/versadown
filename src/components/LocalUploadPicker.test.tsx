@@ -1,7 +1,8 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
+import { win32 } from 'node:path';
 import { LocalUploadPicker } from './LocalUploadPicker';
 import type { LocalUploadListing } from '../lib/localUpload';
 
@@ -110,6 +111,41 @@ it('confirms multiple files and multiple directories together without a type sel
   await user.click(screen.getByRole('checkbox', { name: '选择 b.txt' }));
   await user.click(screen.getByRole('button', { name: '确认上传' }));
   expect(onConfirm).toHaveBeenCalledWith(['/home/Photos', '/home/Docs', '/home/a.txt', '/home/b.txt']);
+});
+
+it.each(['file', 'all'])('refines a checked directory to the files explicitly selected inside it with %s', async control => {
+  const user = userEvent.setup();
+  const onConfirm = vi.fn();
+  const filePath = process.env.VERSADOWN_TEST_PICKED_FILE ?? 'C:\\Downloads\\Photos\\p.jpg';
+  if (process.env.VERSADOWN_TEST_PICKED_FILE) expect(statSync(filePath).isFile()).toBe(true);
+  const folderPath = win32.dirname(filePath), root = win32.dirname(folderPath);
+  const folder = { path: folderPath, name: win32.basename(folderPath), kind: 'directory' as const };
+  const sibling = { path: win32.join(root, 'Docs'), name: 'Docs', kind: 'directory' as const };
+  const file = { path: filePath, name: win32.basename(filePath), kind: 'file' as const };
+  const list = async (path?: string) => path === folderPath
+    ? { path: folderPath, parentPath: root, roots: [], entries: [file] }
+    : { path: root, parentPath: win32.dirname(root), roots: [], entries: [folder, sibling] };
+  render(<LocalUploadPicker listEntries={list} onConfirm={onConfirm} onCancel={vi.fn()} />);
+  await user.click(await screen.findByRole('checkbox', { name: '选择 ' + folder.name }));
+  await user.click(screen.getByRole('checkbox', { name: '选择 Docs' }));
+  await user.dblClick(screen.getByRole('button', { name: folder.name }));
+  const fileBox = await screen.findByRole('checkbox', { name: '选择 ' + file.name });
+  await user.click(control === 'file' ? fileBox : screen.getByRole('checkbox', { name: '全选当前目录' }));
+  await user.click(screen.getByRole('button', { name: '确认上传' }));
+  expect(onConfirm).toHaveBeenCalledWith([sibling.path, file.path]);
+});
+
+it('browses back into a directory without replacing its previously selected child', async () => {
+  const user = userEvent.setup();
+  const onConfirm = vi.fn();
+  render(<LocalUploadPicker listEntries={listing()} onConfirm={onConfirm} onCancel={vi.fn()} />);
+  await user.dblClick(await screen.findByRole('button', { name: 'Photos' }));
+  await user.click(await screen.findByRole('checkbox', { name: '选择 p.jpg' }));
+  await user.click(screen.getByRole('button', { name: '..' }));
+  await user.dblClick(await screen.findByRole('button', { name: 'Photos' }));
+  await screen.findByRole('checkbox', { name: '选择 p.jpg' });
+  await user.click(screen.getByRole('button', { name: '确认上传' }));
+  expect(onConfirm).toHaveBeenCalledWith(['/home/Photos/p.jpg']);
 });
 
 it('keeps cross-directory selections and excludes selected descendants when their parent is selected', async () => {
