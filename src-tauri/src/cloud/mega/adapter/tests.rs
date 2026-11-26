@@ -578,6 +578,23 @@ fn an_exhausted_account_quota_is_reported_as_the_accounts_without_falling_back()
 }
 
 #[test]
+fn busy_account_downloads_do_not_fall_back_to_anonymous() {
+    let plan = file_plan();
+    for code in [-3, -4, -18] {
+        let (credentials, sid) = credentials_with_session(&format!("busy{code}"));
+        let http = Http::new(vec![paid(), json!([code])]);
+        expect_failure(
+            resolve_with(&credentials, &http, true, &plan, &plan.entries[0]),
+            MegaFailure::ServiceBusy,
+        );
+        assert_eq!(commands(&http), ["uq", "g"]);
+        assert!(http.requests.lock().unwrap()[1]
+            .url
+            .contains(&format!("&sid={sid}")));
+    }
+}
+
+#[test]
 fn every_resolution_of_a_task_source_requests_the_session_again() {
     let (credentials, sid) = credentials_with_session("again");
     let plan = file_plan();

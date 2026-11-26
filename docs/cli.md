@@ -283,3 +283,7 @@ Reuse identical confirmation parameters on retries. `CLOUD_PERMISSION_REQUIRED` 
 For `CLOUD_OPERATION_VERIFICATION_REQUIRED`, have the user complete the operation-specific challenge on the provider's official page. For `CLOUD_AUTHORIZATION_PENDING`, wait for the current authorization to finish. Stop polling cancelled, expired or interrupted interactions. Resume the original interaction only when the user asks.
 
 If a Baidu upload reports `CLOUD_UPLOAD_SESSION_REQUIRED` or `CLOUD_UPLOAD_VERIFICATION_REQUIRED`, ask the user to check upload access or complete verification on the provider's website. For `CLOUD_RESULT_UNCERTAIN`, check the original operation and destination folder.
+
+MEGA 使用 VD 的专用登录表单（可含两步验证码），不支持 Agent 网页授权入口。未登录时先在 VD 完成 MEGA 登录，再重试原资源请求；直接调用其 `cloud auth begin` 返回 `CLOUD_DESKTOP_LOGIN_REQUIRED`，`next_action: sign_in_in_vd`，退出码 2，不创建等待中的授权会话。已有 MEGA 登录可供经过用户授权的 Agent 网盘操作复用；公开分享解析与下载不要求登录。创建 MEGA 分享仅选一个项目，使用 `expires_in_days: 0`、不设提取码、不自动生成提取码。
+
+MEGA uses its dedicated VD login form, including two-factor authentication when required. Sign in there before retrying an Agent account request. Its `cloud auth begin` returns `CLOUD_DESKTOP_LOGIN_REQUIRED` with `next_action: sign_in_in_vd` and exit code 2, without opening a pending authorization session. Authorized Agent account operations reuse that login; public links require no login. Create a MEGA share for a single item with `expires_in_days: 0`, no pass code and `generate_pass_code: false`.

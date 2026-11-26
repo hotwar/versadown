@@ -343,11 +343,11 @@ fn upload_failures_map_to_the_projects_errors_and_never_create_a_node() {
     let (_dir, path) = write_file("fail.bin", &plain);
     let cases: [(Vec<(u16, &str)>, &str); 4] = [
         (vec![(200, "-17")], "cloud.error.mega.storageFull"),
-        (vec![(200, "-99")], "MEGA 错误码 -99"),
-        (vec![(403, "")], "MEGA 上传服务返回 HTTP 403"),
+        (vec![(200, "-99")], "cloud.error.mega.apiError:-99"),
+        (vec![(403, "")], "cloud.error.mega.uploadHttpError:403"),
         (
             vec![(200, "-3"), (200, "-3"), (200, "-3"), (200, "-3")],
-            "MEGA 上传服务暂时繁忙，请稍后重试",
+            "cloud.error.mega.serviceBusy",
         ),
     ];
     for (answers, expected) in cases {
@@ -358,10 +358,7 @@ fn upload_failures_map_to_the_projects_errors_and_never_create_a_node() {
         let client = MegaAccountClient::new(&http, &store).with_cache(&cache);
         let error = client.upload_file(&upload, "0", &path).unwrap_err();
         let text = error_text(error);
-        assert!(
-            text == expected || text.ends_with(expected),
-            "{text} vs {expected}"
-        );
+        assert_eq!(text, expected);
         assert!(http.commands("p").is_empty(), "{expected}");
     }
 }
@@ -443,7 +440,7 @@ fn bad_names_targets_and_files_are_refused_before_talking_to_mega() {
     let (_dir, path) = write_file("ok.bin", b"x");
     assert!(matches!(
         client.upload_file(&upload, "__versa_down_mega_recycle_bin__", &path),
-        Err(QuarkError::InvalidInput(_))
+        Err(QuarkError::Mega(MegaFailure::InvalidDestination))
     ));
     assert!(matches!(
         client.upload_file(&upload, "FILEBBBB", &path),

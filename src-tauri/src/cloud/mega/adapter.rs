@@ -173,7 +173,11 @@ impl MegaShareAdapter<'_> {
                     Ok(true) => match api.download(scope, Some(session.sid())) {
                         Ok(download) => return Ok((download, true)),
                         Err(
-                            error @ (QuarkError::Mega(MegaFailure::AccountQuotaExceeded { .. })
+                            error @ (QuarkError::Mega(
+                                MegaFailure::AccountQuotaExceeded { .. }
+                                | MegaFailure::ServiceBusy
+                                | MegaFailure::ServiceUnavailable,
+                            )
                             | QuarkError::Transport(_)),
                         ) => return Err(error),
                         Err(error) => eprintln!(

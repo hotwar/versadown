@@ -230,6 +230,11 @@ pub(crate) fn validate_share_options(
     if !provider.is_enabled() {
         return Err(QuarkError::ProviderUnsupported);
     }
+    if !ProviderRegistry::global().get(provider).capabilities.share_configurable
+        && (options.pass_code.is_some() || options.generate_pass_code || options.expires_in_days.is_some())
+    {
+        return Err(QuarkError::ProviderUnsupported);
+    }
     match provider {
         CloudProvider::Quark | CloudProvider::Uc | CloudProvider::Aliyun
             if options.generate_pass_code => return Err(QuarkError::ProviderUnsupported),
