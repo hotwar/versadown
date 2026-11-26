@@ -79,11 +79,80 @@ pub(crate) fn browser_share_page(raw: &str) -> Option<(CloudProvider, Url)> {
     share_page_url(raw).map(|page| (CloudProvider::Gofile, page))
 }
 
-fn window_label(page: &Url) -> String {
+/// Validated by the application before the untrusted share page is opened.
+#[derive(Clone)]
+struct CaptureContext {
+    configured: UriSubmissionOptions,
+    private_download: bool,
+    reopened_task: Option<uuid::Uuid>,
+}
+
+impl CaptureContext {
+    fn submission(&self, state: &AppState, source: &str) -> Result<(UriSubmissionOptions, bool), QuarkError> {
+        let Some(id) = self.reopened_task else {
+            ensure_private_download_enabled(state, self.private_download).map_err(QuarkError::InvalidInput)?;
+            return Ok((self.configured.clone(), self.private_download));
+        };
+        // A window can outlive a privacy lock, task deletion, or path update.
+        // Never accept task privacy or output paths from the provider page.
+        let task = state.store.find(id).map_err(|_| QuarkError::Storage)?;
+        ensure_private_task_access(state, &task).map_err(QuarkError::InvalidInput)?;
+        self.for_task(&state.store, &task, source)
+    }
+
+    fn for_task(&self, store: &TaskStore, task: &DownloadTask, source: &str) -> Result<(UriSubmissionOptions, bool), QuarkError> {
+        let mut configured = existing_capture_options(store, task, self.configured.clone())?;
+        if task.source != source {
+            // Another file selected from this page inherits the directory and
+            // privacy, but gets its own name and output reservation.
+            configured.output_name = None;
+        }
+        Ok((configured, self.private_download || task.is_private))
+    }
+}
+
+fn existing_capture_options(
+    store: &TaskStore,
+    task: &DownloadTask,
+    mut configured: UriSubmissionOptions,
+) -> Result<UriSubmissionOptions, QuarkError> {
+    let output = store.reserved_output_path(task.id).map_err(|_| QuarkError::Storage)?
+        .or(store.files(task.id).map_err(|_| QuarkError::Storage)?.into_iter()
+            .map(|file| PathBuf::from(file.path)).find(|path| path.is_absolute()))
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| QuarkError::InvalidInput("cloud.browserShare.missingDestination".into()))?;
+    configured.directory = output.parent().map(Path::to_path_buf);
+    configured.output_name = output.file_name().and_then(|name| name.to_str()).map(str::to_owned);
+    Ok(configured)
+}
+
+/// Reserve before provider resolution, so failures and application restarts
+/// cannot replace the selected destination with the global default.
+pub(super) fn reserve_capture_output(
+    store: &TaskStore,
+    task: &DownloadTask,
+    mut configured: UriSubmissionOptions,
+) -> Result<UriSubmissionOptions, QuarkError> {
+    let directory = configured.directory.as_deref().ok_or_else(||
+        QuarkError::InvalidInput("cloud.browserShare.missingDestination".into()))?;
+    let name = configured.output_name.as_deref().unwrap_or(&task.name);
+    let output = crate::reserve_unique_output_path(store, task.id, directory, name)
+        .map_err(|_| QuarkError::Storage)?;
+    configured.directory = output.parent().map(Path::to_path_buf);
+    configured.output_name = output.file_name().and_then(|name| name.to_str()).map(str::to_owned);
+    Ok(configured)
+}
+
+fn window_label(page: &Url, context: &CaptureContext) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut identity = std::collections::hash_map::DefaultHasher::new();
+    context.configured.directory.hash(&mut identity);
+    context.private_download.hash(&mut identity);
+    context.reopened_task.hash(&mut identity);
     let code = page.path().rsplit('/').next().unwrap_or_default();
     format!(
-        "{WINDOW_LABEL_PREFIX}{}-{code}",
-        CloudProvider::Gofile.key()
+        "{WINDOW_LABEL_PREFIX}{}-{code}-{:016x}",
+        CloudProvider::Gofile.key(), identity.finish()
     )
 }
 
@@ -103,6 +172,7 @@ struct CaptureSession {
     label: String,
     provider: CloudProvider,
     share_page: String,
+    context: CaptureContext,
     /// Localized text for "this download was not taken over", shown in the
     /// window itself where the user is looking.
     failure_notice: String,
@@ -213,11 +283,14 @@ impl CaptureSession {
             cookie: (!cookies.is_empty()).then(|| cookies.join("; ")),
             user_agent: self.user_agent.lock().ok().and_then(|agent| agent.clone()),
         };
-        submit_captured_download(&self.app, &captured).await
+        submit_captured_download(&self.app, &captured, &self.context).await
     }
 }
 
 fn failure_message(error: &QuarkError) -> String {
+    if let QuarkError::InvalidInput(message) = error {
+        if message == "cloud.browserShare.missingDestination" { return message.clone(); }
+    }
     share_resolution_failure_message(error)
 }
 
@@ -226,10 +299,13 @@ fn failure_message(error: &QuarkError) -> String {
 async fn submit_captured_download(
     app: &AppHandle,
     captured: &CapturedDownload,
+    context: &CaptureContext,
 ) -> Result<(String, bool), QuarkError> {
     let plan = captured.into_plan()?;
     let entry = plan.entries[0].clone();
     let source = plan.source_for(&entry.entry_id);
+    let state = app.try_state::<AppState>().ok_or(QuarkError::Storage)?;
+    let (configured, private_download) = context.submission(&state, &source)?;
     let cloud = app
         .try_state::<Arc<CloudState>>()
         .ok_or(QuarkError::Storage)?;
@@ -240,30 +316,33 @@ async fn submit_captured_download(
         std::slice::from_ref(&entry.entry_fingerprint),
     )?;
     preflight_cloud_share_download(app.clone(), &selection).await?;
-    let state = app.try_state::<AppState>().ok_or(QuarkError::Storage)?;
-    let configured =
-        crate::commands::download_submission_options(&state).map_err(QuarkError::InvalidInput)?;
     let action =
-        submit_cloud_share_file(app.clone(), &state, source, configured, false, None).await?;
+        submit_cloud_share_file(app.clone(), &state, source, configured, private_download, None).await?;
     let _ = crate::commands::emit_task_update_for_task(
         app,
         &state.store,
         Some(&cloud.share_plans),
         action.payload.task.clone(),
     );
-    Ok((entry.name, action.duplicate.is_some()))
+    let name = if should_emit_task_update(&state, action.payload.task.is_private) {
+        entry.name
+    } else {
+        String::new()
+    };
+    Ok((name, action.duplicate.is_some()))
 }
 
 /// Opens (or brings forward) the window for a pasted share link.
-pub(crate) fn open_browser_share_window(
+fn open_browser_share_window(
     app: &AppHandle,
     share_link: &str,
     title: &str,
     failure_notice: &str,
+    context: CaptureContext,
 ) -> Result<(), QuarkError> {
     let (provider, page) = browser_share_page(share_link)
         .ok_or_else(|| QuarkError::InvalidInput("分享链接无效".into()))?;
-    let label = window_label(&page);
+    let label = window_label(&page, &context);
     let title = clean_title(title);
     if let Some(window) = app.get_webview_window(&label) {
         let _ = window.set_title(&title);
@@ -276,6 +355,7 @@ pub(crate) fn open_browser_share_window(
         label: label.clone(),
         provider,
         share_page: page.as_str().to_owned(),
+        context,
         failure_notice: failure_notice.to_owned(),
         user_agent: Mutex::new(None),
         recent: Mutex::new(HashMap::new()),
@@ -349,8 +429,18 @@ pub async fn cloud_open_browser_share(
     url: String,
     title: String,
     failure_notice: String,
+    destination_directory: Option<String>,
+    private_download: Option<bool>,
 ) -> Result<(), QuarkError> {
-    open_browser_share_window(&app, &url, &title, &failure_notice)
+    let state = app.try_state::<AppState>().ok_or(QuarkError::Storage)?;
+    let private_download = private_download.unwrap_or(false);
+    ensure_private_download_enabled(&state, private_download).map_err(QuarkError::InvalidInput)?;
+    let configured = crate::commands::download_submission_options_for_directory(
+        &state, destination_directory.as_deref(),
+    ).map_err(QuarkError::InvalidInput)?;
+    open_browser_share_window(&app, &url, &title, &failure_notice, CaptureContext {
+        configured, private_download, reopened_task: None,
+    })
 }
 
 /// Opens the share page a captured task came from, so the user can start the
@@ -374,7 +464,13 @@ pub async fn cloud_reopen_browser_share(
     let page = plan.provider_context["share_page"]
         .as_str()
         .ok_or_else(|| QuarkError::InvalidInput("无法找到原分享页".into()))?;
-    open_browser_share_window(&app, page, &title, &failure_notice)
+    let configured = existing_capture_options(&state.store, &task, UriSubmissionOptions::default())?;
+    let configured = crate::commands::download_submission_options_for_directory(
+        &state, configured.directory.as_ref().and_then(|path| path.to_str()),
+    ).map_err(QuarkError::InvalidInput)?;
+    open_browser_share_window(&app, page, &title, &failure_notice, CaptureContext {
+        configured, private_download: task.is_private, reopened_task: Some(id),
+    })
 }
 
 #[cfg(test)]
@@ -385,9 +481,77 @@ mod tests {
     fn only_share_links_open_a_window_and_each_page_has_its_own_label() {
         let (provider, page) = browser_share_page("https://www.gofile.io/d/AbC123?x=1").unwrap();
         assert_eq!(provider, CloudProvider::Gofile);
-        assert_eq!(window_label(&page), "browser-share-gofile-AbC123");
+        let context = CaptureContext {
+            configured: UriSubmissionOptions::default(), private_download: false, reopened_task: None,
+        };
+        assert!(window_label(&page, &context).starts_with("browser-share-gofile-AbC123-"));
+        let mut private = context.clone();
+        private.private_download = true;
+        assert_ne!(window_label(&page, &context), window_label(&page, &private));
+        let mut other_directory = context.clone();
+        other_directory.configured.directory = Some(PathBuf::from("different"));
+        assert_ne!(window_label(&page, &context), window_label(&page, &other_directory));
         assert!(browser_share_page("https://example.com/d/AbC123").is_none());
         assert!(browser_share_page("https://store1.gofile.io/download/web/a/b.bin").is_none());
+    }
+
+    #[test]
+    fn capture_reserves_selected_destination_before_engine_submission() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = TaskStore::open_in_memory().unwrap();
+        for private in [false, true] {
+            let task = store.create(NewTask {
+                source: format!("cloud-share://gofile/share/file-{private}"),
+                name: format!("file-{private}.zip"), kind: "cloud".into(), is_private: private,
+            }).unwrap();
+            let configured = reserve_capture_output(&store, &task, UriSubmissionOptions {
+                directory: Some(directory.path().to_path_buf()), ..Default::default()
+            }).unwrap();
+            assert_eq!(configured.directory.as_deref(), Some(directory.path()));
+            assert_eq!(store.reserved_output_path(task.id).unwrap(), Some(directory.path().join(&task.name)));
+            assert_eq!(store.find(task.id).unwrap().is_private, private);
+        }
+    }
+
+    #[test]
+    fn recapture_after_restart_keeps_private_task_destination_and_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("tasks.sqlite");
+        let chosen = directory.path().join("chosen");
+        let task = {
+            let store = TaskStore::open_path(&database).unwrap();
+            let task = store.create(NewTask {
+                source: "cloud-share://gofile/share/file".into(), name: "file.zip".into(),
+                kind: "cloud".into(), is_private: true,
+            }).unwrap();
+            reserve_capture_output(&store, &task, UriSubmissionOptions {
+                directory: Some(chosen.clone()), ..Default::default()
+            }).unwrap();
+            store.fail_with_code(task.id, Some("gofile_link_expired"), "expired").unwrap()
+        };
+        let store = TaskStore::open_path(&database).unwrap();
+        let context = CaptureContext {
+            configured: UriSubmissionOptions { directory: Some(directory.path().join("new-global-default")), ..Default::default() },
+            private_download: false, reopened_task: Some(task.id),
+        };
+        let persisted = store.find(task.id).unwrap();
+        let (options, private) = context.for_task(&store, &persisted, &persisted.source).unwrap();
+        assert!(private);
+        assert_eq!(options.directory, Some(chosen.clone()));
+        assert_eq!(options.output_name.as_deref(), Some("file.zip"));
+        let retried = reserve_capture_output(&store, &persisted, options).unwrap();
+        assert_eq!(retried.directory, Some(chosen.clone()));
+        let (another_file, private) = context.for_task(&store, &persisted, "cloud-share://gofile/share/other").unwrap();
+        assert!(private);
+        assert_eq!(another_file.directory, Some(chosen));
+        assert_eq!(another_file.output_name, None);
+    }
+
+    #[test]
+    fn recapture_without_a_recorded_path_does_not_guess_the_global_destination() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let task = store.create(NewTask::direct("https://example.test/file.zip")).unwrap();
+        assert!(existing_capture_options(&store, &task, UriSubmissionOptions::default()).is_err());
     }
 
     fn event(outcome: &'static str) -> BrowserShareCaptureEvent {

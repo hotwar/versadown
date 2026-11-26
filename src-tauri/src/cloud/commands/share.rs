@@ -229,6 +229,8 @@ pub(crate) async fn submit_cloud_share_file_internal(
         &source,
         directory_context.as_ref(),
     )?;
+    // Retrying an existing task is not a request to make it public.
+    let private_download = private_download || retry.as_ref().is_some_and(|task| task.is_private);
     let new_task = NewTask {
         source: source.clone(),
         name: configured.output_name.clone().unwrap(),
@@ -258,6 +260,9 @@ pub(crate) async fn submit_cloud_share_file_internal(
             .set_private(task.id, private_download)
             .map_err(|_| QuarkError::Storage)?
     };
+    if provider == CloudProvider::Gofile {
+        configured = super::browser_share::reserve_capture_output(&state.store, &prepared, configured)?;
+    }
     if let Some(account) = owner.as_deref() {
         bind_reauthorized_cloud_task_owner(&state.store, prepared.id, provider, &account)?;
     }
@@ -392,6 +397,7 @@ where
     let retry =
         retryable_cloud_share_task_for_submission(&tasks, &source, directory_context.as_ref())?;
     let retrying_directory_leaf = directory_context.is_some() && retry.is_some();
+    let private_download = private_download || retry.as_ref().is_some_and(|task| task.is_private);
     let new_task = crate::NewTask {
         source: source.clone(),
         name: output_name,

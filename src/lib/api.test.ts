@@ -66,18 +66,12 @@ it('maps a share confirmation without inventing an aria2 task', async () => {
   });
 });
 
-it('opens the provider window for a browser-captured share instead of creating a task', async () => {
-  native.invoke
-    .mockResolvedValueOnce({ kind: 'browser_share', provider: 'gofile', url: 'https://gofile.io/d/AbC123' })
-    .mockResolvedValueOnce(undefined);
+it('prepares a browser capture without opening it before destination and privacy confirmation', async () => {
+  native.invoke.mockResolvedValueOnce({ kind: 'browser_share', provider: 'gofile', url: 'https://gofile.io/d/AbC123' });
   const { parseDownload } = await import('./api');
-
-  await expect(parseDownload('https://gofile.io/d/AbC123')).resolves.toEqual({ browserShare: { provider: 'gofile', page: 'https://gofile.io/d/AbC123' } });
-  expect(native.invoke).toHaveBeenLastCalledWith('cloud_open_browser_share', {
-    url: 'https://gofile.io/d/AbC123',
-    title: 'Gofile · 在页面里点击要下载的文件，软件会接管下载',
-    failureNotice: expect.stringContaining('没有被软件接管'),
-  });
+  await expect(parseDownload('https://gofile.io/d/AbC123', undefined, true)).resolves.toEqual({ browserShare: { provider: 'gofile', page: 'https://gofile.io/d/AbC123' } });
+  expect(native.invoke).toHaveBeenCalledTimes(1);
+  expect(native.invoke).toHaveBeenCalledWith('parse_download', { input: 'https://gofile.io/d/AbC123', accessCode: undefined, requireConfirmation: true });
 });
 
 it('maps an access-code requirement without creating a task', async () => {

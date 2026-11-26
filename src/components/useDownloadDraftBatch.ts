@@ -195,9 +195,8 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4,
                 return { ...candidate, result: next, status: 'access_code_required', error: next.shareAccessCodeRequired.message };
               }
               if (next.browserShare) {
-                // The provider's own page is open; the user picks files there and
-                // they are queued as they start, so this draft has nothing to submit.
-                return { ...candidate, result: next, status: 'browser_share', selected: false, error: undefined, note: t('cloud.browserShare.opened', { provider: cloudProviderLabel(next.browserShare.provider, t) }) };
+                // Choose destination and privacy before opening the capture window.
+                return { ...candidate, result: next, status: 'browser_share', error: undefined, note: t('cloud.browserShare.ready', { provider: cloudProviderLabel(next.browserShare.provider, t) }) };
               }
               return {
                 ...candidate,
@@ -420,7 +419,7 @@ export function useDownloadDraftBatch({ scan, prepare, discard, concurrency = 4,
 
   const canSubmit = useMemo(() => {
     const selected = items.filter(item => item.selected);
-    return selected.length > 0 && selected.every(item => item.status === 'ready'
+    return selected.length > 0 && selected.every(item => (item.status === 'ready' || item.status === 'browser_share')
       && (!item.result?.confirmation?.resources.length || item.result.confirmation.resources.some(resource => resource.selected)));
   }, [items]);
 
