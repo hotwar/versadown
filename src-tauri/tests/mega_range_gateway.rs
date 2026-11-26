@@ -267,6 +267,41 @@ async fn open_ended_and_full_responses_return_the_whole_plaintext() {
 }
 
 #[tokio::test]
+async fn empty_file_get_and_head_succeed_without_an_upstream_range() {
+    let fixture = fixture(0, Mode::Healthy).await;
+    for method in [reqwest::Method::GET, reqwest::Method::HEAD] {
+        let response = client()
+            .request(method, &fixture.local_url)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CONTENT_LENGTH], "0");
+        assert_eq!(response.headers()[header::ACCEPT_RANGES], "bytes");
+        assert!(!response.headers().contains_key(header::CONTENT_RANGE));
+        assert!(response.bytes().await.unwrap().is_empty());
+    }
+    assert!(fixture.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn empty_file_ranges_remain_unsatisfiable_without_touching_upstream() {
+    let fixture = fixture(0, Mode::Healthy).await;
+    for range in ["bytes=0-", "bytes=0-0", "bytes=1-10"] {
+        let response = get_range(&fixture, range).await;
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(response.headers()[header::CONTENT_RANGE], "bytes */0");
+        assert!(response.bytes().await.unwrap().is_empty());
+    }
+    for range in ["bytes=-1", "bytes=5-4", "bytes=0-0,1-2"] {
+        let response = get_range(&fixture, range).await;
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert!(response.bytes().await.unwrap().is_empty());
+    }
+    assert!(fixture.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn head_reports_the_plain_size_without_touching_upstream() {
     let fixture = fixture(54_321, Mode::Healthy).await;
     let response = client().head(&fixture.local_url).send().await.unwrap();

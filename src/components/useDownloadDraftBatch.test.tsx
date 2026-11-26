@@ -637,7 +637,7 @@ function mixedBatch() {
   }));
 }
 
-it('turns a browser-captured share into a neutral draft with nothing to submit', async () => {
+it('keeps a browser-captured share selected until destination and privacy confirmation', async () => {
   const { result } = renderHook(() => useDownloadDraftBatch({
     scan: async () => [{ input: GOFILE_PAGE, valid: true, kind: 'cloud_share' }],
     prepare: async () => ({ browserShare: { provider: 'gofile', page: GOFILE_PAGE } }),
@@ -645,8 +645,8 @@ it('turns a browser-captured share into a neutral draft with nothing to submit',
   }));
   await act(async () => { await result.current.start(GOFILE_PAGE); });
   await waitFor(() => expect(result.current.items[0].status).toBe('browser_share'));
-  expect(result.current.items[0]).toMatchObject({ selected: false, error: undefined, note: expect.stringContaining('Gofile') });
-  expect(result.current.canSubmit).toBe(false);
+  expect(result.current.items[0]).toMatchObject({ selected: true, error: undefined, note: expect.stringContaining('Gofile') });
+  expect(result.current.canSubmit).toBe(true);
 });
 
 it('removes only the draft of the share that was taken over, leaving other drafts selectable', async () => {
@@ -669,6 +669,6 @@ it('keeps the draft when its window closes without a capture and says how to con
   await act(async () => { await result.current.start('x'); });
   await waitFor(() => expect(result.current.items).toHaveLength(2));
   act(() => result.current.markBrowserShareClosed(GOFILE_PAGE));
-  expect(result.current.items[0]).toMatchObject({ status: 'browser_share', note: expect.stringContaining('重新打开分享页') });
+  expect(result.current.items[0]).toMatchObject({ status: 'browser_share', note: expect.stringContaining('新建任务') });
   expect(result.current.items[1].note).toBeUndefined();
 });

@@ -75,9 +75,9 @@ function Get-VersaDownBuildTools {
             $pathCargo
         )
         Pnpm = Resolve-VersaDownBuildTool -ToolName 'pnpm' -Candidates @(
+            $pathPnpm,
             (Join-Path $codexRuntime 'bin\fallback\pnpm.cmd'),
-            $projectPnpm,
-            $pathPnpm
+            $projectPnpm
         )
     }
 }

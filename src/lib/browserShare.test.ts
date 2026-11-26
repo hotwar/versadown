@@ -8,11 +8,13 @@ import { browserShareCaptureMessage, captureSignalKind, openBrowserShare, reopen
 
 beforeEach(() => native.invoke.mockReset());
 
-it('opens a share page with a localized window title that names the provider', async () => {
+it.each([false, true])('opens a share with the selected directory and privacy (%s)', async (privateDownload) => {
   native.invoke.mockResolvedValue(undefined);
-  await openBrowserShare('gofile', 'https://gofile.io/d/AbC123');
+  await openBrowserShare('gofile', 'https://gofile.io/d/AbC123', 'D:/Selected', privateDownload);
   expect(native.invoke).toHaveBeenCalledWith('cloud_open_browser_share', {
     url: 'https://gofile.io/d/AbC123',
+    destinationDirectory: 'D:/Selected',
+    privateDownload,
     title: expect.stringContaining('Gofile'),
     failureNotice: expect.stringContaining('没有被软件接管'),
   });

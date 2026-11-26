@@ -23,6 +23,7 @@ const state = vi.hoisted(() => ({
 }));
 
 vi.mock('./lib/api', () => ({
+  getAgentConnectionInfo: vi.fn().mockResolvedValue({ executablePath: 'C:/VD/vd-mcp-server.exe', executableExists: true, configJson: '{}', installationPrompt: 'Connect VD' }),
   isTauriRuntime: () => true, listPersistedTasks: state.list, parseDownload: state.parse,
   submitVideoFormats: state.submitVideo,
   syncMainWindowIcon: vi.fn().mockResolvedValue(undefined), takeExternalLinks: state.takeExternalLinks,
@@ -60,6 +61,8 @@ vi.mock('@tauri-apps/api/core', async (importOriginal) => ({
 }));
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: state.clipboardWrite, readText: state.clipboardRead }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: state.openNativeFile }));
+// The tray text is pushed to the native side; it is covered by nativeMenuLabels.test.ts.
+vi.mock('./lib/nativeMenuLabels', () => ({ startNativeMenuLabelSync: () => () => undefined }));
 vi.mock('@tauri-apps/api/window', async (importOriginal) => ({
   ...await importOriginal<typeof import('@tauri-apps/api/window')>(),
   getCurrentWindow: () => ({
@@ -2490,4 +2493,71 @@ it('does not label a failed cloud operation as completed when session storage al
   }));
   expect(screen.getByRole('alert')).toHaveTextContent('登录状态未能保存，操作结果请查看原提示');
   expect(screen.getByRole('alert')).not.toHaveTextContent('操作已完成');
+});
+
+it.each([false, true])('opens Gofile only after confirming the selected directory and privacy (%s)', async (privateDownload) => {
+  const page = 'https://gofile.io/d/AbC123';
+  const settings = await state.getSettings();
+  state.getSettings.mockResolvedValue({ ...settings, privacyDownloadEnabled: true });
+  state.openNativeFile.mockResolvedValue('D:/Selected');
+  vi.mocked(scanDownloadInputs).mockResolvedValueOnce([{ input: page, valid: true, kind: 'cloud_share' }]);
+  state.parse.mockResolvedValueOnce({ browserShare: { provider: 'gofile', page } });
+  state.cloudInvoke.mockImplementation(async (command: string) => {
+    if (command === 'cloud_open_browser_share') return;
+    throw new Error('Unexpected command: ' + command);
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.type(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), page + '{Enter}');
+  const dialog = await screen.findByRole('dialog', { name: '新建下载' });
+  await within(dialog).findByText(/选择保存目录并新建任务后/);
+  expect(state.cloudInvoke.mock.calls.some(([command]) => command === 'cloud_open_browser_share')).toBe(false);
+  await user.click(within(dialog).getByRole('button', { name: '更改' }));
+  await within(dialog).findByText('D:/Selected');
+  await user.click(within(dialog).getByRole('button', { name: privateDownload ? '新建隐私任务' : '新建任务' }));
+  await waitFor(() => expect(state.cloudInvoke).toHaveBeenCalledWith('cloud_open_browser_share', expect.objectContaining({ url: page, destinationDirectory: 'D:/Selected', privateDownload })));
+  await waitFor(() => expect(screen.queryByRole('dialog', { name: '新建下载' })).not.toBeInTheDocument());
+  expect(state.confirm).not.toHaveBeenCalled();
+});
+
+it('retains a failed Gofile draft when another item in the batch was created', async () => {
+  const page = 'https://gofile.io/d/AbC123';
+  vi.mocked(scanDownloadInputs).mockResolvedValueOnce([
+    { input: page, valid: true, kind: 'cloud_share' },
+    { input: 'https://example.test/file.zip', valid: true, kind: 'direct' },
+  ]);
+  state.parse.mockImplementation(async (input: string) => input === page
+    ? { browserShare: { provider: 'gofile', page } }
+    : { task: { ...oldTask, id: 'other-file', name: 'file.zip' } });
+  state.cloudInvoke.mockImplementation(async (command: string) => {
+    throw new Error(command === 'cloud_open_browser_share' ? 'Window unavailable' : 'Unexpected command: ' + command);
+  });
+  const user = userEvent.setup();
+  render(<App />);
+  await user.type(screen.getByRole('textbox', { name: '搜索任务或粘贴下载链接' }), page + '{Enter}');
+  const dialog = await screen.findByRole('dialog', { name: '新建下载' });
+  await within(dialog).findByText(/选择保存目录并新建任务后/);
+  await within(dialog).findByText('file.zip');
+  await user.click(within(dialog).getByRole('button', { name: '新建任务' }));
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent('Window unavailable');
+  expect(dialog).toBeVisible();
+  expect(within(dialog).queryByText('file.zip')).not.toBeInTheDocument();
+});
+
+it('synchronizes Agent account grants from native approval without saving settings', async () => {
+  const user = userEvent.setup();
+  const loaded = await state.getSettings();
+  render(<App />);
+  await waitFor(() => expect(state.listeners.has('agent-access-changed')).toBe(true));
+  await user.click(within(screen.getByRole('navigation', { name: '主导航' })).getByRole('button', { name: '设置' }));
+  await user.click(screen.getByRole('tab', { name: '高级' }));
+  await act(async () => {
+    state.listeners.get('agent-access-changed')?.({ payload: {
+      ...loaded,
+      agentAccess: { enabled: true, allowedDirectories: [], uploadDirectories: [],
+        cloudGrants: [{ provider: 'quark', accountId: 'private-agent-account', accountLabel: 'Native approved account' }] }
+    } });
+  });
+  expect(await screen.findByText('夸克网盘 · Native approved account')).toBeVisible();
+  expect(state.updateSettings).not.toHaveBeenCalled();
 });

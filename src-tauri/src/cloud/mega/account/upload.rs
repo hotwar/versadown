@@ -72,7 +72,7 @@ impl<R: Read> Read for CheckedRead<'_, R> {
 }
 
 fn unreadable() -> QuarkError {
-    QuarkError::InvalidInput("无法读取选中的本地文件".into())
+    QuarkError::Mega(MegaFailure::LocalFileUnreadable)
 }
 
 /// What the upload server answered to one piece.
@@ -90,7 +90,7 @@ fn piece_reply(status: u16, body: &str, last: bool) -> Result<PieceReply, PieceF
             return Err(match code {
                 EAGAIN => PieceFailure::Retry,
                 EOVERQUOTA => PieceFailure::Fatal(QuarkError::Mega(MegaFailure::StorageFull)),
-                other => PieceFailure::Fatal(QuarkError::Provider(format!("MEGA 错误码 {other}"))),
+                other => PieceFailure::Fatal(QuarkError::Mega(MegaFailure::ApiError { code: other })),
             });
         }
     }
@@ -98,9 +98,9 @@ fn piece_reply(status: u16, body: &str, last: bool) -> Result<PieceReply, PieceF
         return Err(PieceFailure::Retry);
     }
     if status != 200 {
-        return Err(PieceFailure::Fatal(QuarkError::Provider(format!(
-            "MEGA 上传服务返回 HTTP {status}"
-        ))));
+        return Err(PieceFailure::Fatal(QuarkError::Mega(
+            MegaFailure::UploadHttpError { status },
+        )));
     }
     if !last {
         return Ok(PieceReply::Accepted);
@@ -271,9 +271,7 @@ impl MegaAccountClient<'_> {
                 (true, Some(delay), _) => std::thread::sleep(*delay),
                 (_, _, PieceFailure::Fatal(error)) => return Err(error),
                 (_, _, PieceFailure::Retry) => {
-                    return Err(QuarkError::Transport(
-                        "MEGA 上传服务暂时繁忙，请稍后重试".into(),
-                    ))
+                    return Err(QuarkError::Mega(MegaFailure::ServiceBusy))
                 }
             }
         }

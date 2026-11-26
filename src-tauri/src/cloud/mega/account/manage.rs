@@ -14,7 +14,8 @@ use super::api::AccountApi;
 use super::client::{special_ids, Listing, MegaAccountClient};
 use super::keys::Keyring;
 use super::nodes::{
-    decrypt, drive_root, find_node, is_within, raw_node, rubbish_root, tree_of, Tree,
+    ancestry, decrypt, drive_root, find_node, is_exported, is_within, raw_node, rubbish_root,
+    subtree, tree_of, Tree,
 };
 use super::seal::{attribute_key, name_attributes, seal_attributes, validate_name, wrap_key};
 use super::session::MegaSession;
@@ -89,7 +90,7 @@ impl MegaAccountClient<'_> {
             return drive_root(listing);
         }
         if parent_id == ids.recycle_bin {
-            return Err(QuarkError::InvalidInput("回收站不能作为目标目录".into()));
+            return Err(QuarkError::Mega(MegaFailure::InvalidDestination));
         }
         let node = valid_handle(parent_id)
             .then(|| raw_node(listing, parent_id))
@@ -156,10 +157,62 @@ impl MegaAccountClient<'_> {
                 if is_within(&snapshot.listing, &parent, id)? {
                     return Err(QuarkError::Mega(MegaFailure::InvalidMove));
                 }
-                self.api(&snapshot.session).move_node(id, &parent)?;
+                self.move_with_share_keys(snapshot, id, &parent)?;
             }
             Ok(())
         })
+    }
+
+    /// MEGA SDK CommandMoveNode uses TreeProcShareKeys(target, true):
+    /// every node of the moved subtree is wrapped for every shared ancestor
+    /// of the destination, including moves within or between existing shares.
+    /// Keep those keys on the move request, not a best-effort follow-up write.
+    fn move_with_share_keys(
+        &self,
+        snapshot: &Snapshot,
+        handle: &str,
+        parent: &str,
+    ) -> Result<(), QuarkError> {
+        let shares: Vec<String> = ancestry(&snapshot.listing, parent)?
+            .into_iter()
+            .filter(|candidate| {
+                snapshot.keyring.share_key(candidate).is_some()
+                    || is_exported(&snapshot.listing, candidate)
+            })
+            .collect();
+        if shares.is_empty() {
+            return self.api(&snapshot.session).move_node(handle, parent, None);
+        }
+        let tree = subtree(&snapshot.listing, &snapshot.keyring, handle)?;
+        if tree.nodes.is_empty() {
+            return Err(QuarkError::SourceFileMissing);
+        }
+        if tree.unreadable != 0 {
+            return Err(QuarkError::InvalidResponse);
+        }
+        let nodes: Vec<(&str, &[u8])> = tree
+            .nodes
+            .iter()
+            .map(|member| (member.node.handle.as_str(), &member.node.key[..]))
+            .collect();
+        let mut key_state = None;
+        let mut requests = Vec::new();
+        for (index, share_handle) in shares.iter().enumerate() {
+            let key = self
+                .folder_share_key(snapshot, share_handle, &mut key_state)?
+                .ok_or(QuarkError::Mega(MegaFailure::KeysUnsupported))?;
+            let cr = super::folder_share::share_keys_cr(share_handle, &key, &nodes)
+                .ok_or(QuarkError::Storage)?;
+            for request in cr[2].as_array().ok_or(QuarkError::Storage)?.chunks_exact(3) {
+                requests.extend([json!(index), request[1].clone(), request[2].clone()]);
+            }
+        }
+        let handles: Vec<&str> = nodes.iter().map(|(handle, _)| *handle).collect();
+        self.api(&snapshot.session).move_node(
+            handle,
+            parent,
+            Some(json!([shares, handles, requests])),
+        )
     }
 
     /// Moves the nodes to the rubbish bin, noting where each one came from so
@@ -175,7 +228,7 @@ impl MegaAccountClient<'_> {
                 if let Some(origin) = raw["p"].as_str().filter(|handle| valid_handle(handle)) {
                     self.remember_origin(snapshot, id, origin)?;
                 }
-                self.api(&snapshot.session).move_node(id, &rubbish)?;
+                self.move_with_share_keys(snapshot, id, &rubbish)?;
             }
             Ok(())
         })
@@ -204,7 +257,7 @@ impl MegaAccountClient<'_> {
                     Some(handle) if self.is_drive_folder(snapshot, &handle)? => handle,
                     _ => root.clone(),
                 };
-                self.api(&snapshot.session).move_node(id, &target)?;
+                self.move_with_share_keys(snapshot, id, &target)?;
             }
             Ok(())
         })

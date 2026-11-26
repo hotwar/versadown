@@ -719,3 +719,38 @@ fn a_new_folder_in_an_unshared_folder_never_reads_the_container() {
     client.create_directory(FOLDER, "fresh").unwrap();
     assert!(http.commands("uga").is_empty() && http.commands("k").is_empty());
 }
+
+#[test]
+fn move_into_a_key_manager_share_reads_its_key_once_and_sends_it_with_the_move() {
+    let attribute = attribute_with(Some(CONTAINER_STORED));
+    let share_key = [0x5A; 16];
+    {
+        let mut state = attribute.lock().unwrap();
+        let with_key = state.current().with_change(Change::AddShareKey {
+            handle: folder_binary(),
+            key: share_key,
+            flags: FLAG_TRUSTED | FLAG_IN_USE,
+        }).unwrap();
+        state.replace(&with_key);
+    }
+    let mut listing = exported_listing(&["EXP"]);
+    listing["f"].as_array_mut().unwrap().push(
+        node("MOVEDFIL", "ROOTNODE", 0, &file_key(11), "moved.txt")
+    );
+    let http = key_server(listing, &attribute, |command| match command["a"].as_str().unwrap() {
+        "m" => ok(json!(0)),
+        _ => code(-2),
+    });
+    let store = key_store();
+    let cache = ListingCache::default();
+    let client = key_client(&http, &store, &cache);
+    client.move_files(&["MOVEDFIL".into()], CHILD_FOLDER).unwrap();
+    assert_eq!(sequence(&http), ["uga", "m"]);
+    let moves = http.commands("m");
+    let cr = &moves[0].command["cr"];
+    assert_eq!(cr[0], json!([FOLDER]));
+    assert_eq!(cr[1], json!(["MOVEDFIL"]));
+    assert_eq!(&cr[2].as_array().unwrap()[..2], &[json!(0), json!(0)]);
+    assert_eq!(unwrap_with(&share_key, &cr[2][2]), file_key(11));
+    assert_eq!(attribute.lock().unwrap().writes, 0);
+}

@@ -21,15 +21,21 @@ function windowTitle(provider: CloudProvider): string {
 }
 
 /** Opens the provider's own share page in the embedded window that captures file downloads. */
-export function openBrowserShare(provider: CloudProvider, url: string): Promise<void> {
-  return invoke('cloud_open_browser_share', { url, title: windowTitle(provider), failureNotice: t('cloud.browserShare.notCaptured') });
+export function openBrowserShare(provider: CloudProvider, url: string, destinationDirectory?: string, privateDownload = false): Promise<void> {
+  return invoke<void>('cloud_open_browser_share', { url, destinationDirectory, privateDownload, title: windowTitle(provider), failureNotice: t('cloud.browserShare.notCaptured') }).catch(localizeBrowserShareFailure);
 }
 
-/** Opens again the share page a captured task came from; the task source names its provider. */
+function localizeBrowserShareFailure(error: unknown): never {
+  const message = typeof error === 'string' ? error : (error as { message?: unknown })?.message;
+  const translated = typeof message === 'string' ? shareFailureMessage(message) : undefined;
+  throw translated ? new Error(translated) : error;
+}
+
+/** Opens again the share page a captured task came from; task state stays backend-owned. */
 export function reopenBrowserShare(taskId: string, source: string | undefined): Promise<void> {
   const provider = /^cloud-share:\/\/([a-z0-9]+)\//.exec(source ?? '')?.[1] as CloudProvider | undefined;
   if (!provider) return Promise.reject(new Error(t('cloud.browserShare.failed')));
-  return invoke('cloud_reopen_browser_share', { taskId, title: windowTitle(provider), failureNotice: t('cloud.browserShare.notCaptured') });
+  return invoke<void>('cloud_reopen_browser_share', { taskId, title: windowTitle(provider), failureNotice: t('cloud.browserShare.notCaptured') }).catch(localizeBrowserShareFailure);
 }
 
 /** The notice text for one capture result. */

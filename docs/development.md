@@ -8,6 +8,7 @@
 
 - Tauri 2 + React + TypeScript 桌面界面，使用系统 WebView。
 - Rust 后端与本地 SQLite 任务存储。
+- CLI 和 stdio MCP 通过鉴权的本机接口复用桌面宿主、任务与下载引擎，权限确认和网盘登录在 VD 完成。
 - aria2-next 负责 HTTP/HTTPS、BT、ED2K、HLS/DASH 下载；FTP 使用进程内 Rust 引擎，支持断点续传。
 - yt-dlp 解析视频播放页，FFmpeg 合并音视频，QuickJS 提供所需的脚本运行环境。
 
@@ -102,6 +103,25 @@ powershell -ExecutionPolicy Bypass -File scripts/smoke-download.ps1
 `build:windows:release`，以保持旧自动化命令兼容。
 
 默认下载目录为当前 Windows 用户的 `Downloads`。任务数据库位于 Windows 应用数据目录中的 `VersaDown/tasks.sqlite`；不要手动复制其中可能关联授权会话的信息。
+
+## CLI/MCP 开发与验收
+
+当前 Agent 能力属于开发分支。Windows Quick 会在 `artifacts/quick/` 中同时收集 `versadown.exe`、`vd-cli.exe` 和 `vd-mcp-server.exe`，使用同次构建的完整目录测试，不从不同版本的缓存中拼装程序。macOS/Linux 的端到端运行、安装包中的配套分发仍待验收，不能以 Windows Quick 结果替代。
+
+仅启动 Vite 或 `tauri dev`，不保证已经生成 CLI/MCP 辅助程序。若高级设置显示缺少 `vd-mcp-server`，先通过 Windows Quick 构建生成配套程序，再从这份 Quick 启用 Agent 并复制配置。退出热运行进程后的按需启动也应使用完整 Quick 验收；MCP 配置不应依赖仍在运行的 Vite 服务。
+
+```powershell
+pnpm run build:windows:quick
+.\artifacts\quick\vd-cli.exe version
+.\artifacts\quick\vd-cli.exe doctor --lang zh-CN
+.\artifacts\quick\vd-cli.exe mcp-config --lang zh-CN
+```
+
+首次在对应 VD 窗口保存「允许本机 Agent 调用」，将生成的 MCP JSON 配置交给客户端，完成其信任与重新加载后实际调用 `vd_health`。诊断命令不修改授权，客户端也不能代替用户批准文件读写或网盘账号使用。
+
+验收应分别记录配套程序版本、使用的数据目录、实际工具调用、授权接续和最终任务结果。上传成功后重新列目录并下载回读校验；冷启动、桌面重启、第三方客户端交互和不同平台结果分别记录。开发分支的 Windows 百度实测依据见 [网盘登录与操作验收](baidu-session-acceptance.md)，协议和使用步骤见 [CLI 与 MCP 文档](cli.md)。
+
+CLI/MCP 的功能、命令或接入界面变更时，同步更新 README、`docs/cli.md` 和相关截图。公开截图使用真实界面并遮盖账号、个人路径及凭据；第三方客户端截图注明展示范围，工具列表或配置截图不作为真实传输成功的回执。
 
 ## 持续集成与发布
 

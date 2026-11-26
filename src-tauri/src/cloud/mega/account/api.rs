@@ -87,7 +87,7 @@ fn next_request_id() -> u64 {
 }
 
 fn busy() -> QuarkError {
-    QuarkError::Transport("MEGA 服务暂时繁忙，请稍后重试".into())
+    QuarkError::Mega(MegaFailure::ServiceBusy)
 }
 
 fn api_error(code: i64, purpose: Purpose, retry_after_secs: Option<u64>) -> QuarkError {
@@ -113,7 +113,7 @@ fn api_error(code: i64, purpose: Purpose, retry_after_secs: Option<u64>) -> Quar
         (EOVERQUOTA, _) => QuarkError::Mega(MegaFailure::QuotaExceeded { retry_after_secs }),
         (EAGAIN | ERATELIMIT | ETOOMANY | ETEMPUNAVAIL | ETOOMANYCONNECTIONS, _) => busy(),
         (EARGS, _) => QuarkError::InvalidResponse,
-        (other, _) => QuarkError::Provider(format!("MEGA 错误码 {other}")),
+        (other, _) => QuarkError::Mega(MegaFailure::ApiError { code: other }),
     }
 }
 
@@ -284,10 +284,19 @@ impl<'a> AccountApi<'a> {
             .map(|_| ())
     }
 
-    /// `m`: move a node below another one.
-    pub fn move_node(&self, handle: &str, target: &str) -> Result<(), QuarkError> {
-        self.call_value(json!({"a": "m", "n": handle, "t": target}), Purpose::Write)
-            .map(|_| ())
+    /// Move a node, carrying the subtree keys for destination shares in
+    /// the same request so success never depends on a later key publication.
+    pub fn move_node(
+        &self,
+        handle: &str,
+        target: &str,
+        share_keys: Option<Value>,
+    ) -> Result<(), QuarkError> {
+        let mut command = json!({"a": "m", "n": handle, "t": target});
+        if let Some(cr) = share_keys {
+            command["cr"] = cr;
+        }
+        self.call_value(command, Purpose::Write).map(|_| ())
     }
 
     /// `d`: delete a node and everything below it, permanently.
@@ -433,7 +442,7 @@ mod tests {
         ));
         assert!(matches!(
             failure("[-11]", Purpose::Session),
-            QuarkError::Provider(_)
+            QuarkError::Mega(MegaFailure::ApiError { code: -11 })
         ));
     }
 
@@ -486,7 +495,7 @@ mod tests {
         // `-23` means nothing special outside attribute commands.
         assert!(matches!(
             failure("[-23]", Purpose::Write),
-            QuarkError::Provider(_)
+            QuarkError::Mega(MegaFailure::ApiError { code: -23 })
         ));
     }
 
@@ -528,7 +537,7 @@ mod tests {
         ));
         assert!(matches!(
             failure("[-3]", Purpose::Session),
-            QuarkError::Transport(_)
+            QuarkError::Mega(MegaFailure::ServiceBusy)
         ));
         assert!(matches!(
             failure(r#"[{"e":-17,"tl":600}]"#, Purpose::NodeDownload),
@@ -540,10 +549,14 @@ mod tests {
 
     #[test]
     fn unknown_codes_and_malformed_bodies_never_echo_the_response() {
-        match failure("[-99]", Purpose::Session) {
-            QuarkError::Provider(message) => assert_eq!(message, "MEGA 错误码 -99"),
-            other => panic!("unexpected {other}"),
-        }
+        assert_eq!(
+            failure("[-99]", Purpose::Session).to_string(),
+            "cloud.error.mega.apiError:-99"
+        );
+        assert_eq!(
+            failure("[-3]", Purpose::Session).to_string(),
+            "cloud.error.mega.serviceBusy"
+        );
         for body in ["", "oops", "[]", "[1,2]", "null", "[true]"] {
             assert!(matches!(
                 failure(body, Purpose::Session),

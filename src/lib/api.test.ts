@@ -15,6 +15,32 @@ afterEach(() => {
   Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
 });
 
+it('translates resource recovery errors without exposing unknown backend details', async () => {
+  const { runTaskAction } = await import('./api');
+  const { t } = await import('../i18n');
+  native.invoke.mockRejectedValueOnce('agent.error.CLI_RECOVERY_REQUIRED');
+  await expect(runTaskAction('resource-task', 'resume')).rejects.toThrow(t('agent.error.CLI_RECOVERY_REQUIRED'));
+  native.invoke.mockRejectedValueOnce('agent.error.secret-provider-diagnostic');
+  await expect(runTaskAction('resource-task', 'pause')).rejects.toThrow(t('agent.error.ACTION_FAILED'));
+});
+
+it('uses the dedicated Agent authorization command and translates safe backend errors', async () => {
+  const { configureAgentAccess, defaultSettings } = await import('./api');
+  const settings = { enabled: true, allowedDirectories: ['C:\\Downloads'], uploadDirectories: [], cloudGrants: [] };
+  native.invoke.mockResolvedValueOnce({ ...defaultSettings, agentAccess: settings });
+  await expect(configureAgentAccess(settings)).resolves.toMatchObject({ agentAccess: settings });
+  expect(native.invoke).toHaveBeenCalledWith('configure_agent_access', { settings });
+  native.invoke.mockRejectedValueOnce('settings.agent.error.invalidDirectory');
+  await expect(configureAgentAccess(settings)).rejects.toThrow('每个授权目录都必须是已存在的绝对目录');
+});
+
+it('does not simulate a successful Agent grant in browser previews', async () => {
+  const { configureAgentAccess } = await import('./api');
+  Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+  await expect(configureAgentAccess({ enabled: true, allowedDirectories: ['C:\\Downloads'], uploadDirectories: [], cloudGrants: [] })).rejects.toThrow('桌面程序');
+  expect(native.invoke).not.toHaveBeenCalled();
+});
+
 it('round-trips an optional video cookie path and sends an explicit clear to settings', async () => {
   const { defaultSettings, getSettings, updateSettings } = await import('./api');
   const configured = { ...defaultSettings, videoCookieFile: 'C:\\Cookies\\session.txt' };
@@ -66,18 +92,12 @@ it('maps a share confirmation without inventing an aria2 task', async () => {
   });
 });
 
-it('opens the provider window for a browser-captured share instead of creating a task', async () => {
-  native.invoke
-    .mockResolvedValueOnce({ kind: 'browser_share', provider: 'gofile', url: 'https://gofile.io/d/AbC123' })
-    .mockResolvedValueOnce(undefined);
+it('prepares a browser capture without opening it before destination and privacy confirmation', async () => {
+  native.invoke.mockResolvedValueOnce({ kind: 'browser_share', provider: 'gofile', url: 'https://gofile.io/d/AbC123' });
   const { parseDownload } = await import('./api');
-
-  await expect(parseDownload('https://gofile.io/d/AbC123')).resolves.toEqual({ browserShare: { provider: 'gofile', page: 'https://gofile.io/d/AbC123' } });
-  expect(native.invoke).toHaveBeenLastCalledWith('cloud_open_browser_share', {
-    url: 'https://gofile.io/d/AbC123',
-    title: 'Gofile · 在页面里点击要下载的文件，软件会接管下载',
-    failureNotice: expect.stringContaining('没有被软件接管'),
-  });
+  await expect(parseDownload('https://gofile.io/d/AbC123', undefined, true)).resolves.toEqual({ browserShare: { provider: 'gofile', page: 'https://gofile.io/d/AbC123' } });
+  expect(native.invoke).toHaveBeenCalledTimes(1);
+  expect(native.invoke).toHaveBeenCalledWith('parse_download', { input: 'https://gofile.io/d/AbC123', accessCode: undefined, requireConfirmation: true });
 });
 
 it('maps an access-code requirement without creating a task', async () => {
@@ -403,4 +423,20 @@ it('submits only native preview and format IDs and releases a fully submitted pr
   });
   expect(native.invoke).toHaveBeenNthCalledWith(3, 'discard_video_preview', { previewId:'native-preview' });
   expect(created).toHaveBeenCalledWith(expect.objectContaining({id:'task-video'}));
+});
+
+it('loads the actual paired MCP program and setup prompt without changing settings', async () => {
+  const { getAgentConnectionInfo } = await import('./api');
+  const info = { executablePath: 'C:/VD 中文 space/vd-mcp-server.exe', executableExists: false, configJson: '{}', installationPrompt: 'Install complete VD bundle.' };
+  native.invoke.mockResolvedValueOnce(info);
+  await expect(getAgentConnectionInfo('zh-CN')).resolves.toEqual(info);
+  expect(native.invoke).toHaveBeenCalledTimes(1);
+  expect(native.invoke).toHaveBeenCalledWith('get_agent_connection_info', { lang: 'zh-CN' });
+});
+
+it('does not fabricate a connection configuration outside the desktop runtime', async () => {
+  const { getAgentConnectionInfo } = await import('./api');
+  Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+  await expect(getAgentConnectionInfo('en')).rejects.toThrow('桌面程序');
+  expect(native.invoke).not.toHaveBeenCalled();
 });

@@ -8,6 +8,23 @@ mod build_info;
 pub mod cloud;
 mod cloud_directory_events;
 mod commands;
+mod cli_protocol;
+mod cli_cloud_protocol;
+mod cli_cloud;
+mod cli_cloud_auth;
+mod cli_service;
+mod cli_host;
+mod cli_dispatch;
+mod cli_resources;
+mod cli_bt;
+mod agent_access;
+mod agent_permissions;
+mod agent_interaction_protocol;
+mod agent_interactions;
+mod agent_connect;
+mod cli_setup;
+mod cli_client;
+mod agent_runtime;
 mod connectors;
 mod downloader;
 mod duplicates;
@@ -26,6 +43,7 @@ mod link_association;
 mod local_upload_picker;
 mod magnet_metadata;
 mod models;
+pub mod native_menu_labels;
 #[cfg(all(target_os = "macos", feature = "native-smoke"))]
 mod native_smoke;
 mod output_path;
@@ -58,7 +76,7 @@ pub use engine_runtime::{
 };
 pub use ftp::{parse_ftp_url, FtpDownloadEngine, FtpDownloadError, FtpDownloadLimits, FtpTarget};
 pub use launcher::{
-    launcher_menu_entries, should_apply_launcher_window_visibility, tray_menu_entries,
+    launcher_menu_actions, should_apply_launcher_window_visibility, tray_menu_entries,
     LauncherInteractionState,
 };
 pub use magnet_metadata::{
@@ -244,18 +262,43 @@ async fn main_window_interaction_state(app: tauri::AppHandle) -> Result<serde_js
     }
 }
 
-pub fn run() {
+pub fn run() -> i32 {
+    let startup_options = match agent_runtime::StartupOptions::from_env() {
+        Ok(options) => options,
+        Err(_) => return 3,
+    };
+    // Check before the single-instance plugin: an already-running desktop with
+    // Agent access disabled otherwise acknowledges a second launch with code 0.
+    // No task database, engine, or UI is opened by this authorization preflight.
+    if let Err(exit_code) = agent_runtime::check_agent_startup(&startup_options) {
+        return exit_code;
+    }
+    let mut context = tauri::generate_context!();
+    let instance_identifier =
+        startup_options.single_instance_identifier(&context.config().identifier);
+    context.config_mut().identifier = instance_identifier;
+    agent_runtime::configure_window_creation(
+        &mut context.config_mut().app.windows,
+        startup_options.agent_host,
+    );
+    let startup_exit = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(1));
+    let setup_exit = std::sync::Arc::clone(&startup_exit);
     webview_memory::apply_process_defaults();
     // Managed before any plugin: the single-instance callback can queue links
     // while setup is still running.
-    let builder =
-        tauri::Builder::default().manage(external_links::PendingExternalLinks::default());
+    let builder = tauri::Builder::default()
+        .manage(external_links::PendingExternalLinks::default())
+        .manage(agent_runtime::RuntimeState::new(startup_options.clone()));
     // A second launch, such as a link clicked in a browser, hands its arguments
-    // to the running app and exits. Background UI tests run their own instance.
-    let builder = if std::env::var("VERSADOWN_BACKGROUND_UI_TEST").as_deref() == Ok("1") {
+    // to the running app and exits. Background tests normally skip activation
+    // IPC; the explicit fixture uses a profile-specific identifier instead.
+    let builder = if !startup_options.use_single_instance() {
         builder
     } else {
         builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if agent_runtime::is_agent_host_request(args.iter().skip(1)) {
+                return;
+            }
             let links = external_links::links_from_args(args.iter().skip(1));
             if links.is_empty() {
                 launcher::reveal_manager(app, None);
@@ -264,7 +307,7 @@ pub fn run() {
             }
         }))
     };
-    builder
+    let application = builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -308,7 +351,8 @@ pub fn run() {
                 );
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
+            let result = (|| -> Result<(), Box<dyn std::error::Error>> {
             #[cfg(target_os = "macos")]
             app.manage(std::sync::Arc::new(launcher_input::macos::InputMonitor::default()));
             app.manage(window_icon::TaskbarIconState::default());
@@ -316,14 +360,35 @@ pub fn run() {
             let lifecycle = std::sync::Arc::new(ApplicationLifecycle::new());
             app.manage(std::sync::Arc::clone(&lifecycle));
             let background_ui_test = std::env::var("VERSADOWN_BACKGROUND_UI_TEST").ok();
-            let data_dir = if background_ui_test.as_deref() == Some("1") {
-                std::env::var_os("VERSADOWN_TEST_DATA_DIR")
-                    .map(std::path::PathBuf::from)
-                    .ok_or("后台界面测试必须提供隔离的数据目录")?
-            } else {
-                app.path().app_data_dir()?
+            let data_dir = startup_options.data_dir.clone();
+            // This lease, unlike desktop activation IPC, also protects isolated
+            // profiles and concurrent launches before the IPC endpoint exists.
+            let lease = match agent_runtime::ProfileLease::acquire(&data_dir) {
+                Ok(lease) => lease,
+                Err(error) => {
+                    // A concurrent desktop may own the profile before its
+                    // activation IPC/API is ready. Let the client wait for it.
+                    if startup_options.agent_host && error.kind() == std::io::ErrorKind::WouldBlock {
+                        setup_exit.store(0, std::sync::atomic::Ordering::Release);
+                    }
+                    return Err(error.into());
+                }
             };
-            std::fs::create_dir_all(&data_dir)?;
+            app.manage(lease);
+            let settings_path = data_dir.join("settings.json");
+            let mut settings = agent_runtime::load_settings(&data_dir);
+            // Authorization may have changed after preflight while another
+            // process was starting. Recheck under the profile lease, before DB.
+            if startup_options.agent_host && !settings.agent_access.enabled {
+                setup_exit.store(4, std::sync::atomic::Ordering::Release);
+                return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "Agent access disabled").into());
+            }
+            #[cfg(target_os = "macos")]
+            if startup_options.agent_host {
+                app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
+            // Also available when an Agent host creates its desktop UI later.
+            app.manage(native_menu_labels::NativeMenuLabelStore::open(&data_dir));
             if let Err(error) = aria2::migrate_legacy_ed2k_discovery_state(&data_dir) {
                 eprintln!("Unable to migrate legacy eD2K discovery state: {error}");
             }
@@ -338,6 +403,8 @@ pub fn run() {
             if !startup_health.credentials_unavailable {
                 commands::purge_tianyi_local_state(&store, &cloud).map_err(std::io::Error::other)?;
             }
+            store.recover_agent_resource_intents()?;
+            store.recover_agent_cloud().map_err(std::io::Error::other)?;
             store.recover_video_downloads()?;
             store.recover_interrupted_cloud_directories()?;
             // aria2 persists the short-lived direct URL it received from a
@@ -386,11 +453,6 @@ pub fn run() {
                         .unwrap_or_else(|| data_dir.join("downloads"))
                 }
             };
-            let settings_path = data_dir.join("settings.json");
-            let mut settings: AppSettings = std::fs::read(&settings_path)
-                .ok()
-                .and_then(|json| serde_json::from_slice(&json).ok())
-                .unwrap_or_default();
             #[cfg(target_os = "macos")]
             {
                 match ai_secrets.contains_local(ai::API_KEY_SECRET_NAME) {
@@ -430,17 +492,6 @@ pub fn run() {
             settings.aria2.ensure_rpc_token();
             settings.aria2.validate().map_err(std::io::Error::other)?;
             std::fs::write(&settings_path, serde_json::to_vec_pretty(&settings)?)?;
-            let launcher_visibility = settings.launcher_visibility;
-            if background_ui_test.as_deref() != Some("1") {
-                let enabled = settings.associate_download_links;
-                let data_dir = data_dir.clone();
-                // xdg-mime can take a moment; startup does not wait for it.
-                std::thread::spawn(move || {
-                    if let Err(error) = link_association::sync(enabled, &data_dir) {
-                        eprintln!("Unable to update link association: {error}");
-                    }
-                });
-            }
             let cloud_upload_limit = settings.cloud_upload_limit;
             let destination = std::path::PathBuf::from(&settings.download_directory);
             std::fs::create_dir_all(&destination)?;
@@ -468,6 +519,7 @@ pub fn run() {
                 cloud_download_dispatch: cloud_download_dispatch.clone(),
                 range_gateway: std::sync::Arc::clone(&range_gateway),
             });
+            app.manage(std::sync::Arc::clone(&events));
             let video_events = events.clone();
             let runtime = std::sync::Arc::new(EngineRuntime::new(
                 launch_config,
@@ -493,37 +545,36 @@ pub fn run() {
                 range_gateway,
                 xunlei_native_backend,
             });
-            #[cfg(target_os = "macos")]
-            app.set_menu(launcher::macos_application_menu(app.handle())?)?;
+            cloud::commands::resume_pending_mega_integrity_checks(app.handle().clone());
+            let authorization_app = app.handle().clone();
+            let dispatch_state = app.state::<commands::AppState>();
+            let cli_dispatcher = cli_dispatch::CliDispatcher::start(
+                std::sync::Arc::clone(&dispatch_state.store),
+                std::sync::Arc::clone(&dispatch_state.runtime),
+                std::sync::Arc::new(move |id, path| {
+                    let state = authorization_app.state::<commands::AppState>();
+                    agent_permissions::authorize_download_file_in_scope(&state, &id.to_string(), path).is_ok()
+                }),
+            );
+            app.manage(cli_dispatcher);
+            cli_resources::start(app.handle().clone());
+            cli_cloud_auth::register(app.handle());
+            agent_interactions::register(app.handle());
+            cli_cloud::start(app.handle().clone());
+            if let Err(error) = cli_host::start(app.handle(), &data_dir) {
+                if startup_options.agent_host {
+                    return Err(error.into());
+                }
+                // Do not disclose filesystem paths or credentials in diagnostics.
+                eprintln!("{}", cli_protocol::message("HOST_UNAVAILABLE", "en"));
+            }
             app.manage(launcher::LauncherInteractionState::new(
                 background_ui_test.as_deref() == Some("1"),
             ));
-            // Created only after `AppState` is managed: its page reads settings
-            // as soon as it loads.
-            let launcher =
-                launcher_window::ensure_launcher_window(app.handle(), launcher_visibility)
-                    .map_err(std::io::Error::other)?;
-            if let Some(main) = app.get_webview_window("main") {
-                webview_memory::configure_webview(&main);
+            if !startup_options.agent_host {
+                agent_runtime::ensure_desktop_ui(app.handle()).map_err(std::io::Error::other)?;
             }
-            #[cfg(windows)]
-            if background_ui_test.as_deref() != Some("1") {
-                if let Some(main) = app.get_webview_window("main") {
-                    window_interaction::install(&main).map_err(std::io::Error::other)?;
-                }
-            }
-            if should_show_windows(background_ui_test.as_deref()) {
-                launcher::setup_manager_tray(app.handle()).map_err(std::io::Error::other)?;
-                if let Some(main) = app.get_webview_window("main") {
-                    main.set_min_size(Some(tauri::LogicalSize::new(960.0, 640.0)))?;
-                    main.show()?;
-                }
-                if launcher_visibility == LauncherVisibility::Always {
-                    if let Some(launcher) = launcher {
-                        launcher_window::present_launcher(launcher)?;
-                    }
-                }
-            }
+            agent_runtime::finish_setup(app.handle());
             let startup_app = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let _availability = runtime.initialize().await;
@@ -594,15 +645,32 @@ pub fn run() {
                 }
             });
             // A link that started the app waits until the manager takes it.
-            external_links::deliver(
-                app.handle(),
-                external_links::links_from_args(std::env::args_os().skip(1)),
-            );
+            if !startup_options.agent_host {
+                external_links::deliver(
+                    app.handle(),
+                    external_links::links_from_args(std::env::args_os().skip(1)),
+                );
+            }
             #[cfg(all(target_os = "macos", feature = "native-smoke"))]
             native_smoke::schedule(app.handle())?;
             Ok(())
+            })();
+            if result.is_err() {
+                // Tauri turns setup errors into a panic. Request an orderly
+                // event-loop exit instead so bootstrap receives our exit code.
+                if let Some(lifecycle) = app.try_state::<std::sync::Arc<ApplicationLifecycle>>() {
+                    lifecycle.begin_exit();
+                }
+                app.handle().exit(setup_exit.load(std::sync::atomic::Ordering::Acquire));
+            }
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            agent_access::configure_agent_access,
+            agent_connect::get_agent_connection_info,
+            agent_interactions::agent_interaction_view,
+            agent_interactions::agent_interaction_choose_directory,
+            agent_interactions::agent_interaction_decide,
             build_info::get_build_info,
             startup::startup_health,
             web_video::submit_video_download,
@@ -685,6 +753,8 @@ pub fn run() {
             launcher::run_launcher_menu_action,
             launcher::launcher_manager_visible,
             launcher::toggle_manager_from_launcher,
+            launcher::hide_manager_window,
+            launcher::set_native_menu_labels,
             launcher::reveal_manager_from_launcher,
             launcher::launcher_interaction_snapshot,
             launcher::manager_window_snapshot,
@@ -695,9 +765,12 @@ pub fn run() {
             window_lifecycle::foreground_window_handle_for_test,
             window_lifecycle::manager_close_request_count_for_test
         ])
-        .build(tauri::generate_context!())
-        .expect("error while building VersaDown")
-        .run(|app, event| {
+        .build(context);
+    let application = match application {
+        Ok(application) => application,
+        Err(_) => return startup_exit.load(std::sync::atomic::Ordering::Acquire),
+    };
+    application.run_return(|app, event| {
             #[cfg(target_os = "macos")]
             match &event {
                 tauri::RunEvent::Opened { urls } => {
@@ -722,7 +795,7 @@ pub fn run() {
                     }
                 }
             }
-        });
+        })
 }
 
 /// Runs the private no-UI Linux Xunlei worker before Tauri is initialized.

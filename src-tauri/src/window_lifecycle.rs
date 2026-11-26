@@ -109,12 +109,7 @@ pub fn handle_manager_window_event(
         let app = window.app_handle().clone();
         tauri::async_runtime::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            let Some(manager) = app.get_webview_window("main") else {
-                return;
-            };
-            if hide_window_immediately(&manager).is_ok() {
-                crate::launcher::set_tray_manager_visibility(&app, false);
-            }
+            let _ = crate::launcher::hide_manager(&app);
         });
     }
 }

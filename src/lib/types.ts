@@ -169,7 +169,7 @@ export type ParseDownloadResult =
   | { shareAccessCodeRequired: CloudShareAccessCodeRequired; task?: never; confirmation?: never; duplicate?: never; videos?: never; browserShare?: never }
   | { duplicate: DuplicateDownload; task?: never; confirmation?: never; shareAccessCodeRequired?: never; videos?: never; browserShare?: never }
   | { videos: VideoPreview[]; task?: never; confirmation?: never; shareAccessCodeRequired?: never; duplicate?: never; browserShare?: never }
-  /** The share opened in the provider's own browser window; the user picks files there. */
+  /** A share that needs a browser capture after destination/privacy confirmation. */
   | { browserShare: BrowserShareOpened; task?: never; confirmation?: never; shareAccessCodeRequired?: never; duplicate?: never; videos?: never };
 
 export type ProxyProtocol = 'http' | 'https';
@@ -215,6 +215,26 @@ export interface Aria2Settings {
   p2pUploadLimit: number;
 }
 
+export interface AgentCloudGrant {
+  provider: import('./cloudTypes').CloudProvider;
+  accountId: string;
+  accountLabel?: string;
+}
+
+export interface AgentConnectionInfo {
+  executablePath: string;
+  executableExists: boolean;
+  configJson: string;
+  installationPrompt: string;
+}
+
+export interface AgentAccessSettings {
+  enabled: boolean;
+  allowedDirectories: string[];
+  uploadDirectories: string[];
+  cloudGrants: AgentCloudGrant[];
+}
+
 export interface AppSettings {
   downloadDirectory: string;
   launcherVisibility: LauncherVisibility;
@@ -228,6 +248,7 @@ export interface AppSettings {
   associateDownloadLinks?: boolean;
   privacyDownloadEnabled?: boolean;
   privacyPasswordConfigured?: boolean;
+  agentAccess?: AgentAccessSettings;
   cloudUploadLimit?: number;
 }
 

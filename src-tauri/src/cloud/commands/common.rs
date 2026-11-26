@@ -49,10 +49,12 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
         QuarkError::PikpakOperationVerificationRequired(_) => {
             "PikPak 需要官方操作验证，请在我的网盘中完成验证后重试".into()
         }
+        QuarkError::BaiduDriveVerificationRequired => error.to_string(),
         QuarkError::BaiduOperationVerificationRequired => {
             "baidu_operation_verification_required".into()
         }
         QuarkError::BaiduUploadAuthorizationRequired(stage) => stage.message().into(),
+        QuarkError::BaiduUploadPrecreateRejected { .. } | QuarkError::BaiduUploadWebSessionRequired => error.to_string(),
         QuarkError::PikpakRegionalMembershipRestricted => {
             "区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员"
                 .into()
@@ -103,8 +105,11 @@ pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
         QuarkError::PikpakOperationVerificationRequired(_) => {
             "pikpak_operation_verification_required"
         }
+        QuarkError::BaiduDriveVerificationRequired => "baidu_drive_verification_required",
         QuarkError::BaiduOperationVerificationRequired => "baidu_operation_verification_required",
         QuarkError::BaiduUploadAuthorizationRequired(stage) => stage.code(),
+        QuarkError::BaiduUploadWebSessionRequired => "baidu_upload_web_session_required",
+        QuarkError::BaiduUploadPrecreateRejected { .. } => "baidu_upload_precreate_rejected",
         QuarkError::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
         QuarkError::AuthorizationPending => "authorization_pending",
         QuarkError::SourceFileMissing => "source_file_missing",
@@ -121,6 +126,8 @@ pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
             "quark_share_transfer_failed"
         }
         QuarkError::Provider(_) => "provider_error",
+        QuarkError::InvalidInput(message) if message=="agent.error.cloudWriteRequired" => "CLOUD_WRITE_REQUIRED",
+        QuarkError::InvalidInput(message) if message=="agent.error.forbidden" => "FORBIDDEN",
         QuarkError::InvalidInput(_) => "invalid_input",
         QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => "provider_unsupported",
         QuarkError::Mega(failure) => failure.code(),
@@ -205,7 +212,8 @@ async fn run_initialized<T: Send + 'static>(
 
 pub(crate) struct SessionWorkContext<'a> {
     pub store: crate::cloud::driver::StoreRef<'a>,
-    state: &'a CloudState,
+    pub(super) snapshot: Option<&'a auth_supervisor::SessionSnapshot>,
+    pub(super) state: &'a CloudState,
 }
 impl std::ops::Deref for SessionWorkContext<'_> {
     type Target = CloudState;
@@ -279,14 +287,15 @@ async fn run_authorized_work<T: Send + 'static>(
         },
         provider,
         move |state, http| {
-            state.auth_supervisor.run_checked(
+            state.auth_supervisor.run_with_snapshot(
                 &state.store,
                 provider,
                 kind,
-                |snapshot| {
+                |credentials, snapshot| {
                     work(
                         &SessionWorkContext {
-                            store: crate::cloud::driver::StoreRef(snapshot),
+                            store: crate::cloud::driver::StoreRef(credentials),
+                            snapshot,
                             state,
                         },
                         http,
@@ -325,6 +334,7 @@ async fn run_accountless_work<T: Send + 'static>(
             let result = work(
                 &SessionWorkContext {
                     store: crate::cloud::driver::StoreRef(&state.store),
+                    snapshot: None,
                     state,
                 },
                 http,

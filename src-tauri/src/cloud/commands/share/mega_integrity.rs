@@ -1,56 +1,35 @@
-//! MEGA downloads are verified after the fact: aria2 only ever sees the
-//! plaintext the gateway decrypts, so the MAC in the file key is checked
-//! against the finished file. Two sources carry such a key:
-//!
-//! * a pasted link (`cloud-share://`): the key is read from the encrypted share
-//!   plan;
-//! * a file of the signed-in account (`cloud://mega/<node>`): the key is read
-//!   from the account's own node listing.
-//!
-//! The task record never carries key material.
+//! MEGA bytes remain Processing until their MAC has been checked. The store
+//! installs that durable barrier before publishing an engine completion.
+//! Share plans and account listings retain keys; task records contain no keys.
 
 use super::*;
+use crate::cloud::mega::MegaFailure;
 
-/// Tasks whose file is being verified right now, so repeated completion
-/// events cannot start a second pass over a large file.
-static IN_FLIGHT: Mutex<Option<HashSet<uuid::Uuid>>> = Mutex::new(None);
+/// Separate attempts can share a native GID, so claim the durable marker too.
+static IN_FLIGHT: Mutex<Option<HashSet<(uuid::Uuid, String)>>> = Mutex::new(None);
 
-fn claim(id: uuid::Uuid) -> bool {
-    IN_FLIGHT
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get_or_insert_with(HashSet::new)
-        .insert(id)
+fn claim(attempt: &(uuid::Uuid, String)) -> bool {
+    IN_FLIGHT.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get_or_insert_with(HashSet::new).insert(attempt.clone())
 }
 
-fn release(id: uuid::Uuid) {
-    if let Some(set) = IN_FLIGHT
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .as_mut()
-    {
-        set.remove(&id);
+fn release(attempt: &(uuid::Uuid, String)) {
+    if let Some(set) = IN_FLIGHT.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).as_mut() {
+        set.remove(attempt);
     }
 }
 
-/// The single local file a completed MEGA task produced.
+/// The one selected, absolute output path; any ambiguity fails verification.
 fn downloaded_file(store: &TaskStore, id: uuid::Uuid) -> Option<PathBuf> {
-    let mut files = store
-        .files(id)
-        .ok()?
-        .into_iter()
-        .filter(|file| file.selected)
-        .map(|file| PathBuf::from(file.path));
+    let mut files = store.files(id).ok()?.into_iter()
+        .filter(|file| file.selected).map(|file| PathBuf::from(file.path));
     let path = files.next().filter(|path| path.is_absolute())?;
     files.next().is_none().then_some(path)
 }
 
-/// Where a MEGA task's file key can be found again.
 #[derive(Debug, PartialEq, Eq)]
 enum KeySource {
-    /// A pasted link: the share plan holds the key.
     SharePlan,
-    /// A node of the signed-in account.
     Account(String),
 }
 
@@ -64,85 +43,68 @@ fn key_source(source: &str) -> Option<KeySource> {
     }
 }
 
-/// Starts the integrity check of a completed MEGA task, if it is one.
+/// Used after AppState and the event sink exist, even when no engine GID was
+/// restored. Only unfinished verification is resumed, never completed tasks.
+pub(crate) fn resume_pending_mega_integrity_checks(app: AppHandle) {
+    let Some(state) = app.try_state::<AppState>() else { return; };
+    let Ok(tasks) = state.store.list() else { return; };
+    for task in tasks {
+        schedule_mega_integrity_check(app.clone(), &task);
+    }
+}
+
 pub(super) fn schedule_mega_integrity_check(app: AppHandle, task: &DownloadTask) {
-    if task.status != TaskStatus::Completed {
+    if !crate::store::is_mega_integrity_pending(task) {
         return;
     }
-    let Some(origin) = key_source(&task.source) else {
-        return;
-    };
-    let id = task.id;
-    if !claim(id) {
+    let attempt = (task.id, task.failure_code.clone().expect("pending marker"));
+    if !claim(&attempt) {
         return;
     }
-    let source = task.source.clone();
+    let pending = task.clone();
     tauri::async_runtime::spawn(async move {
         let worker = app.clone();
-        let outcome = tauri::async_runtime::spawn_blocking(move || {
-            verify_task(&worker, id, &source, &origin)
-        })
-        .await;
-        release(id);
-        if let Ok(Some(failure)) = outcome {
-            fail_task(&app, id, failure);
+        let checked = pending.clone();
+        let outcome = tauri::async_runtime::spawn_blocking(move || verify_task(&worker, &checked))
+            .await.unwrap_or(Err(MegaFailure::IntegrityUnavailable));
+        let finished = app.try_state::<AppState>()
+            .and_then(|state| state.store.finish_mega_integrity(&pending, outcome).ok().flatten());
+        release(&attempt);
+        if let Some(task) = finished {
+            // The same completion path releases dispatch/gateway slots and
+            // refreshes directory aggregates as well as publishing GUI events.
+            if let Some(events) = app.try_state::<Arc<crate::TauriDownloadEvents>>() {
+                crate::aria2::EventSink::task_updated(events.inner().as_ref(), &task);
+            }
         }
     });
 }
 
-/// `Some` only when the file was read and does not match its MAC; a check that
-/// could not run (file moved, plan gone, signed out) leaves the completed task
-/// alone.
-fn verify_task(
-    app: &AppHandle,
-    id: uuid::Uuid,
-    source: &str,
-    origin: &KeySource,
-) -> Option<crate::cloud::mega::MegaFailure> {
-    let state = app.try_state::<AppState>()?;
-    let cloud = app.try_state::<Arc<CloudState>>()?;
-    let path = downloaded_file(&state.store, id)?;
-    let result = match origin {
-        KeySource::SharePlan => {
-            let entry = cloud.share_plans.resolve_entry(source).ok()?;
-            crate::cloud::mega::verify_downloaded_file(&entry, &path)
-        }
-        KeySource::Account(node) => {
-            crate::cloud::mega::account::MegaAccountClient::new(&cloud.http, &cloud.store)
-                .verify_download(node, &path)
-        }
-    };
+/// A missing key, missing/unreadable file, provider failure or worker failure
+/// is not proof of a valid download, and is distinct from a MAC mismatch.
+fn verification_outcome(result: Result<(), QuarkError>) -> Result<(), MegaFailure> {
     match result {
-        Err(QuarkError::Mega(failure @ crate::cloud::mega::MegaFailure::IntegrityFailed)) => {
-            Some(failure)
-        }
-        _ => None,
+        Ok(()) => Ok(()),
+        Err(QuarkError::Mega(MegaFailure::IntegrityFailed)) => Err(MegaFailure::IntegrityFailed),
+        Err(_) => Err(MegaFailure::IntegrityUnavailable),
     }
 }
 
-fn fail_task(app: &AppHandle, id: uuid::Uuid, failure: crate::cloud::mega::MegaFailure) {
-    let Some(state) = app.try_state::<AppState>() else {
-        return;
-    };
-    let Ok(mut task) = state.store.find(id) else {
-        return;
-    };
-    if task.status != TaskStatus::Completed {
-        return;
+fn verify_task(app: &AppHandle, task: &DownloadTask) -> Result<(), MegaFailure> {
+    let state = app.try_state::<AppState>().ok_or(MegaFailure::IntegrityUnavailable)?;
+    let cloud = app.try_state::<Arc<CloudState>>().ok_or(MegaFailure::IntegrityUnavailable)?;
+    let path = downloaded_file(&state.store, task.id).ok_or(MegaFailure::IntegrityUnavailable)?;
+    match key_source(&task.source).ok_or(MegaFailure::IntegrityUnavailable)? {
+        KeySource::SharePlan => {
+            let entry = cloud.share_plans.resolve_entry(&task.source)
+                .map_err(|_| MegaFailure::IntegrityUnavailable)?;
+            verification_outcome(crate::cloud::mega::verify_downloaded_file(&entry, &path))
+        }
+        KeySource::Account(node) => verification_outcome(
+            crate::cloud::mega::account::MegaAccountClient::new(&cloud.http, &cloud.store)
+                .verify_download(&node, &path),
+        ),
     }
-    task.status = TaskStatus::Failed;
-    task.error = Some(failure.message());
-    task.failure_code = Some(failure.code().to_owned());
-    let Ok(task) = state.store.apply_transfer_snapshot(task) else {
-        return;
-    };
-    let cloud = app.try_state::<Arc<CloudState>>();
-    let _ = crate::commands::emit_task_update_for_task(
-        app,
-        &state.store,
-        cloud.as_ref().map(|cloud| &cloud.share_plans),
-        task,
-    );
 }
 
 #[cfg(test)]
@@ -151,12 +113,23 @@ mod tests {
 
     #[test]
     fn only_mega_sources_carry_a_key_to_verify_against() {
-        assert_eq!(
-            key_source("cloud://mega/AbCd1234"),
-            Some(KeySource::Account("AbCd1234".into()))
-        );
+        assert_eq!(key_source("cloud://mega/AbCd1234"), Some(KeySource::Account("AbCd1234".into())));
         assert_eq!(key_source("cloud://quark/AbCd1234"), None);
         assert_eq!(key_source("https://example.com/file.bin"), None);
         assert_eq!(key_source("cloud://mega/"), None);
+    }
+
+    #[test]
+    fn missing_keys_and_io_failures_never_count_as_verified_or_as_a_mac_mismatch() {
+        assert_eq!(verification_outcome(Ok(())), Ok(()));
+        assert_eq!(
+            verification_outcome(Err(QuarkError::Mega(MegaFailure::IntegrityFailed))),
+            Err(MegaFailure::IntegrityFailed)
+        );
+        for error in [QuarkError::Storage, QuarkError::NotAuthorized,
+            QuarkError::SourceFileMissing, QuarkError::InvalidResponse]
+        {
+            assert_eq!(verification_outcome(Err(error)), Err(MegaFailure::IntegrityUnavailable));
+        }
     }
 }
