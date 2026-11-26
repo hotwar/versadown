@@ -52,6 +52,11 @@ pub struct ProviderDescriptor {
     /// login recovery and are not bound to an account.
     #[serde(skip)]
     pub public_shares_need_session: bool,
+    /// Whether a public share is opened in an embedded browser window and its
+    /// file requests are captured there, instead of being read through an
+    /// adapter. The provider's own page does all the work (password, tokens);
+    /// the app only takes over the final file download.
+    pub public_shares_browser_capture: bool,
     pub display_name: &'static str,
     pub share_display_name: &'static str,
     pub upload_display_name: &'static str,
@@ -187,6 +192,7 @@ impl ProviderRegistry {
                     account_quota: options.mega_account_quota,
                 })
             }
+            CloudProvider::Gofile => read_only!(super::gofile::GofileShareAdapter::new(http)),
         }
     }
     pub fn global() -> &'static Self {
@@ -345,6 +351,17 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             &["mega.nz", "www.mega.nz", "mega.co.nz", "www.mega.co.nz"],
             &["/file/", "/folder/"],
         ),
+        // No account and no API: the share page runs in an embedded browser
+        // window (`public_shares_browser_capture`).
+        Gofile => (
+            "Gofile",
+            "0",
+            "__versa_down_gofile_recycle_bin__",
+            None,
+            "https://gofile.io",
+            &["gofile.io", "www.gofile.io"],
+            &["/d/"],
+        ),
     };
     let password_login_hosts: &'static [&'static str] = match provider {
         Baidu => &["pan.baidu.com", "passport.baidu.com"],
@@ -356,18 +373,21 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
     // new provider cannot silently inherit the wrong session semantics.
     let account = match provider {
         Quark | Pikpak | Baidu | Tianyi | Aliyun | Xunlei | Uc | Mega => true,
+        Gofile => false,
     };
     let public_shares_need_session = match provider {
         Quark | Pikpak | Baidu | Tianyi | Aliyun | Xunlei | Uc => true,
-        Mega => false,
+        Mega | Gofile => false,
     };
     // MEGA's drive is fully managed, including copy (every node key of the
     // copied tree is re-encrypted for the account).
     let writable = account;
+    let public_shares_browser_capture = provider == Gofile;
     ProviderDescriptor {
         provider,
         account,
         public_shares_need_session,
+        public_shares_browser_capture,
         browser_context: provider == Tianyi,
         browser_profile_owner: provider == Baidu,
         recycle_directory_download: provider != Pikpak,
@@ -385,6 +405,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Xunlei => "迅雷网盘",
             Uc => "UC 网盘",
             Mega => "MEGA",
+            Gofile => "Gofile",
         },
         upload_display_name: match provider {
             Quark => "夸克",
@@ -395,6 +416,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Xunlei => "迅雷云盘",
             Uc => "UC网盘",
             Mega => "MEGA",
+            Gofile => "Gofile",
         },
         share_directory_name: match provider {
             Quark => "夸克分享目录",
@@ -405,6 +427,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Xunlei => "迅雷云盘分享目录",
             Uc => "UC网盘分享目录",
             Mega => "MEGA分享目录",
+            Gofile => "Gofile分享目录",
         },
         password_login_hosts,
         web_initialization_script: (provider == Xunlei)
@@ -416,7 +439,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
             Quark => &["https://pan.quark.cn", "https://drive-pc.quark.cn"],
             Baidu => &["https://pan.baidu.com"],
             Uc => &["https://drive.uc.cn", "https://pc-api.uc.cn"],
-            Pikpak | Aliyun | Xunlei | Mega => &[],
+            Pikpak | Aliyun | Xunlei | Mega | Gofile => &[],
         },
         authorization: CloudAuthorizationCapabilities {
             provider,
@@ -454,7 +477,7 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
         share_patterns,
         max_upload_concurrency: 2,
         download_concurrency: match provider {
-            Quark | Pikpak | Baidu | Aliyun | Uc => DownloadConcurrencyPolicy {
+            Quark | Pikpak | Baidu | Aliyun | Uc | Gofile => DownloadConcurrencyPolicy {
                 max_connections_per_file: 4,
                 max_concurrent_tasks: 4,
             },
@@ -492,6 +515,29 @@ fn descriptor(provider: CloudProvider) -> ProviderDescriptor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gofile_is_an_accountless_browser_captured_provider() {
+        let registry = ProviderRegistry::global();
+        let gofile = registry.get(CloudProvider::Gofile);
+        assert!(!gofile.account && !gofile.public_shares_need_session);
+        assert!(gofile.public_shares_browser_capture);
+        // No other provider routes its shares through the capture window.
+        for descriptor in registry.all() {
+            assert_eq!(
+                descriptor.public_shares_browser_capture,
+                descriptor.provider == CloudProvider::Gofile
+            );
+        }
+        let page = Url::parse("https://gofile.io/d/AbC123").unwrap();
+        assert_eq!(
+            registry.for_share_url(&page).unwrap().provider,
+            CloudProvider::Gofile
+        );
+        // A file server address is a download, not a share page.
+        let file = Url::parse("https://store1.gofile.io/download/web/id/a.bin").unwrap();
+        assert!(registry.for_share_url(&file).is_none());
+    }
 
     #[test]
     fn only_pikpak_advertises_share_pass_code_updates() {

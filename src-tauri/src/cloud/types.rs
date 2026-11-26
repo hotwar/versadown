@@ -11,9 +11,10 @@ pub enum CloudProvider {
     Xunlei,
     Uc,
     Mega,
+    Gofile,
 }
 impl CloudProvider {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Quark,
         Self::Pikpak,
         Self::Baidu,
@@ -22,6 +23,7 @@ impl CloudProvider {
         Self::Xunlei,
         Self::Uc,
         Self::Mega,
+        Self::Gofile,
     ];
 
     /// Tianyi remains a known serialized provider so historical task records
@@ -40,6 +42,7 @@ impl CloudProvider {
             Self::Xunlei => "xunlei",
             Self::Uc => "uc",
             Self::Mega => "mega",
+            Self::Gofile => "gofile",
         }
     }
 }
@@ -454,6 +457,8 @@ pub enum CloudError {
     ProviderUnsupported,
     #[error("{}", .0.message())]
     Mega(super::mega::MegaFailure),
+    #[error("{}", .0.message())]
+    Gofile(super::gofile::GofileFailure),
 }
 pub use CloudError as QuarkError;
 
@@ -563,6 +568,7 @@ impl Serialize for CloudError {
             Self::UploadUnavailable => "provider_unsupported",
             Self::ProviderUnsupported => "provider_unsupported",
             Self::Mega(failure) => failure.code(),
+            Self::Gofile(failure) => failure.code(),
         };
         // Xunlei verification keeps its stable reason on the wire so the
         // frontend can localize it; Display stays human-readable.

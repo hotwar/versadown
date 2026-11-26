@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { readFileSync } from 'node:fs';
-import { afterEach, vi } from 'vitest';
+import { afterEach, describe, vi } from 'vitest';
 import { isTauriRuntime, listPersistedTasks } from '../lib/api';
 import { NewDownloadDialog } from './NewDownloadDialog';
 import type { ParseDownloadResult, ScanDownloadProgress, ScanDownloadResult } from '../lib/types';
@@ -1187,4 +1187,38 @@ it('keeps the explicit empty new-task command usable inside the unified dialog',
 
   expect(await screen.findByText('manual.zip')).toBeVisible();
   expect(onScan).toHaveBeenCalledWith('https://example.test/manual.zip', expect.any(Function));
+});
+
+describe('a Gofile share awaiting download confirmation', () => {
+  const page = 'https://gofile.io/d/AbC123';
+  const parse = async () => ({ browserShare: { provider: 'gofile', page } }) as ParseDownloadResult;
+
+  it.each([false, true])('submits the chosen directory and privacy (%s) before opening a share', async (privateDownload) => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const browseDirectory = vi.fn().mockResolvedValue('D:/Selected');
+    render(<NewDownloadDialog open placement="modal" initialInput={page} privacyEnabled
+      downloadDirectory="C:/Default" browseDirectory={browseDirectory}
+      onScan={async () => [{ input: page, valid: true, kind: 'cloud_share' }]}
+      onParse={parse} onSubmitBatch={onSubmit} onClose={vi.fn()} />);
+    expect(await screen.findByText(/选择保存目录并新建任务后/)).toBeVisible();
+    expect(onSubmit).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: '更改' }));
+    expect(await screen.findByText('D:/Selected')).toBeVisible();
+    await userEvent.click(screen.getByRole('button', { name: privateDownload ? '新建隐私任务' : '新建任务' }));
+    expect(onSubmit).toHaveBeenCalledWith(
+      [expect.objectContaining({ status: 'browser_share', selected: true, result: { browserShare: { provider: 'gofile', page } } })],
+      'D:/Selected', privateDownload, '',
+    );
+  });
+
+  it('shows a failed opening and retains the draft for retry', async () => {
+    const onSubmit = vi.fn(async (items: DownloadDraftItem[]) => [{ id: items[0].id, message: 'Window unavailable' }]);
+    render(<NewDownloadDialog open initialInput={page}
+      onScan={async () => [{ input: page, valid: true, kind: 'cloud_share' }]}
+      onParse={parse} onSubmitBatch={onSubmit} onClose={vi.fn()} />);
+    await screen.findByText(/选择保存目录并新建任务后/);
+    await userEvent.click(screen.getByRole('button', { name: '新建任务' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Window unavailable');
+    expect(screen.getByRole('button', { name: '新建任务' })).toBeEnabled();
+  });
 });

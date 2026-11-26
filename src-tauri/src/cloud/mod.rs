@@ -10,6 +10,7 @@ pub mod download_dispatch;
 pub mod download_scheduler;
 pub mod download_transform;
 pub mod driver;
+pub mod gofile;
 mod http;
 pub mod mega;
 mod pikpak;

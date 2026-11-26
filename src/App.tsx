@@ -7,6 +7,7 @@ import { NewDownloadDialog } from './components/NewDownloadDialog';
 import { settingsWithRememberedDirectory } from './lib/downloadDirectory';
 import { selectedResourceIds, type DraftSubmissionFailure, type DownloadDraftItem } from './components/useDownloadDraftBatch';
 import { ParseConfirmDialog } from './components/ParseConfirmDialog';
+import { browserShareCaptureMessage, captureSignalKind, openBrowserShare, reopenBrowserShare, subscribeBrowserShareCapture, subscribeBrowserShareClosed, type BrowserShareSignal } from './lib/browserShare';
 import { DuplicateDownloadDialog } from './components/DuplicateDownloadDialog';
 import { RemoveTaskDialog } from './components/RemoveTaskDialog';
 import { TaskDetailsDialog } from './components/TaskDetailsDialog';
@@ -392,6 +393,8 @@ export function App() {
   };
   const [detailsTaskId, setDetailsTaskId] = useState<string | null>(null);
   const [pendingPurgeTaskIds, setPendingPurgeTaskIds] = useState<string[] | null>(null);
+  const [browserShareSignals, setBrowserShareSignals] = useState<BrowserShareSignal[]>([]);
+  const browserShareSignalId = useRef(0);
   const [notice, setNotice] = useState<{ kind: 'success' | 'error'; message: string } | null>(null);
   const [sessionPersistenceWarning, setSessionPersistenceWarning] = useState<CloudSessionPersistenceWarning | null>(null);
   const [taskReauthorization, setTaskReauthorization] = useState<CloudAuthorization | null>(null);
@@ -655,6 +658,30 @@ export function App() {
       if (!disposed) setSessionPersistenceWarning(current => current ?? payload);
     }).then(stop => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
     return () => { disposed = true; unlisten?.(); };
+  }, []);
+
+  // File requests the user starts in a provider's own browser window (Gofile).
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let unlistenClosed: (() => void) | undefined;
+    const signal = (sharePage: string, kind: BrowserShareSignal['kind']) => {
+      browserShareSignalId.current += 1;
+      // A list, not the latest value: a capture and the close that follows it
+      // can land in one render, and the dialog must still see both.
+      setBrowserShareSignals(current => [...current.slice(-19), { id: browserShareSignalId.current, sharePage, kind }]);
+    };
+    void subscribeBrowserShareCapture((capture) => {
+      if (disposed) return;
+      setNotice(browserShareCaptureMessage(capture));
+      const kind = captureSignalKind(capture);
+      if (kind) signal(capture.sharePage, kind);
+    }).then(stop => { if (disposed) stop(); else unlisten = stop; }).catch(() => undefined);
+    void subscribeBrowserShareClosed((sharePage) => {
+      if (!disposed) signal(sharePage, 'closed');
+    }).then(stop => { if (disposed) stop(); else unlistenClosed = stop; }).catch(() => undefined);
+    return () => { disposed = true; unlisten?.(); unlistenClosed?.(); };
   }, []);
 
   useEffect(() => {
@@ -1200,6 +1227,11 @@ export function App() {
       setSelectedTaskId(result.duplicate.task.id);
       enqueueDuplicate(result.duplicate);
     }
+    if (result.browserShare) {
+      setNewDownloadInput(input);
+      setNewDownloadOpen(true);
+      setHeaderPanel(null);
+    }
     return result;
   }
 
@@ -1395,6 +1427,10 @@ export function App() {
         if (!task.source) throw new Error(t('download.error.noSourceToCopy'));
         await writeClipboardText(task.source);
         setNotice({ kind: 'success', message: t('download.linkCopied') });
+        return;
+      }
+      if (command === 'reopen_share') {
+        await reopenBrowserShare(id, task.source);
         return;
       }
       const result = await runTaskAction(id, command);
@@ -1666,6 +1702,8 @@ export function App() {
       setNewDownloadOpen(false);
       setNewDownloadInput('');
     };
+    let browserOpened = false;
+    const includesBrowserShare = items.some(item => item.result?.browserShare);
     let firstCreated = false;
     const accepted = new Set<string>();
     const acceptCreated = (task: QueueTask, newlyCreated = true) => {
@@ -1675,7 +1713,7 @@ export function App() {
       accepted.add(task.id);
       if (firstCreated) return;
       firstCreated = true;
-      if (!includesVideo) closeDialog();
+      if (!includesVideo && !includesBrowserShare) closeDialog();
       setHeaderPanel(null);
       setSearchInput('');
       setView('downloads');
@@ -1689,6 +1727,11 @@ export function App() {
     };
 
     const outcomes = await Promise.allSettled(items.map(async (item) => {
+      if (item.result?.browserShare) {
+        await openBrowserShare(item.result.browserShare.provider, item.result.browserShare.page, destinationDirectory, privateDownload);
+        browserOpened = true;
+        return;
+      }
       if (item.result?.duplicate) {
         acceptCreated(item.result.duplicate.task, false);
         enqueueDuplicate(item.result.duplicate);
@@ -1745,13 +1788,13 @@ export function App() {
       return [{ id: items[index].id, message }];
     });
     if (failures.length) {
-      if (includesVideo) return failures;
+      if (includesVideo || includesBrowserShare) return failures;
       const message = t('download.error.tasksSubmissionFailed', { count: failures.length, detail: failures[0].message });
       setNotice({ kind: 'error', message });
       if (!firstCreated) throw new Error(message);
     }
-    if (!firstCreated) throw new Error(t('download.error.noTaskAdded'));
-    if (includesVideo) closeDialog();
+    if (!firstCreated && !browserOpened) throw new Error(t('download.error.noTaskAdded'));
+    if (includesVideo || browserOpened) closeDialog();
   }
 
   return (
@@ -1832,7 +1875,7 @@ export function App() {
               ...current,
               resources: current.resources.map((resource) => ({ ...resource, selected: selectedIds.includes(resource.id) }))
             } : current)} onClose={() => { dismissHeaderConfirmation(); setHeaderPanel(null); }} />
-              : headerPanel === 'download' ? <NewDownloadDialog open placement="header" initialInput={searchInput} onScan={scanDownloadInputs} onParse={async (input, accessCode, probeVideo) => {
+              : headerPanel === 'download' ? <NewDownloadDialog open placement="header" initialInput={searchInput} browserShareSignals={browserShareSignals} onScan={scanDownloadInputs} onParse={async (input, accessCode, probeVideo) => {
                 const result = await parse(input, accessCode, 'header', probeVideo);
                 setView('downloads');
                 setDownloadTab('active');
@@ -1916,7 +1959,7 @@ export function App() {
         onRestartMissing={() => void resolveDuplicate('restart_missing')}
         onClose={() => dismissDuplicate(duplicate.task.id)}
       />}
-      <NewDownloadDialog open={newDownloadOpen} placement="modal" initialInput={newDownloadInput} initialVideos={preparedVideos} onScan={scanDownloadInputs} onParse={(input, accessCode, probeVideo) => probeVideo !== undefined ? parseDownload(input, accessCode, true, probeVideo) : parseDownload(input, accessCode, true)} onDiscardPrepared={discardPreparedDownload} onSubmitBatch={submitPreparedBatch} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onClose={() => { setNewDownloadOpen(false); setNewDownloadInput(''); }} />
+      <NewDownloadDialog open={newDownloadOpen} placement="modal" initialInput={newDownloadInput} initialVideos={preparedVideos} browserShareSignals={browserShareSignals} onScan={scanDownloadInputs} onParse={(input, accessCode, probeVideo) => probeVideo !== undefined ? parseDownload(input, accessCode, true, probeVideo) : parseDownload(input, accessCode, true)} onDiscardPrepared={discardPreparedDownload} onSubmitBatch={submitPreparedBatch} downloadDirectory={settings.downloadDirectory} browseDirectory={browseDownloadDirectory} privacyEnabled={settings.privacyDownloadEnabled ?? false} onClose={() => { setNewDownloadOpen(false); setNewDownloadInput(''); }} />
       {detailsTask && <TaskDetailsDialog task={detailsTask} onClose={() => setDetailsTaskId(null)} />}
       {pendingPurgeTasks.length > 0 && <RemoveTaskDialog taskNames={pendingPurgeTasks.map(displayTaskName)} onConfirm={(deleteFiles) => void confirmTaskRemoval(deleteFiles)} onClose={() => setPendingPurgeTaskIds(null)} />}
       {notice && <div className={`task-toast ${notice.kind}`} role="status">{notice.message}</div>}

@@ -875,6 +875,21 @@ mod tests {
         );
     }
 
+    #[test]
+    fn gofile_share_pages_are_recognised_and_other_gofile_pages_are_not_downloaded() {
+        let text = "密码 123 见 https://gofile.io/d/AbC123 谢谢";
+        let candidate = extract_cloud_share_candidate(text, None).unwrap().unwrap();
+        assert_eq!(candidate.provider, CloudProvider::Gofile);
+        assert_eq!(candidate.url, "https://gofile.io/d/AbC123");
+        for page in ["https://gofile.io/", "https://gofile.io/d/", "https://gofile.io/d/a/b"] {
+            assert_eq!(
+                extract_cloud_share_candidate(page, None),
+                Err(ShareInputError::InvalidShare),
+                "{page}"
+            );
+        }
+    }
+
     fn share_copy_samples() -> Vec<(
         &'static str,
         CloudProvider,

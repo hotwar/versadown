@@ -288,6 +288,10 @@ MEGA 使用 VD 的专用登录表单（可含两步验证码），不支持 Agen
 
 MEGA uses its dedicated VD login form, including two-factor authentication when required. Sign in there before retrying an Agent account request. Its `cloud auth begin` returns `CLOUD_DESKTOP_LOGIN_REQUIRED` with `next_action: sign_in_in_vd` and exit code 2, without opening a pending authorization session. Authorized Agent account operations reuse that login; public links require no login. Create a MEGA share for a single item with `expires_in_days: 0`, no pass code and `generate_pass_code: false`.
 
+Gofile 使用 VD 内置窗口捕获用户在官方分享页选择的文件。当前 CLI/MCP 不自动操作该窗口，分享解析返回 `CLOUD_BROWSER_REQUIRED`（`next_action: open_desktop_share`，退出码 2），不会弹网盘登录或反复重试。请在 VD 的新建任务中确认保存目录、普通或隐私下载，再到官方分享页选择文件。Gofile 不提供网盘账号接口，也不出现在 Agent 账号列表中。
+
+Gofile capture requires a user-operated official share page in VD. CLI/MCP share preparation returns `CLOUD_BROWSER_REQUIRED` (`next_action: open_desktop_share`, exit code 2), without starting login or automatic retries. Choose the destination and ordinary/private download in VD before selecting a file on the official page. Gofile has no drive-account interface and is excluded from Agent account listings.
+
 Agent 的 MEGA 公开分享下载当前使用匿名/IP 配额，不会自动消耗已登录账号的会员额度。文件传输完成后，任务保持 `processing` 直到 MEGA 完整性校验通过；校验失败或无法完成时不会返回成功文件。
 
 Agent downloads of public MEGA links currently use anonymous/IP quota, without automatically using the signed-in account quota. Tasks remain `processing` after transfer until MEGA integrity verification succeeds; failed or unavailable verification never yields a successful file result.

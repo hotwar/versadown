@@ -84,6 +84,13 @@ impl crate::cloud::CloudHttpTransport for ControlledShareTransport<'_> {
         self.control.check()?;
         self.http.send(request)
     }
+    fn send_detailed(
+        &self,
+        request: crate::cloud::CloudHttpRequest,
+    ) -> Result<crate::cloud::CloudHttpDetail, QuarkError> {
+        self.control.check()?;
+        self.http.send_detailed(request)
+    }
     fn send_with_cookie_snapshot(
         &self,
         request: crate::cloud::CloudHttpRequest,
@@ -134,6 +141,13 @@ impl crate::cloud::CloudHttpTransport for RetryingShareReadTransport<'_> {
         request: crate::cloud::CloudHttpRequest,
     ) -> Result<crate::cloud::CloudHttpResponse, QuarkError> {
         self.retry(|| self.inner.send(request.clone()))
+    }
+
+    fn send_detailed(
+        &self,
+        request: crate::cloud::CloudHttpRequest,
+    ) -> Result<crate::cloud::CloudHttpDetail, QuarkError> {
+        self.retry(|| self.inner.send_detailed(request.clone()))
     }
 
     fn send_with_cookie_snapshot(

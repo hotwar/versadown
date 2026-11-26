@@ -2546,6 +2546,7 @@ async fn failed_prepare_retry_reuses_and_reserves_the_exact_task() {
     };
     let resolve_source = source.clone();
 
+    tasks.set_private(failed.payload.task.id, true).unwrap();
     let retried = crate::cloud::commands::submit_new_cloud_share_file_with(
         tasks.clone(),
         &plans,
@@ -2558,6 +2559,8 @@ async fn failed_prepare_retry_reuses_and_reserves_the_exact_task() {
     .unwrap();
 
     assert_eq!(retried.payload.task.id, failed.payload.task.id);
+    assert!(retried.payload.task.is_private);
+    assert!(tasks.find(failed.payload.task.id).unwrap().is_private);
     assert_eq!(retried.payload.task.status, crate::TaskStatus::Downloading);
     assert_eq!(api.add_calls.load(Ordering::SeqCst), 1);
     assert!(plans

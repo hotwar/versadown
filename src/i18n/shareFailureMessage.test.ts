@@ -97,6 +97,11 @@ describe('share failure messages', () => {
     expect(shareFailureMessage('cloud.error.mega.integrityUnavailable')).toBe('无法完成 MEGA 文件完整性校验，请重试下载。');
   });
 
+  it('localizes Gofile failures', async () => {
+    await setLocalePreference('en');
+    expect(shareFailureMessage('cloud.error.gofile.linkExpired')).toContain('expired');
+  });
+
   it('ignores unrelated text and shows task failures through the queue helper', async () => {
     expect(shareFailureMessage('something else')).toBeUndefined();
     expect(shareFailureMessage('constructor')).toBeUndefined();

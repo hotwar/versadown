@@ -87,6 +87,7 @@ pub(crate) fn share_resolution_failure_message(error: &QuarkError) -> String {
             "当前网盘分享下载暂不支持".into()
         }
         QuarkError::Mega(failure) => failure.message(),
+        QuarkError::Gofile(failure) => failure.message().into(),
     }
 }
 
@@ -130,6 +131,7 @@ pub(crate) fn cloud_failure_code(error: &QuarkError) -> &'static str {
         QuarkError::InvalidInput(_) => "invalid_input",
         QuarkError::UploadUnavailable | QuarkError::ProviderUnsupported => "provider_unsupported",
         QuarkError::Mega(failure) => failure.code(),
+        QuarkError::Gofile(failure) => failure.code(),
     }
 }
 

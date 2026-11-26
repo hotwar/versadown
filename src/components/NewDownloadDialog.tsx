@@ -6,6 +6,7 @@ import { ResourceFileRow } from './ResourceFileRow';
 import { VideoFormatCard } from './VideoFormatCard';
 import { canExpandDownloadDraft, DownloadDraftItem, DraftSubmissionFailure, useDownloadDraftBatch } from './useDownloadDraftBatch';
 import { t, useTranslation } from '../i18n';
+import type { BrowserShareSignal } from '../lib/browserShare';
 
 export type NewDownloadDialogPlacement = 'launcher' | 'modal' | 'header';
 
@@ -23,6 +24,8 @@ export interface NewDownloadDialogProps {
   downloadDirectory?: string;
   browseDirectory?(currentDirectory: string): Promise<string | null | undefined>;
   privacyEnabled?: boolean;
+  /** What a Gofile-style share window last reported; the matching draft reacts to it. */
+  browserShareSignals?: readonly BrowserShareSignal[];
 }
 
 // Parse errors currently cross IPC as text. All providers use the same action
@@ -287,6 +290,7 @@ function BatchNewDownloadDialog({
   downloadDirectory,
   browseDirectory,
   privacyEnabled = false,
+  browserShareSignals,
 }: NewDownloadDialogProps) {
   const { t } = useTranslation();
   const batch = useDownloadDraftBatch({
@@ -356,6 +360,25 @@ function BatchNewDownloadDialog({
     const timer = window.setInterval(refreshMetadata, 500);
     return () => { disposed = true; window.clearInterval(timer); };
   }, [batch.items, batch.updateResources]);
+
+  // A finished share leaves the list; once nothing else is left the dialog has
+  // no job and closes. A closed window only changes the hint on its draft.
+  // Signals already in the list when the dialog mounts are history.
+  const handledSignalRef = useRef(Math.max(0, ...(browserShareSignals ?? []).map(signal => signal.id)));
+  useEffect(() => {
+    let closeWhenEmpty = false;
+    for (const signal of browserShareSignals ?? []) {
+      if (signal.id <= handledSignalRef.current) continue;
+      handledSignalRef.current = signal.id;
+      if (signal.kind === 'closed') {
+        batch.markBrowserShareClosed(signal.sharePage);
+        continue;
+      }
+      const { removed, remaining } = batch.resolveBrowserShare(signal.sharePage);
+      if (removed > 0 && remaining === 0) closeWhenEmpty = true;
+    }
+    if (closeWhenEmpty) void requestClose();
+  });
 
   function scanManualInput(event: FormEvent) {
     event.preventDefault();
@@ -436,7 +459,7 @@ function BatchNewDownloadDialog({
           : !existingTask && waitingForBitTorrentFileList
             ? t('download.retrievingInfo')
             : undefined;
-        const itemStatus = item.status === 'ready'
+        const itemStatus = item.status === 'browser_share' ? item.note : item.status === 'ready'
           ? existingTask ? t('download.existingFiles', { count: resources.length }) : loadingStatus ?? t('download.availableItems', { count: resources.length || 1 })
           : item.error;
         const canExpand = item.result ? canExpandDownloadDraft(item.result) : false;
@@ -458,7 +481,7 @@ function BatchNewDownloadDialog({
               {t(item.probeVideo ? 'video.useDirect' : 'video.probe')}
             </button>
           </div>}
-          {item.status === 'ready' && item.error && <p className="parse-failure" role="alert">{item.error}</p>}
+          {(item.status === 'ready' || item.status === 'browser_share') && item.error && <p className="parse-failure" role="alert">{item.error}</p>}
           {item.status === 'access_code_required' && <div className="batch-access-code">
             <span>{item.error}</span><input type="password" aria-label={t('batch.accessCodeFor', { name: title })} autoComplete="off" disabled={busy} value={item.accessCode} onChange={event => batch.setAccessCode(item.id, event.target.value)} /><button type="button" className="batch-retry-button" disabled={busy || !item.accessCode.trim()} onClick={() => batch.retry(item.id)}>{t('download.parseAgain')}</button>
           </div>}

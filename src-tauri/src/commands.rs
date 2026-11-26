@@ -27,6 +27,12 @@ pub enum ParseDownloadOutcome {
     Task(ParseOutcome),
     WebVideo { videos: Vec<crate::web_video::VideoPreview> },
     ShareConfirmation(CloudShareConfirmation),
+    /// A share that is read in an embedded browser window: the page is the
+    /// provider's own and the user picks the file there.
+    BrowserShare {
+        provider: CloudProvider,
+        url: String,
+    },
     AccessCodeRequired {
         provider: CloudProvider,
         message: &'static str,
@@ -711,6 +717,17 @@ pub async fn parse_download(
             return Err("video.error.unsupported".into());
         }
         let provider = candidate.provider;
+        if crate::cloud::ProviderRegistry::global()
+            .get(provider)
+            .public_shares_browser_capture
+        {
+            let (_, page) = crate::cloud::commands::browser_share_page(&candidate.url)
+                .ok_or_else(|| "分享链接无效".to_string())?;
+            return Ok(ParseDownloadOutcome::BrowserShare {
+                provider,
+                url: page.into(),
+            });
+        }
         return match crate::cloud::commands::inspect_cloud_share(app.clone(), candidate)
             .await
             .map_err(parse_share_error_string)?

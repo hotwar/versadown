@@ -80,6 +80,7 @@ pub(crate) fn cloud_error(error:QuarkError)->&'static str {match error {
     QuarkError::AccountMismatch=>"ACCOUNT_MISMATCH",
     QuarkError::SessionRenewedRetryOperation=>"CLOUD_RESULT_UNCERTAIN",
     QuarkError::ProviderUnsupported=>"UNSUPPORTED",
+    QuarkError::Gofile(_)=>"CLOUD_BROWSER_REQUIRED",
     QuarkError::InvalidInput(ref message) if message=="agent.error.cloudWriteRequired"=>"CLOUD_WRITE_REQUIRED",
     QuarkError::DownloadEngineUnavailable=>"ENGINE_UNAVAILABLE",
     _=>"ACTION_FAILED",
@@ -422,6 +423,12 @@ mod tests {
         assert!(validate_url("https://example.test/watch?v=1").is_ok());
         for value in ["file:///tmp/secret","https://user:secret@example.test/video","https://example.test/\nvideo"] {assert_eq!(validate_url(value),Err("INVALID_ARGUMENT"));}
         assert_eq!(cloud_error(QuarkError::AuthorizationExpired),"AUTH_REQUIRED");
+        for failure in [crate::cloud::gofile::GofileFailure::OpenSharePage,crate::cloud::gofile::GofileFailure::LinkExpired] {
+            assert_eq!(cloud_error(QuarkError::Gofile(failure)),"CLOUD_BROWSER_REQUIRED");
+            let guidance=crate::cli_protocol::ApiError::new("CLOUD_BROWSER_REQUIRED","en");
+            assert_eq!(guidance.next_action.as_deref(),Some("open_desktop_share"));
+            assert!(!guidance.retryable);
+        }
         for (error, code, next_action) in [
             (QuarkError::BaiduOperationVerificationRequired, "CLOUD_OPERATION_VERIFICATION_REQUIRED", "complete_cloud_operation_verification"),
             (QuarkError::BaiduDriveVerificationRequired, "CLOUD_OPERATION_VERIFICATION_REQUIRED", "complete_cloud_operation_verification"),

@@ -116,12 +116,8 @@ fn error_kind(error: &CloudError) -> &'static str {
         CloudError::BaiduTransferPending => "baidu-transfer-pending",
         CloudError::ShareTransferDownloadUnavailable => "transfer-saved-download-unavailable",
         CloudError::ProviderUnsupported => "provider-unsupported",
-        CloudError::XunleiVerificationUnavailable(_) => "xunlei-verification-unavailable",
-        CloudError::BaiduUploadAuthorizationRequired(_) => "baidu-upload-authorization-required",
-        CloudError::XunleiNativeDownload(_) => "xunlei-native-download-error",
-        CloudError::BaiduTransferPending => "baidu-transfer-pending",
-        CloudError::ShareTransferDownloadUnavailable => "transfer-saved-download-unavailable",
         CloudError::Mega(_) => "mega-link-error",
+        CloudError::Gofile(_) => "gofile-link-error",
         CloudError::BaiduUploadPrecreateRejected { .. } => "baidu-upload-precreate-rejected",
         CloudError::BaiduUploadWebSessionRequired => "baidu-upload-web-session-required",
     }

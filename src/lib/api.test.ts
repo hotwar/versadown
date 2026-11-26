@@ -92,6 +92,14 @@ it('maps a share confirmation without inventing an aria2 task', async () => {
   });
 });
 
+it('prepares a browser capture without opening it before destination and privacy confirmation', async () => {
+  native.invoke.mockResolvedValueOnce({ kind: 'browser_share', provider: 'gofile', url: 'https://gofile.io/d/AbC123' });
+  const { parseDownload } = await import('./api');
+  await expect(parseDownload('https://gofile.io/d/AbC123', undefined, true)).resolves.toEqual({ browserShare: { provider: 'gofile', page: 'https://gofile.io/d/AbC123' } });
+  expect(native.invoke).toHaveBeenCalledTimes(1);
+  expect(native.invoke).toHaveBeenCalledWith('parse_download', { input: 'https://gofile.io/d/AbC123', accessCode: undefined, requireConfirmation: true });
+});
+
 it('maps an access-code requirement without creating a task', async () => {
   native.invoke.mockResolvedValueOnce({
     kind: 'access_code_required',

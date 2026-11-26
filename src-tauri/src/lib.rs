@@ -720,6 +720,8 @@ pub fn run() -> i32 {
             cloud::commands::cloud_complete_operation_verification,
             cloud::commands::cloud_completed_authorization,
             cloud::commands::cloud_reauthorize_failed_task,
+            cloud::commands::cloud_open_browser_share,
+            cloud::commands::cloud_reopen_browser_share,
             cloud::commands::cloud_login_password,
             cloud::commands::cloud_login_mega,
             cloud::commands::cloud_saved_password_credentials,

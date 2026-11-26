@@ -10,6 +10,7 @@ const cloudProviderNameKeys = {
   xunlei: 'cloud.provider.xunlei',
   uc: 'cloud.provider.uc',
   mega: 'cloud.provider.mega',
+  gofile: 'cloud.provider.gofile',
 } as const satisfies Record<CloudProvider, TranslationKey>;
 
 export function cloudProviderLabel(provider: CloudProvider, translate: (key: TranslationKey) => string): string {
