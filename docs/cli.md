@@ -287,3 +287,7 @@ If a Baidu upload reports `CLOUD_UPLOAD_SESSION_REQUIRED` or `CLOUD_UPLOAD_VERIF
 MEGA 使用 VD 的专用登录表单（可含两步验证码），不支持 Agent 网页授权入口。未登录时先在 VD 完成 MEGA 登录，再重试原资源请求；直接调用其 `cloud auth begin` 返回 `CLOUD_DESKTOP_LOGIN_REQUIRED`，`next_action: sign_in_in_vd`，退出码 2，不创建等待中的授权会话。已有 MEGA 登录可供经过用户授权的 Agent 网盘操作复用；公开分享解析与下载不要求登录。创建 MEGA 分享仅选一个项目，使用 `expires_in_days: 0`、不设提取码、不自动生成提取码。
 
 MEGA uses its dedicated VD login form, including two-factor authentication when required. Sign in there before retrying an Agent account request. Its `cloud auth begin` returns `CLOUD_DESKTOP_LOGIN_REQUIRED` with `next_action: sign_in_in_vd` and exit code 2, without opening a pending authorization session. Authorized Agent account operations reuse that login; public links require no login. Create a MEGA share for a single item with `expires_in_days: 0`, no pass code and `generate_pass_code: false`.
+
+Gofile 使用 VD 内置窗口捕获用户在官方分享页选择的文件。当前 CLI/MCP 不自动操作该窗口，分享解析返回 `CLOUD_BROWSER_REQUIRED`（`next_action: open_desktop_share`，退出码 2），不会弹网盘登录或反复重试。请在 VD 的新建任务中确认保存目录、普通或隐私下载，再到官方分享页选择文件。Gofile 不提供网盘账号接口，也不出现在 Agent 账号列表中。
+
+Gofile capture requires a user-operated official share page in VD. CLI/MCP share preparation returns `CLOUD_BROWSER_REQUIRED` (`next_action: open_desktop_share`, exit code 2), without starting login or automatic retries. Choose the destination and ordinary/private download in VD before selecting a file on the official page. Gofile has no drive-account interface and is excluded from Agent account listings.

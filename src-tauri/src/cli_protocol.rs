@@ -83,6 +83,7 @@ impl ApiError {
             "FORBIDDEN" => (false, Some("review_directory_permissions")),
             "AUTH_REQUIRED" => (false, Some("begin_cloud_authorization")),
             "CLOUD_DESKTOP_LOGIN_REQUIRED" => (false, Some("sign_in_in_vd")),
+            "CLOUD_BROWSER_REQUIRED" => (false, Some("open_desktop_share")),
             "CLOUD_OPERATION_VERIFICATION_REQUIRED" => (false, Some("complete_cloud_operation_verification")),
             "CLOUD_AUTHORIZATION_PENDING" => (false, Some("wait_for_current_cloud_authorization")),
             "INTERACTION_EXPIRED" => (false, Some("await_user_request")),
@@ -376,6 +377,8 @@ pub fn message(key: &str, lang: &str) -> &'static str {
         ("PROTOCOL_ERROR", true) => "本机接口响应或发现文件无效。",
         ("CLOUD_DESKTOP_LOGIN_REQUIRED", false) => "Sign in to this provider using its login form in VD, then retry the original request.",
         ("CLOUD_DESKTOP_LOGIN_REQUIRED", true) => "请先在 VD 中使用此网盘的登录表单完成登录，再重试原请求。",
+        ("CLOUD_BROWSER_REQUIRED", false) => "Open this share in VD, choose the download destination and privacy, then select the file on its official page. Agent-only capture is not supported.",
+        ("CLOUD_BROWSER_REQUIRED", true) => "请在 VD 打开此分享，选择下载目录和隐私选项，再在官方分享页选择文件；暂不支持仅通过 Agent 完成捕获。",
         ("UNSUPPORTED", false) => "This operation or resource is not supported by this CLI version.",
         ("UNSUPPORTED", true) => "当前 CLI 版本不支持此操作或资源。",
         ("ENGINE_UNAVAILABLE", false) => "The download engine is unavailable.",
@@ -392,7 +395,7 @@ pub fn message(key: &str, lang: &str) -> &'static str {
 pub fn exit_code(response: &Response) -> u8 {
     if response.ok { return 0; }
     match response.error.as_ref().map(|e| e.code.as_str()) {
-        Some("INVALID_ARGUMENT" | "UNSUPPORTED" | "RESOURCE_LIMIT" | "CLOUD_DESKTOP_LOGIN_REQUIRED") => 2,
+        Some("INVALID_ARGUMENT" | "UNSUPPORTED" | "RESOURCE_LIMIT" | "CLOUD_DESKTOP_LOGIN_REQUIRED" | "CLOUD_BROWSER_REQUIRED") => 2,
         Some("HOST_UNAVAILABLE") => 3,
         Some("ENGINE_UNAVAILABLE" | "ACTION_FAILED") => 1,
         Some("UNAUTHORIZED" | "FORBIDDEN" | "HOST_DISABLED" | "AUTH_REQUIRED" | "CLOUD_WRITE_REQUIRED" | "ACCESS_CODE_REQUIRED" | "CLOUD_PERMISSION_REQUIRED" | "CLOUD_OPERATION_VERIFICATION_REQUIRED" | "CLOUD_AUTHORIZATION_PENDING" | "ACCOUNT_MISMATCH") => 4,

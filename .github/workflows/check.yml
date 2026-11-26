@@ -102,6 +102,12 @@ jobs:
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::mega::
           cargo test --locked --manifest-path src-tauri/Cargo.toml --test mega_range_gateway
           pnpm exec vitest run src/components/CloudWorkspace.test.tsx src/lib/cloudApi.test.ts src/lib/queueTask.test.ts src/i18n/shareFailureMessage.test.ts --exclude '.worktrees/**'
+      - name: Check Gofile capture context and task privacy
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib gofile
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib browser_share
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib failed_prepare_retry_reuses_and_reserves_the_exact_task
+          pnpm exec vitest run src/lib/browserShare.test.ts src/components/useDownloadDraftBatch.test.tsx src/components/NewDownloadDialog.test.tsx src/App.live.test.tsx --exclude '.worktrees/**'
       - name: Check Quark download cookie binding
         run: |
           cargo test --locked --manifest-path src-tauri/Cargo.toml --test cloud_quark --test quark_cookie_binding

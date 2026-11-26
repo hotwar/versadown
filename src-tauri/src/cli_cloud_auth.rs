@@ -790,6 +790,7 @@ mod tests {
 
     #[test]
     fn cli_cloud_auth_native_login_has_actionable_guidance_without_a_pending_session() {
+        assert_eq!(provider("gofile"), Err("UNSUPPORTED"));
         assert_eq!(provider("mega"), Ok(CloudProvider::Mega));
         assert_eq!(authorization_provider("mega"), Err("CLOUD_DESKTOP_LOGIN_REQUIRED"));
         assert_eq!(authorization_provider("baidu"), Ok(CloudProvider::Baidu));
