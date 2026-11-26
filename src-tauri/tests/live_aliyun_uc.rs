@@ -310,13 +310,16 @@ fn error_kind(error: &CloudError) -> &'static str {
         CloudError::UploadUnavailable => "upload-unavailable",
         CloudError::ProviderUnsupported => "provider-unsupported",
         CloudError::XunleiVerificationUnavailable(_) => "xunlei-verification-unavailable",
-        CloudError::BaiduOperationVerificationRequired => "operation-verification-required",
         CloudError::BaiduUploadAuthorizationRequired(_) => "baidu-upload-authorization-required",
         CloudError::XunleiNativeDownload(_) => "xunlei-native-download-error",
         CloudError::BaiduTransferPending => "baidu-transfer-pending",
         CloudError::ShareTransferDownloadUnavailable => "transfer-saved-download-unavailable",
         CloudError::Mega(_) => "mega-link-error",
         CloudError::Gofile(_) => "gofile-link-error",
+        CloudError::BaiduOperationVerificationRequired => "baidu-operation-verification-required",
+        CloudError::BaiduDriveVerificationRequired => "baidu-operation-verification-required",
+        CloudError::BaiduUploadPrecreateRejected { .. } => "baidu-upload-precreate-rejected",
+        CloudError::BaiduUploadWebSessionRequired => "baidu-upload-web-session-required",
     }
 }
 
@@ -496,9 +499,7 @@ fn upload_file(
     parent: &str,
     path: &Path,
 ) -> Result<CloudFile, CloudError> {
-    ProviderRegistry::global()
-        .driver(provider, &state.store, http)
-        .upload(state, http, parent, path)
+    state.upload_file(provider, http, parent, path)
 }
 
 fn resolve_download(

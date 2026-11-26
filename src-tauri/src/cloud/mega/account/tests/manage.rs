@@ -170,7 +170,7 @@ fn folders_are_created_below_folders_and_refuse_bad_targets_and_names() {
     // The recycle bin, a file, an unknown node, the inbox and the trash tree.
     assert!(matches!(
         client.create_directory(RECYCLE, "x"),
-        Err(QuarkError::InvalidInput(_))
+        Err(QuarkError::Mega(MegaFailure::InvalidDestination))
     ));
     assert!(matches!(
         client.create_directory("FILEBBBB", "x"),
@@ -288,6 +288,7 @@ fn move_sends_one_command_per_node_and_skips_nodes_already_there() {
         .unwrap();
     let moves = http.commands("m");
     assert_eq!(moves.len(), 2);
+    assert!(moves.iter().all(|sent| sent.command.get("cr").is_none()));
     assert_eq!(moves[0].command["n"], "FILEBBBB");
     assert_eq!(moves[0].command["t"], "DIRAAAAA");
     assert_eq!(moves[1].command["n"], "SHAREHDL");
@@ -311,7 +312,7 @@ fn move_refuses_cycles_the_rubbish_and_other_trees_before_sending_anything() {
     }
     assert!(matches!(
         client.move_files(&["FILEBBBB".into()], RECYCLE),
-        Err(QuarkError::InvalidInput(_))
+        Err(QuarkError::Mega(MegaFailure::InvalidDestination))
     ));
     // Trashed nodes leave the bin through restore, not move.
     assert!(matches!(
@@ -327,6 +328,125 @@ fn move_refuses_cycles_the_rubbish_and_other_trees_before_sending_anything() {
         Err(QuarkError::SourceFileMissing)
     ));
     assert!(http.commands("m").is_empty());
+}
+
+
+/// Inspect the actual wire keys independently of the request builder.
+fn assert_move_share_keys(command: &Value, listing: &Value, shares: &[&str], handles: &[&str]) {
+    let cr = &command["cr"];
+    assert_eq!(cr[0], json!(shares));
+    assert_eq!(cr[1], json!(handles));
+    let requests = cr[2].as_array().unwrap();
+    assert_eq!(requests.len(), shares.len() * handles.len() * 3);
+    for request in requests.chunks_exact(3) {
+        let share = shares[request[0].as_u64().unwrap() as usize];
+        let handle = handles[request[1].as_u64().unwrap() as usize];
+        let key = keyring_of(listing).share_key(share).unwrap();
+        let wrapped = decode_base64url(request[2].as_str().unwrap()).unwrap();
+        assert_eq!(decrypt_ecb(&key, &wrapped).unwrap(), node_key(listing, handle).to_vec());
+    }
+}
+
+fn add_legacy_share(listing: &mut Value, handle: &str, key: &[u8; 16]) {
+    listing["ok"].as_array_mut().unwrap().push(json!({
+        "h": handle,
+        "k": wrap_key(&MASTER_KEY, key).unwrap(),
+        "ha": wrap_key(&MASTER_KEY, format!("{handle}{handle}").as_bytes()).unwrap(),
+    }));
+}
+
+#[test]
+fn move_into_a_share_carries_every_subtree_key_on_the_move_request() {
+    for (source, expected) in [
+        ("FILEBBBB", vec!["FILEBBBB"]),
+        ("DIRAAAAA", vec!["DIRAAAAA", "DIRBBBBB", "FILEAAAA", "DEEPFILE"]),
+    ] {
+        let mut listing = listing_value();
+        add_node(&mut listing, own_file("DEEPFILE", "DIRBBBBB", "deep.bin", &DOWNLOAD_NODE_KEY, 3000));
+        fixture!(http, client, listing.clone(), |_| ok(json!(0)));
+        client.move_files(&[source.into()], "SHAREHDL").unwrap();
+        let moves = http.commands("m");
+        assert_eq!(moves.len(), 1);
+        assert_move_share_keys(&moves[0].command, &listing, &["SHAREHDL"], &expected);
+        assert!(http.commands("k").is_empty(), "publishing keys is part of the move, not a later request");
+        for handle in expected {
+            assert!(!http.all_traffic().contains(&encode_base64url(&node_key(&listing, handle))));
+        }
+    }
+}
+
+#[test]
+fn move_within_between_and_below_nested_shares_wraps_for_all_destination_shares() {
+    for (nested, own_share, expected) in [
+        (true, false, vec!["SHAREHDL"]),
+        (false, true, vec!["DIRAAAAA"]),
+        (true, true, vec!["DIRAAAAA", "SHAREHDL"]),
+    ] {
+        let mut listing = listing_value();
+        if nested {
+            node_mut(&mut listing, "DIRAAAAA")["p"] = json!("SHAREHDL");
+        }
+        if own_share {
+            add_legacy_share(&mut listing, "DIRAAAAA", &[0x63; 16]);
+        }
+        fixture!(http, client, listing.clone(), |_| ok(json!(0)));
+        // This file's only key is encrypted by its original SHAREHDL share.
+        client.move_files(&["FILECCCC".into()], "DIRAAAAA").unwrap();
+        assert_move_share_keys(&http.commands("m")[0].command, &listing, &expected, &["FILECCCC"]);
+        assert!(http.commands("k").is_empty());
+
+        // A true no-op emits neither a move nor any extra key publication.
+        client.move_files(&["FILECCCC".into()], "SHAREHDL").unwrap();
+        assert_eq!(http.commands("m").len(), 1);
+    }
+}
+
+#[test]
+fn restore_into_an_exported_folder_also_carries_the_node_key() {
+    let mut listing = listing_value();
+    set_attributes(&mut listing, "FILEINTR", json!({"n": "trashed.txt", "rr": "SHAREHDL"}));
+    fixture!(http, client, listing.clone(), |_| ok(json!(0)));
+    client.restore(&["FILEINTR".into()]).unwrap();
+    assert_move_share_keys(&http.commands("m")[0].command, &listing, &["SHAREHDL"], &["FILEINTR"]);
+    assert!(http.commands("k").is_empty());
+}
+
+#[test]
+fn move_to_a_share_stops_before_writing_when_a_subtree_key_is_unreadable() {
+    let mut listing = listing_value();
+    node_mut(&mut listing, "DIRBBBBB")["k"] = json!("UNKNOWN1:invalid");
+    fixture!(http, client, listing, |_| ok(json!(0)));
+    assert!(matches!(
+        client.move_files(&["DIRAAAAA".into()], "SHAREHDL"),
+        Err(QuarkError::InvalidResponse)
+    ));
+    assert!(http.commands("m").is_empty() && http.commands("k").is_empty());
+}
+
+#[test]
+fn move_to_an_exported_folder_without_its_key_never_moves_the_node() {
+    let mut listing = listing_value();
+    listing["ph"] = json!([{"h": "DIRAAAAA", "ph": "PUBLICAA"}]);
+    fixture!(http, client, listing, |command| match command["a"].as_str().unwrap() {
+        "uga" => code(-9),
+        _ => ok(json!(0)),
+    });
+    assert!(matches!(
+        client.move_files(&["FILEBBBB".into()], "DIRAAAAA"),
+        Err(QuarkError::Mega(MegaFailure::KeysUnsupported))
+    ));
+    assert!(http.commands("m").is_empty() && http.commands("k").is_empty());
+}
+
+#[test]
+fn a_refused_shared_move_is_reported_without_a_second_key_request() {
+    fixture!(http, client, listing_value(), |_| code(-11));
+    assert!(matches!(
+        client.move_files(&["FILEBBBB".into()], "SHAREHDL"),
+        Err(QuarkError::Mega(MegaFailure::AccessDenied))
+    ));
+    assert_eq!(http.commands("m").len(), 1);
+    assert!(http.commands("k").is_empty());
 }
 
 // ------------------------------------------------------------- rubbish bin ---
@@ -501,10 +621,10 @@ fn change_errors_map_to_the_projects_failures() {
     ));
     // A number nobody mapped never echoes anything but the number.
     fixture!(http, client, listing_value(), |_| code(-77));
-    match client.rename("FILEBBBB", "x").unwrap_err() {
-        QuarkError::Provider(message) => assert_eq!(message, "MEGA 错误码 -77"),
-        other => panic!("unexpected {other}"),
-    }
+    assert_eq!(
+        client.rename("FILEBBBB", "x").unwrap_err().to_string(),
+        "cloud.error.mega.apiError:-77"
+    );
 }
 
 #[test]
@@ -514,7 +634,10 @@ fn try_again_and_rate_limit_answers_are_retried_then_reported_as_busy() {
         let error = client
             .move_files(&["FILEBBBB".into()], "DIRAAAAA")
             .unwrap_err();
-        assert!(matches!(error, QuarkError::Transport(_)), "{number}");
+        assert!(
+            matches!(error, QuarkError::Mega(MegaFailure::ServiceBusy)),
+            "{number}"
+        );
         // One attempt plus four retries.
         assert_eq!(http.commands("m").len(), 5, "{number}");
     }

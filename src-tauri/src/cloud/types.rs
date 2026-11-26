@@ -415,8 +415,14 @@ pub enum CloudError {
     PikpakOperationVerificationRequired(&'static str),
     #[error("baidu_operation_verification_required")]
     BaiduOperationVerificationRequired,
+    #[error("cloud.verification.baidu.drive")]
+    BaiduDriveVerificationRequired,
     #[error("{}", .0.message())]
     BaiduUploadAuthorizationRequired(BaiduUploadAuthStage),
+    #[error("HTTP {status}{}", errno.map(|code| format!(", errno {code}")).unwrap_or_default())]
+    BaiduUploadPrecreateRejected { status: u16, errno: Option<i64> },
+    #[error("HTTP 200, errno -6")]
+    BaiduUploadWebSessionRequired,
     #[error("区域会员在当前 IP 地区下载受限；请切换到有权限 IP 后重新登录重试，或升级全球会员")]
     PikpakRegionalMembershipRestricted,
     #[error("正在等待网页登录，请在授权窗口完成登录")]
@@ -461,7 +467,7 @@ pub use CloudError as QuarkError;
 pub(crate) fn xunlei_verification_text(reason: &str) -> &'static str {
     match reason {
         "metadata_missing" => "缺少迅雷操作验证信息，请重新网页授权后重试",
-        "metadata_expired" => "迅雷分享信息已过期，请重新打开分享链接或重新网页授权",
+        "metadata_expired" => "迅雷操作验证信息已超过本地复用时限，暂时无法完成此操作",
         "timestamp_invalid" => "迅雷验证信息的时间戳无效，请检查系统时间后重试",
         "xunlei_share_profile_unsupported" => {
             "当前迅雷网页版本暂不支持解析此分享，请在迅雷官网打开该分享"
@@ -540,8 +546,11 @@ impl Serialize for CloudError {
             Self::PikpakOperationVerificationRequired(_) => {
                 "pikpak_operation_verification_required"
             }
+            Self::BaiduDriveVerificationRequired => "baidu_drive_verification_required",
             Self::BaiduOperationVerificationRequired => "baidu_operation_verification_required",
             Self::BaiduUploadAuthorizationRequired(stage) => stage.code(),
+            Self::BaiduUploadWebSessionRequired => "baidu_upload_web_session_required",
+            Self::BaiduUploadPrecreateRejected { .. } => "baidu_upload_precreate_rejected",
             Self::PikpakRegionalMembershipRestricted => "pikpak_regional_membership_restricted",
             Self::AuthorizationPending => "authorization_pending",
             Self::SourceFileMissing => "source_file_missing",

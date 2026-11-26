@@ -1,36 +1,38 @@
+use versadown_lib::native_menu_labels::NativeMenuLabels;
 use versadown_lib::{
-    launcher_menu_entries, should_apply_launcher_window_visibility, tray_menu_entries, AppSettings,
+    launcher_menu_actions, should_apply_launcher_window_visibility, tray_menu_entries, AppSettings,
     LauncherInteractionState, LauncherVisibility,
 };
 
 #[test]
 fn launcher_context_menu_contains_the_required_actions() {
     assert_eq!(
-        launcher_menu_entries(),
+        launcher_menu_actions(),
         [
-            ("launcher.hide_manager", "隐藏主界面"),
-            ("launcher.new_download", "新建下载"),
-            ("launcher.start_all", "开始全部任务"),
-            ("launcher.pause_all", "暂停全部任务"),
-            ("launcher.settings", "悬浮球显示"),
-            ("launcher.quit", "退出万能下载"),
+            "launcher.hide_manager",
+            "launcher.new_download",
+            "launcher.start_all",
+            "launcher.pause_all",
+            "launcher.settings",
+            "launcher.quit",
         ]
     );
 }
 
 #[test]
 fn tray_context_menu_matches_the_launcher_actions_when_manager_is_hidden() {
+    let labels = NativeMenuLabels::fallback();
     assert_eq!(
-        tray_menu_entries(false),
+        tray_menu_entries(&labels, false),
         [
-            ("launcher.hide_manager", "显示主界面"),
-            ("launcher.new_download", "新建下载"),
-            ("launcher.start_all", "开始全部任务"),
-            ("launcher.pause_all", "暂停全部任务"),
-            ("tray.launcher.always", "总是显示"),
-            ("tray.launcher.downloading", "仅下载时显示"),
-            ("tray.launcher.hidden", "关闭显示"),
-            ("launcher.quit", "退出万能下载"),
+            ("launcher.hide_manager", "Show main window"),
+            ("launcher.new_download", "New download"),
+            ("launcher.start_all", "Start all tasks"),
+            ("launcher.pause_all", "Pause all tasks"),
+            ("tray.launcher.always", "Always show"),
+            ("tray.launcher.downloading", "Show only while downloading"),
+            ("tray.launcher.hidden", "Turn off"),
+            ("launcher.quit", "Quit VersaDown"),
         ]
     );
 }

@@ -13,9 +13,9 @@ use crate::{DownloadTask, NewTask, TaskStatus, TaskStore};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
 };
-use tauri::State;
+use tauri::{AppHandle, State};
 use tokio::sync::{oneshot, Mutex, Semaphore};
 use uuid::Uuid;
 
@@ -45,6 +45,7 @@ pub(crate) struct VideoDownloads {
     slots: Arc<Semaphore>,
     jobs: Mutex<HashMap<Uuid, Job>>,
     previews: previews::Previews,
+    agent_application: OnceLock<AppHandle>,
 }
 
 impl VideoDownloads {
@@ -59,7 +60,12 @@ impl VideoDownloads {
             slots: Arc::new(Semaphore::new(usize::from(limit.clamp(1, 3)))),
             jobs: Mutex::default(),
             previews: Default::default(),
+            agent_application: OnceLock::new(),
         }
+    }
+
+    pub(crate) fn bind_agent_application(&self,app:AppHandle) {
+        let _=self.agent_application.set(app);
     }
 
     pub(crate) async fn prepare(
@@ -77,6 +83,15 @@ impl VideoDownloads {
             self.previews.remember(preview)?;
         }
         Ok(previews)
+    }
+
+    /// Agent confirmation has already committed the task, format and output.
+    pub(crate) async fn start_agent_task(
+        &self,
+        state: &AppState,
+        task: DownloadTask,
+    ) -> Result<DownloadTask, String> {
+        self.start(task, network_options(state)?).await
     }
 
     async fn submit(
@@ -208,6 +223,7 @@ impl VideoDownloads {
         let mut task = queued.clone();
         let (stop, mut stopped) = oneshot::channel();
         let (slots, store, emit) = (self.slots.clone(), self.store.clone(), self.emit.clone());
+        let agent_application=self.agent_application.get().cloned();
         let job = tauri::async_runtime::spawn(async move {
             // yt-dlp reads and writes this private snapshot. Keep it until the
             // worker (including cancellation and merging) has fully exited.
@@ -217,6 +233,14 @@ impl VideoDownloads {
                 _ = &mut stopped => return,
                 permit = slots.acquire_owned() => match permit { Ok(p) => p, Err(_) => return },
             };
+            if store.is_agent_resource_task(task.id).unwrap_or(true) {
+                let authorized=agent_application.as_ref().ok_or("FORBIDDEN")
+                    .and_then(|app|crate::cli_resources::authorize_task(app,task.id));
+                if let Err(code)=authorized {
+                    if let Ok(saved)=store.fail_with_code(task.id,Some(code),crate::cli_protocol::message(code,"en")) {emit(saved);}
+                    return;
+                }
+            }
             task.status = TaskStatus::Downloading;
             let publish = |task: &DownloadTask| {
                 if let Ok(saved) = store.apply_transfer_snapshot(task.clone()) {
@@ -328,6 +352,74 @@ pub(crate) fn network_options(state: &AppState) -> Result<VideoOptions, String> 
 pub(crate) fn validate_cookie_file(path: &str) -> Result<(), String> {
     cookies::CookieFile::load((!path.is_empty()).then(|| Path::new(path)))?;
     Ok(())
+}
+
+pub(crate) struct AgentPreparedVideo {
+    pub page: String,
+    pub selector: String,
+    pub media_id: String,
+    pub name: String,
+    pub size_bytes: Option<u64>,
+    pub detail: String,
+}
+
+/// Only extractor metadata is requested here. No task or transfer is created.
+pub(crate) async fn prepare_agent_video(
+    state: &AppState,
+    input: &str,
+) -> Result<Vec<AgentPreparedVideo>, String> {
+    let page = routing::resolve(input, true).await?.ok_or("video.error.unsupported")?;
+    let options = network_options(state)?;
+    let previews = extractor::inspect(page, options.proxy.as_deref(), options.cookie_file.as_deref()).await?;
+    Ok(agent_video_formats(previews))
+}
+
+fn agent_video_formats(previews: Vec<VideoPreview>) -> Vec<AgentPreparedVideo> {
+    previews.into_iter().flat_map(|preview| {
+        let title: String = preview.title.chars().scan(0, |bytes, c| {
+            *bytes += c.len_utf8();
+            (*bytes <= 160).then_some(c)
+        }).collect();
+        preview.formats.into_iter().map(move |format| {
+            let quality = match (format.width, format.height) {
+                (0, 0) => String::new(),
+                (0, height) => format!(" [{height}p]"),
+                (width, 0) => format!(" [w{width}]"),
+                (width, height) => format!(" [{width}x{height}]"),
+            };
+            AgentPreparedVideo {
+                page: preview.page_url.clone(),
+                selector: format.id,
+                media_id: preview.media_id.clone(),
+                name: crate::cloud::commands::safe_filename(&format!("{}{quality}.{}", title.trim(), format.ext)),
+                size_bytes: format.bytes,
+                detail: format!("{}x{} {}{}", format.width, format.height, format.ext,
+                    if format.estimated { " estimated_size" } else { "" }),
+            }
+        })
+    }).collect()
+}
+
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
+    #[test]
+    fn agent_resource_video_metadata_preserves_the_exact_format_without_creating_tasks() {
+        let preview=VideoPreview{preview_id:Uuid::new_v4(),media_id:"media-1".into(),page_url:"https://example.test/watch".into(),site:"fixture".into(),title:"Example / clip".into(),thumbnail:Some("https://signed.example/secret".into()),duration:Some(60.0),
+            formats:vec![extractor::VideoFormat{id:"137+140".into(),width:1920,height:1080,ext:"mp4".into(),bytes:Some(99),estimated:false}]};
+        let second = VideoPreview {
+            media_id: "media-2".into(),
+            page_url: "https://example.test/watch/second".into(),
+            ..preview.clone()
+        };
+        let formats = agent_video_formats(vec![preview, second]);
+        assert_eq!(formats.len(), 2);
+        assert_eq!(formats[0].selector,"137+140");assert_eq!(formats[0].media_id,"media-1");
+        assert_eq!(formats[0].size_bytes,Some(99));assert!(!formats[0].name.contains('/'));
+        assert!(!formats[0].detail.contains("secret"));assert!(formats[0].name.ends_with(" [1920x1080].mp4"));
+        assert_eq!(formats[1].media_id, "media-2");
+        assert_eq!(formats[1].page, "https://example.test/watch/second");
+    }
 }
 
 #[tauri::command]

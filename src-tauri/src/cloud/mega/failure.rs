@@ -21,6 +21,8 @@ pub enum MegaFailure {
     /// The downloaded file does not match the MAC carried by the link key:
     /// the transfer was corrupted or tampered with.
     IntegrityFailed,
+    /// The MAC check could not run (missing key, source or unreadable file).
+    IntegrityUnavailable,
     /// Account login: wrong e-mail or password (the API answers `-9`).
     InvalidCredentials,
     /// Account login: the account has two-factor authentication enabled and
@@ -54,6 +56,18 @@ pub enum MegaFailure {
     KeysUnsupported,
     /// A copy would create more nodes than one request may carry.
     CopyTooLarge,
+    /// The API or upload server is still busy after its retry budget.
+    ServiceBusy,
+    /// The public API returned an unsuccessful HTTP status.
+    ServiceUnavailable,
+    /// An unmapped API failure; retain only its numeric code, never raw text.
+    ApiError { code: i64 },
+    /// The upload server refused a piece with an unsuccessful HTTP status.
+    UploadHttpError { status: u16 },
+    /// The local file could not be read for upload.
+    LocalFileUnreadable,
+    /// A change selected the recycle bin as its destination.
+    InvalidDestination,
 }
 
 impl MegaFailure {
@@ -66,6 +80,7 @@ impl MegaFailure {
             Self::QuotaExceeded { .. } => "mega_quota_exceeded",
             Self::AccountQuotaExceeded { .. } => "mega_account_quota_exceeded",
             Self::IntegrityFailed => "mega_integrity_failed",
+            Self::IntegrityUnavailable => "mega_integrity_unavailable",
             Self::InvalidCredentials => "mega_invalid_credentials",
             Self::MfaRequired => "mega_mfa_required",
             Self::MfaInvalid => "mega_mfa_invalid",
@@ -80,6 +95,12 @@ impl MegaFailure {
             Self::KeysConflict => "mega_keys_conflict",
             Self::KeysUnsupported => "mega_keys_unsupported",
             Self::CopyTooLarge => "mega_copy_too_large",
+            Self::ServiceBusy => "mega_service_busy",
+            Self::ServiceUnavailable => "mega_service_unavailable",
+            Self::ApiError { .. } => "mega_api_error",
+            Self::UploadHttpError { .. } => "mega_upload_http_error",
+            Self::LocalFileUnreadable => "mega_local_file_unreadable",
+            Self::InvalidDestination => "mega_invalid_destination",
         }
     }
 
@@ -93,6 +114,7 @@ impl MegaFailure {
             Self::QuotaExceeded { .. } => "cloud.error.mega.quotaExceeded",
             Self::AccountQuotaExceeded { .. } => "cloud.error.mega.accountQuotaExceeded",
             Self::IntegrityFailed => "cloud.error.mega.integrityFailed",
+            Self::IntegrityUnavailable => "cloud.error.mega.integrityUnavailable",
             Self::InvalidCredentials => "cloud.error.mega.invalidCredentials",
             Self::MfaRequired => "cloud.error.mega.mfaRequired",
             Self::MfaInvalid => "cloud.error.mega.mfaInvalid",
@@ -107,10 +129,16 @@ impl MegaFailure {
             Self::KeysConflict => "cloud.error.mega.keysConflict",
             Self::KeysUnsupported => "cloud.error.mega.keysUnsupported",
             Self::CopyTooLarge => "cloud.error.mega.copyTooLarge",
+            Self::ServiceBusy => "cloud.error.mega.serviceBusy",
+            Self::ServiceUnavailable => "cloud.error.mega.serviceUnavailable",
+            Self::ApiError { .. } => "cloud.error.mega.apiError",
+            Self::UploadHttpError { .. } => "cloud.error.mega.uploadHttpError",
+            Self::LocalFileUnreadable => "cloud.error.mega.localFileUnreadable",
+            Self::InvalidDestination => "cloud.error.mega.invalidDestination",
         }
     }
 
-    /// Localization key, with `:<seconds>` appended for a known quota wait.
+    /// Localization key, with a numeric parameter appended when available.
     pub fn message(&self) -> String {
         match self {
             Self::QuotaExceeded {
@@ -119,6 +147,8 @@ impl MegaFailure {
             | Self::AccountQuotaExceeded {
                 retry_after_secs: Some(seconds),
             } => format!("{}:{seconds}", self.message_key()),
+            Self::ApiError { code } => format!("{}:{code}", self.message_key()),
+            Self::UploadHttpError { status } => format!("{}:{status}", self.message_key()),
             _ => self.message_key().to_owned(),
         }
     }
@@ -150,6 +180,18 @@ mod tests {
             }
             .message(),
             "cloud.error.mega.accountQuotaExceeded"
+        );
+        assert_eq!(
+            MegaFailure::ApiError { code: -99 }.message(),
+            "cloud.error.mega.apiError:-99"
+        );
+        assert_eq!(
+            MegaFailure::UploadHttpError { status: 403 }.message(),
+            "cloud.error.mega.uploadHttpError:403"
+        );
+        assert_eq!(
+            MegaFailure::IntegrityUnavailable.message(),
+            "cloud.error.mega.integrityUnavailable"
         );
         assert_eq!(
             MegaFailure::LinkIncomplete.message(),

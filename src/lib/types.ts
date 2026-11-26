@@ -215,6 +215,26 @@ export interface Aria2Settings {
   p2pUploadLimit: number;
 }
 
+export interface AgentCloudGrant {
+  provider: import('./cloudTypes').CloudProvider;
+  accountId: string;
+  accountLabel?: string;
+}
+
+export interface AgentConnectionInfo {
+  executablePath: string;
+  executableExists: boolean;
+  configJson: string;
+  installationPrompt: string;
+}
+
+export interface AgentAccessSettings {
+  enabled: boolean;
+  allowedDirectories: string[];
+  uploadDirectories: string[];
+  cloudGrants: AgentCloudGrant[];
+}
+
 export interface AppSettings {
   downloadDirectory: string;
   launcherVisibility: LauncherVisibility;
@@ -228,6 +248,7 @@ export interface AppSettings {
   associateDownloadLinks?: boolean;
   privacyDownloadEnabled?: boolean;
   privacyPasswordConfigured?: boolean;
+  agentAccess?: AgentAccessSettings;
   cloudUploadLimit?: number;
 }
 

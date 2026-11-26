@@ -21,6 +21,9 @@ use super::{
     TransferSnapshot,
 };
 
+#[path = "cli_bt_dispatch.rs"]
+mod cli_bt_dispatch;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DownloadAction {
     Pause,
@@ -28,7 +31,7 @@ pub enum DownloadAction {
     Cancel,
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UriSubmissionOptions {
     pub directory: Option<PathBuf>,
     pub output_name: Option<String>,
@@ -546,6 +549,101 @@ impl DownloadService {
         let mut task = self.store.find(task_id)?;
         let options = self.prepare_uri_options(&mut task, options)?;
         self.submit_uri(task_id, uris, options).await
+    }
+
+    /// Resume the durable CLI acceptance protocol. A fixed GID is reserved
+    /// before the first RPC, and new engine jobs start paused. Consequently an
+    /// ambiguous addUri result is reconciled, never retried with a fresh GID.
+    pub(crate) async fn dispatch_cli_intent(
+        &self,
+        intent: &crate::store::CliDispatchIntent,
+        authorize: &(dyn Fn(&Path) -> bool + Send + Sync),
+    ) -> Result<DownloadTask, DownloadServiceError> {
+        let _guard = self.operation.lock().await;
+        self.ensure_accepting()?;
+        let mut task = self.store.find(intent.task_id)?;
+        if !self.store.cli_dispatch_pending(task.id)? { return Ok(task); }
+        if task.aria_gid.as_deref() != Some(intent.gid.as_str()) {
+            return Err(DownloadServiceError::AlreadySubmitted);
+        }
+        // Only a successfully read complete snapshot proves absence. A
+        // tellStatus transport error must never be interpreted as "not found".
+        let existing = Self::native_statuses(self.api().as_ref()).await?
+            .into_iter().find(|status| status.gid == intent.gid);
+        if matches!(task.status, TaskStatus::Cancelled | TaskStatus::Recycled) {
+            if existing.is_some() {
+                if self.api().remove(&intent.gid).await.is_err() {
+                    self.api().force_remove(&intent.gid).await?;
+                }
+                self.api().save_session().await?;
+            }
+            self.store.finish_cli_dispatch(task.id)?;
+            return Ok(task);
+        }
+        let authorized = !task.is_private && intent.options.directory.as_ref().is_some_and(|dir| authorize(dir));
+        if task.status != TaskStatus::Queued || !authorized {
+            if existing.as_ref().is_some_and(|status| matches!(status.status.as_str(), "active" | "waiting")) {
+                self.api().force_pause(&intent.gid).await?;
+            }
+            return Ok(task);
+        }
+        if let Some(path) = self.store.reserved_output_path(task.id)? {
+            if !authorize(&path) { return Ok(task); }
+        }
+        let existing = match existing {
+            Some(status) => status,
+            None => {
+                let mut options = self.prepare_uri_options(&mut task, intent.options.clone())?;
+                let output = self.store.reserved_output_path(task.id)?
+                    .ok_or(DownloadServiceError::InvalidUriOption("output path"))?;
+                if !authorize(&output) { return Ok(task); }
+                // If the engine lost its identity but a payload already
+                // exists, automatic re-creation could overwrite completed or
+                // partial work. Preserve it and require explicit recovery.
+                if output.exists() {
+                    return Err(DownloadServiceError::InvalidNativeCheckpoint);
+                }
+                options.insert("gid".into(), intent.gid.clone());
+                options.insert("pause".into(), "true".into());
+                options.insert("allow-overwrite".into(), "false".into());
+                options.insert("continue".into(), "false".into());
+                let gid = self.add_uri_for_task(task.id, vec![task.source.clone()], options).await?;
+                if gid != intent.gid {
+                    // A nonconforming engine must not leave an unowned job.
+                    let _ = self.api().force_remove(&gid).await;
+                    return Err(Aria2Error::MalformedResponse.into());
+                }
+                self.tell_status_for_task(task.id, &gid).await?
+            }
+        };
+        // Persist the engine session before committing delivery. A crash here
+        // finds the same GID and attaches it without another addUri.
+        self.api().save_session().await?;
+        // Authorization may have been revoked while the RPC was in flight.
+        let output = self.store.reserved_output_path(task.id)?;
+        let latest = self.store.find(task.id)?;
+        if latest.is_private || latest.status != TaskStatus::Queued
+            || !intent.options.directory.as_ref().is_some_and(|dir| authorize(dir))
+            || output.as_ref().is_some_and(|path| !authorize(path))
+        {
+            if matches!(existing.status.as_str(), "active" | "waiting") {
+                self.api().force_pause(&intent.gid).await?;
+            }
+            return Ok(latest);
+        }
+        if existing.status == "paused" {
+            self.unpause_gid(&intent.gid).await?;
+        }
+        self.store.finish_cli_dispatch(task.id)?;
+        self.reconcile_task_unlocked(task.id).await
+    }
+
+    pub(crate) async fn fail_cli_dispatch(&self, task_id: Uuid, code: &'static str) -> Result<DownloadTask, DownloadServiceError> {
+        let _guard = self.operation.lock().await;
+        let task = self.store.fail_with_code(task_id, Some(code), crate::cli_protocol::message(code, "en"))?;
+        self.store.finish_cli_dispatch(task_id)?;
+        self.publish_task(&task)?;
+        Ok(task)
     }
 
     fn prepare_uri_options(
@@ -1243,6 +1341,7 @@ impl DownloadService {
         task_id: Uuid,
     ) -> Result<DownloadTask, DownloadServiceError> {
         let current = self.store.find(task_id)?;
+        if self.store.cli_dispatch_pending(task_id)? { return Ok(current); }
         let gid = current
             .aria_gid
             .clone()
@@ -1558,6 +1657,7 @@ impl DownloadService {
             .into_iter()
             .filter(|task| {
                 task.aria_gid.is_some()
+                    && !self.store.cli_dispatch_pending(task.id).unwrap_or(true)
                     && !crate::xunlei_native::is_native_gid(task.aria_gid.as_deref())
                     && !crate::cloud::download_dispatch::cloud_task_requires_provider_dispatch(task)
                     && !matches!(task.status, TaskStatus::Cancelled | TaskStatus::Recycled)

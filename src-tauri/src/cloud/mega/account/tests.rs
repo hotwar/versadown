@@ -296,12 +296,12 @@ fn account_level_errors_map_to_their_own_failures() {
     let busy = FakeMega::new(|_, _| code(-3));
     assert!(matches!(
         login(&busy, &request(EMAIL, V2_PASSWORD, None)),
-        Err(QuarkError::Transport(_))
+        Err(QuarkError::Mega(MegaFailure::ServiceBusy))
     ));
     let down = FakeMega::new(|_, _| (503, String::new()));
     assert!(matches!(
         login(&down, &request(EMAIL, V2_PASSWORD, None)),
-        Err(QuarkError::Transport(_))
+        Err(QuarkError::Mega(MegaFailure::ServiceBusy))
     ));
     let garbage = FakeMega::new(|_, _| (200, "<html>".into()));
     assert!(matches!(

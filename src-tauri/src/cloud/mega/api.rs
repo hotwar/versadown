@@ -67,10 +67,8 @@ fn api_error(code: i64, retry_after_secs: Option<u64>) -> QuarkError {
         ESID => QuarkError::AuthorizationExpired,
         EOVERQUOTA => QuarkError::Mega(MegaFailure::QuotaExceeded { retry_after_secs }),
         ENOENT | EEXPIRED | EBLOCKED => QuarkError::Mega(MegaFailure::LinkUnavailable),
-        EAGAIN | ERATELIMIT | ETEMPUNAVAIL => {
-            QuarkError::Transport("MEGA 服务暂时繁忙，请稍后重试".into())
-        }
-        other => QuarkError::Provider(format!("MEGA 错误码 {other}")),
+        EAGAIN | ERATELIMIT | ETEMPUNAVAIL => QuarkError::Mega(MegaFailure::ServiceBusy),
+        other => QuarkError::Mega(MegaFailure::ApiError { code: other }),
     }
 }
 
@@ -128,9 +126,7 @@ impl<'a> MegaApi<'a> {
             body: Some(Value::Array(vec![command]).to_string()),
         })?;
         if response.status != 200 {
-            return Err(QuarkError::Transport(
-                "MEGA 服务暂时不可用，请稍后重试".into(),
-            ));
+            return Err(QuarkError::Mega(MegaFailure::ServiceUnavailable));
         }
         command_result(&response.body)
     }
@@ -212,7 +208,7 @@ mod tests {
         ));
         assert!(matches!(
             command_result("[-3]"),
-            Err(QuarkError::Transport(_))
+            Err(QuarkError::Mega(MegaFailure::ServiceBusy))
         ));
     }
 
@@ -224,6 +220,18 @@ mod tests {
                 retry_after_secs: Some(1800)
             }))
         ));
+    }
+
+    #[test]
+    fn service_failures_cross_ipc_as_keys_and_numeric_parameters() {
+        assert_eq!(
+            command_result("[-99]").unwrap_err().to_string(),
+            "cloud.error.mega.apiError:-99"
+        );
+        assert_eq!(
+            command_result("[-3]").unwrap_err().to_string(),
+            "cloud.error.mega.serviceBusy"
+        );
     }
 
     #[test]

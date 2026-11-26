@@ -13,6 +13,15 @@ use uuid::Uuid;
 #[path = "store_share_membership_tests.rs"]
 mod share_membership_tests;
 
+#[path = "store/agent_resources.rs"]
+mod agent_resources;
+#[path = "store/agent_cloud.rs"]
+mod agent_cloud;
+#[path = "store/agent_permissions.rs"]
+mod agent_permissions;
+#[path = "store/agent_interactions.rs"]
+mod agent_interactions;
+
 use crate::{
     cloud::CloudProvider,
     models::{
@@ -33,6 +42,10 @@ pub enum StoreError {
     InvalidStoredStatus,
     #[error("invalid video transfer engine stored in database")]
     InvalidStoredVideoEngine,
+    #[error("invalid persisted CLI execution intent")]
+    InvalidCliIntent,
+    #[error("unsupported CLI protocol submission options")]
+    UnsupportedCliOptions,
     #[error("cannot transition task from {from:?} to {to:?}")]
     InvalidTransition { from: TaskStatus, to: TaskStatus },
     #[error("value for {field} is outside SQLite's signed 64-bit range")]
@@ -48,6 +61,22 @@ pub enum StoreError {
 pub struct TaskStore {
     connection: Mutex<Connection>,
     leaf_gates: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// Request identity is independent of the ordinary source duplicate policy.
+pub(crate) enum CliCreateOutcome {
+    Created(DownloadTask),
+    Replayed(DownloadTask),
+    Conflict,
+    Duplicate,
+    Busy,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CliDispatchIntent {
+    pub task_id: Uuid,
+    pub gid: String,
+    pub options: crate::UriSubmissionOptions,
 }
 
 impl TaskStore {
@@ -162,7 +191,8 @@ impl TaskStore {
              WHERE (source LIKE 'cloud://%' OR source LIKE 'cloud-share://%')
                AND (status IN ('queued', 'downloading') OR
                     (status = 'parsing' AND aria_gid IS NULL) OR
-                    (status = 'failed' AND aria_error_code IN ('6', '8', '22', '24')))",
+                    (status = 'failed' AND aria_error_code IN ('6', '8', '22', '24')))
+               AND NOT EXISTS(SELECT 1 FROM agent_resource_dispatch d WHERE d.task_id=tasks.id AND d.phase!=2)",
         )?;
         let ids = statement
             .query_map([], |row| row.get::<_, String>(0))?
@@ -400,6 +430,21 @@ impl TaskStore {
             );",
         )?;
         migrate(&mut connection)?;
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS cli_requests (
+            request_id TEXT PRIMARY KEY NOT NULL,
+            fingerprint TEXT NOT NULL,
+            task_id TEXT NOT NULL
+        );")?;
+        connection.execute_batch("CREATE TABLE IF NOT EXISTS cli_dispatch_intents (
+            task_id TEXT PRIMARY KEY NOT NULL,
+            gid TEXT NOT NULL UNIQUE,
+            options_json TEXT NOT NULL,
+            dispatched INTEGER NOT NULL DEFAULT 0
+        );")?;
+        agent_resources::create_tables(&connection)?;
+        agent_cloud::create_tables(&connection)?;
+        agent_permissions::create_tables(&connection)?;
+        agent_interactions::create_tables(&connection)?;
         connection.execute_batch("CREATE TABLE IF NOT EXISTS cloud_download_accounts (id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL, account_id TEXT NOT NULL);")?;
         let schema = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         schema.execute_batch("CREATE TABLE IF NOT EXISTS video_task_formats (
@@ -425,6 +470,182 @@ impl TaskStore {
     pub fn create(&self, new_task: NewTask) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         Self::create_with_connection(&connection, new_task)
+    }
+
+    /// Commit the task and request receipt together, before contacting an engine.
+    /// Receipts survive task deletion so a retry can never create a second task.
+    pub(crate) fn create_cli_task(
+        &self,
+        request_id: &str,
+        fingerprint: &str,
+        new_task: NewTask,
+    ) -> Result<CliCreateOutcome, StoreError> {
+        self.create_cli_task_inner(request_id, fingerprint, new_task, None)
+    }
+
+    /// The execution intent and reserved engine identity are committed in the
+    /// same transaction as the receipt. No engine RPC is needed for acceptance.
+    pub(crate) fn create_cli_task_with_intent(
+        &self,
+        request_id: &str,
+        fingerprint: &str,
+        new_task: NewTask,
+        options: &crate::UriSubmissionOptions,
+    ) -> Result<CliCreateOutcome, StoreError> {
+        if options.directory.as_ref().is_none_or(|path| !path.is_absolute())
+            || options.allow_overwrite || options.continue_download
+            || !matches!(new_task.kind.as_str(), "file" | "ftp") || new_task.is_private
+        {
+            return Err(StoreError::InvalidCliIntent);
+        }
+        self.create_cli_task_inner(request_id, fingerprint, new_task, Some(options))
+    }
+
+    fn create_cli_task_inner(
+        &self,
+        request_id: &str,
+        fingerprint: &str,
+        new_task: NewTask,
+        options: Option<&crate::UriSubmissionOptions>,
+    ) -> Result<CliCreateOutcome, StoreError> {
+        let mut connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let transaction = connection.transaction()?;
+        let receipt: Option<(String, String)> = transaction.query_row(
+            "SELECT fingerprint, task_id FROM cli_requests WHERE request_id = ?1",
+            [request_id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).optional()?;
+        if let Some((previous, id)) = receipt {
+            if previous != fingerprint {
+                return Ok(CliCreateOutcome::Conflict);
+            }
+            let id = Uuid::parse_str(&id).map_err(|_| StoreError::InvalidStoredStatus)?;
+            return Ok(CliCreateOutcome::Replayed(find_with_connection(&transaction, id)?));
+        }
+        // A replay uses the original persisted options even if desktop proxy
+        // settings changed since acceptance. Validate new FTP submissions only
+        // after the receipt lookup; FTP does not implement HTTP proxy/headers.
+        if new_task.kind == "ftp" && options.is_some_and(|options| options.proxy.is_some() || !options.headers.is_empty()) {
+            return Err(StoreError::UnsupportedCliOptions);
+        }
+        let duplicate: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE source = ?1 AND kind = ?2 AND status != 'recycled')",
+            params![new_task.source, new_task.kind], |row| row.get(0),
+        )?;
+        if duplicate {
+            return Ok(CliCreateOutcome::Duplicate);
+        }
+        if options.is_some() {
+            let pending: i64 = transaction.query_row(
+                "SELECT COUNT(*) FROM cli_dispatch_intents i JOIN tasks t ON t.id=i.task_id
+                 WHERE i.dispatched=0 AND t.status IN ('queued','paused')",
+                [], |row| row.get(0),
+            )?;
+            if pending >= 1000 { return Ok(CliCreateOutcome::Busy); }
+        }
+        let mut task = Self::create_with_connection(&transaction, new_task)?;
+        transaction.execute(
+            "INSERT INTO cli_requests(request_id, fingerprint, task_id) VALUES (?1, ?2, ?3)",
+            params![request_id, fingerprint, task.id.to_string()],
+        )?;
+        if let Some(options) = options {
+            // aria2 accepts a caller-selected, nonzero 16-hex-digit GID.
+            // Bind before addUri so restart recovery never imports this job
+            // as an unrelated external task if the response is lost.
+            let gid = format!("{:016x}", (task.id.as_u128() >> 64) as u64);
+            let options = serde_json::to_string(options).map_err(|_| StoreError::InvalidCliIntent)?;
+            transaction.execute(
+                "INSERT INTO cli_dispatch_intents(task_id,gid,options_json) VALUES (?1,?2,?3)",
+                params![task.id.to_string(), gid, options],
+            )?;
+            transaction.execute(
+                "UPDATE tasks SET aria_gid=?1,status='queued' WHERE id=?2",
+                params![(task.kind != "ftp").then_some(&gid), task.id.to_string()],
+            )?;
+            task = find_with_connection(&transaction, task.id)?;
+        }
+        transaction.commit()?;
+        Ok(CliCreateOutcome::Created(task))
+    }
+
+    pub(crate) fn cli_dispatch_pending(&self, id: Uuid) -> Result<bool, StoreError> {
+        let direct = {
+            let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+            connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM cli_dispatch_intents WHERE task_id=?1 AND dispatched=0)",
+                [id.to_string()], |row| row.get::<_, bool>(0),
+            )?
+        };
+        Ok(direct || self.agent_resource_dispatch_pending(id)?)
+    }
+
+    pub(crate) fn cli_intent_directory(&self, id: Uuid) -> Result<Option<std::path::PathBuf>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let value: Option<String> = connection.query_row(
+            "SELECT options_json FROM cli_dispatch_intents WHERE task_id=?1 AND dispatched=0",
+            [id.to_string()], |row| row.get(0),
+        ).optional()?;
+        value.map(|value| serde_json::from_str::<crate::UriSubmissionOptions>(&value)
+            .map(|options| options.directory).map_err(|_| StoreError::InvalidCliIntent))
+            .transpose().map(Option::flatten)
+    }
+
+    pub(crate) fn pending_cli_intents(&self) -> Result<Vec<CliDispatchIntent>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let mut statement = connection.prepare(
+            "SELECT i.task_id,i.gid,i.options_json FROM cli_dispatch_intents i
+             JOIN tasks t ON t.id=i.task_id WHERE i.dispatched=0
+             OR (t.kind='ftp' AND t.status IN ('queued','downloading')) ORDER BY t.created_at,t.id",
+        )?;
+        let rows = statement.query_map([], |row| Ok((
+            row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?,
+        )))?;
+        rows.map(|row| {
+            let (id, gid, options) = row?;
+            Ok(CliDispatchIntent {
+                task_id: Uuid::parse_str(&id).map_err(|_| StoreError::InvalidCliIntent)?,
+                gid,
+                options: serde_json::from_str(&options).map_err(|_| StoreError::InvalidCliIntent)?,
+            })
+        }).collect()
+    }
+
+    pub(crate) fn has_cli_intent(&self, id: Uuid) -> Result<bool, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        Ok(connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cli_dispatch_intents WHERE task_id=?1)",
+            [id.to_string()], |row| row.get(0),
+        )?)
+    }
+
+    pub(crate) fn finish_cli_dispatch(&self, id: Uuid) -> Result<(), StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        connection.execute("UPDATE cli_dispatch_intents SET dispatched=1 WHERE task_id=?1", [id.to_string()])?;
+        Ok(())
+    }
+
+    /// Called under the dispatcher's gate, before any engine submission.
+    pub(crate) fn control_pending_cli(
+        &self, id: Uuid, action: crate::DownloadAction,
+    ) -> Result<Option<DownloadTask>, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        let pending: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cli_dispatch_intents WHERE task_id=?1 AND dispatched=0)",
+            [id.to_string()], |row| row.get(0),
+        )?;
+        if !pending { return Ok(None); }
+        let task = find_with_connection(&connection, id)?;
+        if !matches!(task.status, TaskStatus::Queued | TaskStatus::Paused | TaskStatus::Cancelled) {
+            return Ok(Some(task));
+        }
+        let next = match (task.status, action) {
+            (TaskStatus::Cancelled, _) => TaskStatus::Cancelled,
+            (_, crate::DownloadAction::Pause) => TaskStatus::Paused,
+            (_, crate::DownloadAction::Resume) => TaskStatus::Queued,
+            (_, crate::DownloadAction::Cancel) => TaskStatus::Cancelled,
+        };
+        connection.execute("UPDATE tasks SET status=?1,updated_at=?2 WHERE id=?3",
+            params![next.as_db(), current_timestamp(), id.to_string()])?;
+        Ok(Some(find_with_connection(&connection, id)?))
     }
 
     pub(crate) fn create_video(&self, task: NewTask, selector: &str, media_id: &str) -> Result<DownloadTask, StoreError> {
@@ -464,7 +685,8 @@ impl TaskStore {
     pub(crate) fn recover_video_downloads(&self) -> Result<(), StoreError> {
         let conn = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         conn.execute("UPDATE tasks SET status='paused', download_speed=0, eta_seconds=NULL
-                      WHERE kind='web_video' AND status IN ('queued','downloading','processing','parsing')", [])?;
+                      WHERE kind='web_video' AND status IN ('queued','downloading','processing','parsing')
+                      AND NOT EXISTS(SELECT 1 FROM agent_resource_dispatch d WHERE d.task_id=tasks.id AND d.phase!=2)", [])?;
         Ok(())
     }
 
@@ -2282,6 +2504,34 @@ fn validate_path_component(component: &str) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_resource_pending_intents_keep_ownership_during_desktop_startup_recovery() {
+        let store = TaskStore::open_in_memory().unwrap();
+        let mut owned = Vec::new();
+        let mut ordinary = Vec::new();
+        for (kind, source) in [("web_video", "https://example.test/watch"), ("cloud", "cloud://quark/file") ] {
+            for is_agent in [true, false] {
+                let task = store.create(NewTask { source: source.into(), name: "sample.bin".into(), kind: kind.into(), is_private: false }).unwrap();
+                assert_eq!(task.status, TaskStatus::Parsing);
+                if is_agent {
+                    store.connection.lock().unwrap().execute(
+                        "INSERT INTO agent_resource_dispatch(task_id,source,directory,payload_json,phase) VALUES(?1,?2,'unused','{}',0)",
+                        params![task.id.to_string(), source],
+                    ).unwrap();
+                    owned.push(task.id);
+                } else { ordinary.push(task.id); }
+            }
+        }
+        store.recover_video_downloads().unwrap();
+        store.defer_startup_cloud_downloads().unwrap();
+        for id in &owned { assert_eq!(store.find(*id).unwrap().status, TaskStatus::Parsing); }
+        for id in &ordinary { assert_eq!(store.find(*id).unwrap().status, TaskStatus::Paused); }
+        for id in &owned { store.finish_agent_resource_dispatch(*id).unwrap(); }
+        store.recover_video_downloads().unwrap();
+        store.defer_startup_cloud_downloads().unwrap();
+        for id in owned { assert_eq!(store.find(id).unwrap().status, TaskStatus::Paused); }
+    }
     use crate::{
         cloud::CloudProvider,
         models::{NewCloudDirectoryGroup, NewCloudDirectoryGroupItem},

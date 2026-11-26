@@ -144,6 +144,10 @@ impl DownloadService {
                 continue;
             };
 
+            // Accepted CLI work owns its GID before RPC. Leave its durable
+            // user intent untouched until the dispatcher checks authorization.
+            if store.cli_dispatch_pending(task.id)? { continue; }
+
             if crate::cloud::download_dispatch::cloud_task_requires_provider_dispatch(&task) {
                 // The persisted engine task still contains a short-lived
                 // provider URL.  Its GID is retained only so the fresh URL can
@@ -215,13 +219,14 @@ impl DownloadService {
             .map(|task| task.id)
             .collect::<Vec<_>>();
         for id in missing {
+            if store.cli_dispatch_pending(id)? { continue; }
             let task = store.detach_missing_engine_task(id)?;
             self.publish_task(&task)?;
         }
         Ok(report)
     }
 
-    async fn native_statuses(api: &dyn Aria2Api) -> Result<Vec<Aria2Status>, DownloadServiceError> {
+    pub(super) async fn native_statuses(api: &dyn Aria2Api) -> Result<Vec<Aria2Status>, DownloadServiceError> {
         let mut statuses = api.tell_active().await?;
         for stopped in [false, true] {
             let mut offset = 0;

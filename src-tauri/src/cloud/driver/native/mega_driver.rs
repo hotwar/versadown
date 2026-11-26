@@ -72,15 +72,12 @@ impl ShareOps for MegaDriver<'_> {
 impl UploadOps for MegaDriver<'_> {
     fn upload(
         &mut self,
-        state: &CloudState,
         upload_http: &dyn UploadHttp,
         parent_id: &str,
         path: &Path,
     ) -> Result<CloudFile, CloudError> {
         let http = UploadHttpRef(upload_http);
-        state.with_upload_session(CloudProvider::Mega, &http, |store| {
-            MegaAccountClient::new(&http, store).upload_file(&http, parent_id, path)
-        })
+        MegaAccountClient::new(&http, &self.store).upload_file(&http, parent_id, path)
     }
 }
 // A MEGA session cannot be renewed without the password, which is never
