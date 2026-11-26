@@ -89,7 +89,7 @@ pub fn entry(plan: CloudSharePlan) -> CloudShareResolvedEntry {
     }
 }
 #[test]
-fn all_seven_share_providers_are_registered_without_network_side_effects() {
+fn all_share_providers_are_registered_without_network_side_effects() {
     let credentials = crate::cloud::MemoryCredentialStore::default();
     let http = Http::new(vec![]);
     for provider in [
@@ -100,6 +100,7 @@ fn all_seven_share_providers_are_registered_without_network_side_effects() {
         CloudProvider::Aliyun,
         CloudProvider::Xunlei,
         CloudProvider::Uc,
+        CloudProvider::Mega,
     ] {
         assert!(provider_share_adapter(provider, &credentials, &http).is_ok());
     }

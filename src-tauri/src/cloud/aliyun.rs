@@ -1821,6 +1821,7 @@ impl AliyunShareAdapter<'_> {
                 let (url, _) = client.download_with_session(session, file_id)?;
                 super::share::validate_direct_url(&url)?;
                 Ok(super::commands::ResolvedCloudDownload {
+                    transform: None,
                     url,
                     name: name.into(),
                     headers: vec![("Referer".into(), WEB_REFERER.into())],
@@ -2342,6 +2343,7 @@ fn resolve_aliyun_share_with_context(
         super::share::validate_direct_url(&url)?;
         Ok(ShareResolution::Direct(
             super::commands::ResolvedCloudDownload {
+                transform: None,
                 url,
                 name: entry.entry.name.clone(),
                 // The account bearer authorizes only the API request that

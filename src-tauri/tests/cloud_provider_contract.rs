@@ -384,8 +384,8 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
             direct
         );
     }
-    assert_eq!(descriptors.len(), 7);
-    assert_eq!(registry.catalog().len(), 6);
+    assert_eq!(descriptors.len(), 8);
+    assert_eq!(registry.catalog().len(), 7);
 }
 
 #[test]
@@ -499,6 +499,7 @@ fn capability_facade_dispatches_and_rejects_missing_operations_before_io() {
         ) -> Result<versadown_lib::cloud::commands::ResolvedCloudDownload, CloudError> {
             self.0.lock().unwrap().push(format!("download:{file}"));
             Ok(versadown_lib::cloud::commands::ResolvedCloudDownload {
+                transform: None,
                 url: "https://download.example/file".into(),
                 name: file.into(),
                 headers: vec![],
@@ -651,11 +652,24 @@ fn public_command_exports_keep_all_provider_codes_and_file_kind_json() {
         assert_eq!(capability["provider"], provider.key());
         let error =
             commands::restore_account(provider, &store, &RecordingHttp::sequence([])).unwrap_err();
+        let accountless = !versadown_lib::cloud::ProviderRegistry::global()
+            .get(provider)
+            .account;
         assert_eq!(
             serde_json::to_value(error).unwrap()["code"],
-            "not_authorized"
+            if accountless {
+                "provider_unsupported"
+            } else {
+                "not_authorized"
+            }
         );
-        if provider.is_enabled() {
+        if accountless {
+            // Nothing to log out of: account operations are rejected outright.
+            assert!(matches!(
+                commands::logout_provider(provider, &store),
+                Err(QuarkError::ProviderUnsupported)
+            ));
+        } else if provider.is_enabled() {
             commands::logout_provider(provider, &store).unwrap();
         } else {
             assert!(matches!(
@@ -685,6 +699,13 @@ fn native_capability_drivers_work_in_a_consumer_without_a_tauri_host() {
     for provider in CloudProvider::ALL {
         let mut driver = ProviderRegistry::global().driver(provider, &store, &NoNetwork);
         let _recipe = driver.auth().web_authorization_recipe();
+        if !ProviderRegistry::global().get(provider).account {
+            assert!(
+                matches!(driver.account(), Err(CloudError::ProviderUnsupported)),
+                "{provider:?}"
+            );
+            continue;
+        }
         assert!(
             matches!(driver.account(), Err(CloudError::NotAuthorized)),
             "{provider:?}"
@@ -816,8 +837,8 @@ fn registry_catalog_is_complete_unique_and_routes_each_share() {
     let registry = ProviderRegistry::global();
     let descriptors = registry.all();
     let catalog = registry.catalog();
-    assert_eq!(descriptors.len(), 7);
-    assert_eq!(catalog.len(), 6);
+    assert_eq!(descriptors.len(), 8);
+    assert_eq!(catalog.len(), 7);
     assert!(catalog
         .iter()
         .all(|descriptor| descriptor.provider.is_enabled()));
@@ -827,7 +848,7 @@ fn registry_catalog_is_complete_unique_and_routes_each_share() {
             .map(|d| d.provider)
             .collect::<HashSet<_>>()
             .len(),
-        7
+        8
     );
     assert_eq!(
         descriptors
@@ -835,7 +856,7 @@ fn registry_catalog_is_complete_unique_and_routes_each_share() {
             .map(|d| d.provider.key())
             .collect::<HashSet<_>>()
             .len(),
-        7
+        8
     );
     for descriptor in descriptors {
         assert!(!descriptor.root_directory_id.is_empty());
@@ -889,6 +910,7 @@ fn registry_only_advertises_implemented_share_transfer_capabilities() {
         (CloudProvider::Pikpak, true),
         (CloudProvider::Tianyi, false),
         (CloudProvider::Aliyun, true),
+        (CloudProvider::Mega, true),
     ] {
         let capabilities = &ProviderRegistry::global().get(provider).capabilities;
         assert!(capabilities.share_inspect);
@@ -1226,4 +1248,18 @@ fn restore_account_dispatches_each_new_provider_without_falling_back_to_unsuppor
         .provider,
         CloudProvider::Uc
     );
+}
+
+#[test]
+fn every_provider_session_and_maintenance_key_is_storable() {
+    use versadown_lib::cloud::credential_key_is_supported;
+    for provider in CloudProvider::ALL {
+        let key = provider.key();
+        assert!(credential_key_is_supported(key), "{key}");
+        assert!(
+            credential_key_is_supported(&format!("cloud-auth-maintenance-{key}")),
+            "{key}"
+        );
+    }
+    assert!(!credential_key_is_supported("cloud-auth-maintenance-unknown"));
 }

@@ -1,5 +1,5 @@
 use versadown_lib::aria2::{Aria2Api, Aria2LaunchConfig, Aria2Process};
-use versadown_lib::cloud::baidu_range_gateway::BaiduRangeGateway;
+use versadown_lib::cloud::range_gateway::RangeGateway;
 #[cfg(windows)]
 use versadown_lib::cloud::{
     baidu::{BaiduClient, BaiduDownload, BaiduSession},
@@ -120,7 +120,7 @@ async fn bundled_engine_downloads_slow_continuous_ranges_without_false_stalls() 
         .await
         .unwrap();
     });
-    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let gateway = RangeGateway::start().await.unwrap();
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store.create(NewTask::direct(&upstream)).unwrap();
@@ -340,7 +340,7 @@ async fn invalid_chunked_body_never_completes_the_advertised_range() {
         .await
         .unwrap();
     });
-    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let gateway = RangeGateway::start().await.unwrap();
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     for path in ["truncated", "overlong", "broken-eof"] {
         let registration = gateway
@@ -398,7 +398,7 @@ async fn valid_short_upstream_ranges_are_streamed_without_gaps() {
         .await
         .unwrap();
     });
-    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let gateway = RangeGateway::start().await.unwrap();
     let registration = gateway.register(Uuid::new_v4(), upstream, vec![], None).unwrap();
     let response = reqwest::Client::builder().no_proxy().build().unwrap()
         .get(registration.url())
@@ -453,7 +453,7 @@ async fn changing_upstream_total_aborts_the_local_response_stream() {
         .await
         .unwrap();
     });
-    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let gateway = RangeGateway::start().await.unwrap();
     let registration = gateway
         .register(Uuid::new_v4(), upstream, vec![], None)
         .unwrap();
@@ -486,7 +486,7 @@ async fn invalid_upstream_range_responses_are_rejected_before_exposing_file_byte
         .await
         .unwrap();
     });
-    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let gateway = RangeGateway::start().await.unwrap();
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
     for (path, expected) in [
         ("ignored", StatusCode::BAD_GATEWAY),
@@ -532,7 +532,7 @@ async fn no_range_and_head_expose_the_whole_file_without_unbounded_upstream_requ
         .await
         .unwrap();
     });
-    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let gateway = RangeGateway::start().await.unwrap();
     let registration = gateway
         .register(Uuid::new_v4(), upstream, vec![], None)
         .unwrap();
@@ -587,7 +587,7 @@ async fn large_local_range_is_fetched_in_exact_four_mib_baidu_ranges() {
         .unwrap();
     });
 
-    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let gateway = RangeGateway::start().await.unwrap();
     let registration = gateway
         .register(
             Uuid::new_v4(),
@@ -652,7 +652,7 @@ async fn bundled_engine_completes_large_baidu_file_through_bounded_gateway() {
         .await
         .unwrap();
     });
-    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let gateway = RangeGateway::start().await.unwrap();
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store.create(NewTask::direct(&upstream)).unwrap();
@@ -764,7 +764,7 @@ async fn exercise_paused_gateway_resume(rebind_existing_token: bool) {
         .await
         .unwrap();
     });
-    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let gateway = RangeGateway::start().await.unwrap();
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(TaskStore::open_path(&root.path().join("tasks.sqlite")).unwrap());
     let task = store
@@ -948,7 +948,7 @@ async fn bundled_engine_restores_a_native_checkpoint_through_fresh_gateway_with_
             is_private: false,
         })
         .unwrap();
-    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let gateway = RangeGateway::start().await.unwrap();
     let mut original = gateway
         .register(task.id, upstream.clone(), vec![], None)
         .unwrap();
@@ -1033,7 +1033,7 @@ async fn bundled_engine_restores_a_native_checkpoint_through_fresh_gateway_with_
         )
         .unwrap();
 
-    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let gateway = RangeGateway::start().await.unwrap();
     let mut replacement = gateway.register(task.id, upstream, vec![], None).unwrap();
     let (mut process, client) = Aria2Process::start(config).await.unwrap();
     let service = DownloadService::new(Arc::new(client.clone()), Arc::clone(&store));
@@ -1121,7 +1121,7 @@ async fn failed_old_gateway_gid_refreshes_without_losing_the_partial_file() {
             is_private: false,
         })
         .unwrap();
-    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let gateway = RangeGateway::start().await.unwrap();
     let mut original = gateway
         .register(task.id, upstream.clone(), vec![], None)
         .unwrap();
@@ -1246,7 +1246,7 @@ async fn live_baidu_gateway_reads_three_consecutive_four_mib_chunks() {
     let filename = std::env::var("BAIDU_LIVE_FILE_NAME").expect("file name required");
     let (signed, size) = live_baidu_download_metadata(filename).await;
     assert!(size >= 3 * CHUNK as u64);
-    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let gateway = RangeGateway::start().await.unwrap();
     let registration = gateway
         .register(
             Uuid::new_v4(),
@@ -1480,7 +1480,7 @@ async fn live_baidu_file_completes_through_bundled_engine_and_gateway() {
             live_baidu_medium_download_metadata().await
         };
     let reference = signed.clone();
-    let gateway = BaiduRangeGateway::start().await.unwrap();
+    let gateway = RangeGateway::start().await.unwrap();
     let root = tempfile::tempdir().unwrap();
     let store = Arc::new(TaskStore::open_in_memory().unwrap());
     let task = store

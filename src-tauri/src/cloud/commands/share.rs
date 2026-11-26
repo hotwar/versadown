@@ -4,10 +4,34 @@ use super::*;
 #[path = "share/atomic_membership_tests.rs"]
 mod atomic_membership_tests;
 
+#[path = "share/mega_integrity.rs"]
+mod mega_integrity;
+pub(crate) use mega_integrity::resume_pending_mega_integrity_checks;
+
 struct CancelShareOnDrop(Arc<share::ShareWorkControl>);
 impl Drop for CancelShareOnDrop {
     fn drop(&mut self) {
         self.0.cancel();
+    }
+}
+
+/// Whether public MEGA links should be downloaded with the signed-in account:
+/// the account's session is ready. The adapter then carries the session only
+/// for paid accounts; any other state downloads anonymously, exactly as
+/// without an account.
+fn share_adapter_options(
+    state: &CloudState,
+    provider: CloudProvider,
+) -> share::ShareAdapterOptions {
+    if provider != CloudProvider::Mega {
+        return share::ShareAdapterOptions::default();
+    }
+    let ready = state
+        .auth_supervisor
+        .record(&state.store, provider)
+        .is_ok_and(|record| record.health == auth_supervisor::AuthHealth::Ready);
+    share::ShareAdapterOptions {
+        mega_account_quota: ready,
     }
 }
 
@@ -34,7 +58,14 @@ pub async fn preflight_cloud_share_download(
     let selection = selection.clone();
     let result = run_share_session_read_work(app, provider, move |state, http| {
         let retrying_http = share::RetryingShareReadTransport::new(http);
-        let adapter = share::provider_share_adapter(provider, &state.store, &retrying_http)?;
+        // The preflight requests a download URL like the real resolution does,
+        // so it must be issued against the same quota.
+        let adapter = share::provider_share_adapter_with(
+            provider,
+            &state.store,
+            &retrying_http,
+            share_adapter_options(state, provider),
+        )?;
         share::preflight_selected_share_download(&state.share_plans, adapter.as_ref(), &selection)
     })
     .await;
@@ -78,7 +109,7 @@ pub async fn resolve_stable_cloud_share_download(
     ));
     let _cancel_on_drop = CancelShareOnDrop(Arc::clone(&control));
     let completion_control = Arc::clone(&control);
-    let (download, transferred) = run_session_work_checked(
+    let (download, transferred) = run_share_work_checked(
         app.clone(),
         provider,
         // Any provider, including Aliyun, can fall back to a personal-drive
@@ -92,12 +123,13 @@ pub async fn resolve_stable_cloud_share_download(
                 .plan
                 .transfers
                 .len();
-            let download = share::resolve_current_share_download_cancellable(
+            let download = share::resolve_current_share_download_cancellable_with(
                 &state.share_plans,
                 &state.store,
                 http,
                 &source,
                 &control,
+                share_adapter_options(state, provider),
             )?;
             let after = state
                 .share_plans
@@ -555,6 +587,7 @@ fn cloud_share_leaf_outcome(tasks: &TaskStore, task: DownloadTask) -> TaskAction
 }
 
 pub(crate) fn schedule_cloud_share_cleanup(app: AppHandle, task: &DownloadTask) {
+    mega_integrity::schedule_mega_integrity_check(app.clone(), task);
     if task.status != TaskStatus::Completed || !task.source.starts_with("cloud-share://") {
         return;
     }

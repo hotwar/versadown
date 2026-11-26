@@ -151,6 +151,7 @@ impl DownloadOps for TianyiDriver<'_> {
             )
             .download(file_id)?;
             Ok(ResolvedCloudDownload {
+                transform: None,
                 url: download.url,
                 name: download.name,
                 headers: download.headers.into_iter().collect(),

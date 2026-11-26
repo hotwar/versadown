@@ -1120,7 +1120,12 @@ pub fn recover_in_order(
             Err(error) => return Err(error),
         }
     }
-    Err(CloudError::WebAuthorizationRequired)
+    // Without a browser sign-in the only way forward is signing in again.
+    Err(if provider_capabilities(provider).web {
+        CloudError::WebAuthorizationRequired
+    } else {
+        CloudError::AuthorizationExpired
+    })
 }
 
 /// Operations see a private copy. Writes stay local until revision validation.

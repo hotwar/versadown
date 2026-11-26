@@ -231,17 +231,25 @@ pub(crate) fn password_profile_reset_key(provider: super::CloudProvider) -> Opti
     }
 }
 
+/// Whether `key` is the session key of a known provider. Derived from
+/// `CloudProvider::ALL` so a new provider can never be forgotten here.
+pub(super) fn provider_session_key(key: &str) -> bool {
+    super::CloudProvider::ALL
+        .iter()
+        .any(|provider| provider.key() == key)
+}
+
 pub fn credential_key_is_supported(key: &str) -> bool {
+    if provider_session_key(key)
+        || key
+            .strip_prefix("cloud-auth-maintenance-")
+            .is_some_and(provider_session_key)
+    {
+        return true;
+    }
     matches!(
         key,
-        "quark"
-            | "pikpak"
-            | "baidu"
-            | "tianyi"
-            | "aliyun"
-            | "xunlei"
-            | "uc"
-            | "ai-api-key"
+        "ai-api-key"
             | "privacy-download-password-v1"
             | "cloud-share-plans-v1"
             | "cloud-password-pikpak"
@@ -257,13 +265,6 @@ pub fn credential_key_is_supported(key: &str) -> bool {
             | "cloud-password-profile-reset-baidu"
             | "cloud-password-profile-reset-tianyi"
             | "cloud-password-profile-reset-xunlei"
-            | "cloud-auth-maintenance-quark"
-            | "cloud-auth-maintenance-pikpak"
-            | "cloud-auth-maintenance-baidu"
-            | "cloud-auth-maintenance-tianyi"
-            | "cloud-auth-maintenance-aliyun"
-            | "cloud-auth-maintenance-xunlei"
-            | "cloud-auth-maintenance-uc"
     )
 }
 

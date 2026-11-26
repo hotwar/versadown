@@ -1902,6 +1902,7 @@ mod tests {
     #[test]
     fn native_credentials_never_reach_aria2_options() {
         let resolved = ResolvedCloudDownload {
+            transform: None,
             url: "https://cdn.example/file".into(),
             name: "file.zip".into(),
             headers: vec![
@@ -1922,6 +1923,7 @@ mod tests {
     #[test]
     fn native_vip_uses_the_file_acceleration_token() {
         let resolved = ResolvedCloudDownload {
+            transform: None,
             url: "https://cdn.example/file".into(),
             name: "file.zip".into(),
             headers: vec![
@@ -1939,6 +1941,7 @@ mod tests {
     #[test]
     fn native_submission_without_file_acceleration_credential_uses_aria2_fallback() {
         let resolved = ResolvedCloudDownload {
+            transform: None,
             url: "https://cdn.example/file".into(),
             name: "file.zip".into(),
             headers: vec![
@@ -1954,6 +1957,7 @@ mod tests {
     #[test]
     fn native_submission_without_login_access_uses_aria2_fallback() {
         let resolved = ResolvedCloudDownload {
+            transform: None,
             url: "https://cdn.example/file".into(),
             name: "file.zip".into(),
             headers: vec![
@@ -1972,6 +1976,7 @@ mod tests {
     #[test]
     fn native_submission_with_login_and_file_acceleration_uses_native_backend() {
         let resolved = ResolvedCloudDownload {
+            transform: None,
             url: "https://cdn.example/file".into(),
             name: "file.zip".into(),
             headers: vec![

@@ -120,8 +120,8 @@ struct TauriDownloadEvents {
     cloud: std::sync::Arc<cloud::commands::CloudState>,
     directory_refreshes: std::sync::Arc<cloud_directory_events::CloudDirectoryRefreshes>,
     cloud_download_dispatch: cloud::download_dispatch::CloudDownloadDispatch,
-    baidu_range_gateway: std::sync::Arc<
-        tokio::sync::OnceCell<std::sync::Arc<cloud::baidu_range_gateway::BaiduRangeGateway>>,
+    range_gateway: std::sync::Arc<
+        tokio::sync::OnceCell<std::sync::Arc<cloud::range_gateway::RangeGateway>>,
     >,
 }
 
@@ -154,8 +154,32 @@ impl TauriDownloadEvents {
     }
 }
 
+impl TauriDownloadEvents {
+    /// aria2 reports a storage node's HTTP 509 as a bare status. When the
+    /// gateway saw the node's wait time, or knows the download used an
+    /// account's quota, attach it to the failure so the UI can say whose quota
+    /// is used up and when to retry.
+    fn with_quota_wait(&self, task: &DownloadTask) -> Option<DownloadTask> {
+        if task.status != TaskStatus::Failed
+            || task.error.as_deref() != Some(aria2::BANDWIDTH_LIMITED_MESSAGE)
+        {
+            return None;
+        }
+        let failure = self
+            .range_gateway
+            .get()?
+            .take_quota_wait(task.id)?
+            .failure()?;
+        let mut waiting = task.clone();
+        waiting.error = Some(failure.message());
+        self.store.apply_transfer_snapshot(waiting).ok()
+    }
+}
+
 impl EventSink for TauriDownloadEvents {
     fn task_updated(&self, task: &DownloadTask) {
+        let with_wait = self.with_quota_wait(task);
+        let task = with_wait.as_ref().unwrap_or(task);
         let terminal = matches!(
             task.status,
             TaskStatus::Completed
@@ -188,7 +212,7 @@ impl EventSink for TauriDownloadEvents {
             });
             self.cloud_download_dispatch
                 .release_terminal(task.id, directory_finished);
-            if let Some(gateway) = self.baidu_range_gateway.get() {
+            if let Some(gateway) = self.range_gateway.get() {
                 gateway.remove_task(task.id);
             }
         }
@@ -481,7 +505,7 @@ pub fn run() -> i32 {
             };
             let cloud_download_dispatch =
                 cloud::download_dispatch::CloudDownloadDispatch::default();
-            let baidu_range_gateway = std::sync::Arc::new(tokio::sync::OnceCell::new());
+            let range_gateway = std::sync::Arc::new(tokio::sync::OnceCell::new());
             let xunlei_native_backend =
                 std::sync::Arc::new(xunlei_native::XunleiNativeBackend::with_plugin_config(
                     data_dir.join("plugins").join("xunlei-native.json"),
@@ -493,8 +517,9 @@ pub fn run() -> i32 {
                 cloud,
                 directory_refreshes: Default::default(),
                 cloud_download_dispatch: cloud_download_dispatch.clone(),
-                baidu_range_gateway: std::sync::Arc::clone(&baidu_range_gateway),
+                range_gateway: std::sync::Arc::clone(&range_gateway),
             });
+            app.manage(std::sync::Arc::clone(&events));
             let video_events = events.clone();
             let runtime = std::sync::Arc::new(EngineRuntime::new(
                 launch_config,
@@ -517,9 +542,10 @@ pub fn run() -> i32 {
                 privacy_session: Default::default(),
                 cloud_download_sources: Default::default(),
                 cloud_download_dispatch,
-                baidu_range_gateway,
+                range_gateway,
                 xunlei_native_backend,
             });
+            cloud::commands::resume_pending_mega_integrity_checks(app.handle().clone());
             let authorization_app = app.handle().clone();
             let dispatch_state = app.state::<commands::AppState>();
             let cli_dispatcher = cli_dispatch::CliDispatcher::start(
@@ -695,6 +721,7 @@ pub fn run() -> i32 {
             cloud::commands::cloud_completed_authorization,
             cloud::commands::cloud_reauthorize_failed_task,
             cloud::commands::cloud_login_password,
+            cloud::commands::cloud_login_mega,
             cloud::commands::cloud_saved_password_credentials,
             cloud::commands::cloud_tianyi_session_shape_for_test,
             cloud::commands::cloud_tianyi_resolve_download_for_test,

@@ -4387,6 +4387,7 @@ impl ShareTransfer for BaiduShareAdapter<'_> {
         let download =
             client.download_transferred_file(&id, QuarkError::ShareTransferDownloadUnavailable)?;
         Ok(super::commands::ResolvedCloudDownload {
+            transform: None,
             url: download.url,
             name: entry.entry.name.clone(),
             headers: download.headers.into_iter().collect(),
@@ -4414,6 +4415,7 @@ impl RecordedTransferResolver for BaiduShareAdapter<'_> {
             .download_transferred_file(created_file_id, QuarkError::SourceFileMissing)
             .map(|download| {
                 RecordedTransferDownload::Available(super::commands::ResolvedCloudDownload {
+                    transform: None,
                     url: download.url,
                     name: entry.entry.name.clone(),
                     headers: download.headers.into_iter().collect(),

@@ -1349,6 +1349,7 @@ async fn scheduler_queued_share_task_can_submit_after_admission() {
         &service,
         &task,
         ResolvedCloudDownload {
+            transform: None,
             url: "https://example.test/file?secret=ephemeral".into(),
             name: "file.bin".into(),
             headers: vec![],
@@ -1395,6 +1396,7 @@ async fn cloud_share_submission_keeps_signed_url_and_headers_out_of_task_store()
         &service,
         &prepared,
         ResolvedCloudDownload {
+            transform: None,
             url: "https://cdn.example/video?signature=private-signature".into(),
             name: "video.mp4".into(),
             headers: vec![("x-share-token".into(), "private-header".into())],
@@ -1524,6 +1526,7 @@ async fn cloud_share_submission_rejects_share_page_before_task_creation_or_aria2
         &service,
         &prepared,
         ResolvedCloudDownload {
+            transform: None,
             url: "https://www.aliyundrive.com/s/share".into(),
             name: "file".into(),
             headers: vec![],
@@ -1557,6 +1560,7 @@ async fn cloud_share_aria_failure_redacts_signed_urls_but_retains_http_error_cod
         &service,
         &prepared,
         ResolvedCloudDownload {
+            transform: None,
             url: "https://cdn.example/file?signature=secret-token".into(),
             name: "file".into(),
             headers: vec![],
@@ -1593,6 +1597,7 @@ async fn cloud_share_completion_discards_a_stale_failure_message() {
         &service,
         &prepared,
         ResolvedCloudDownload {
+            transform: None,
             url: "https://cdn.example/episode?signature=secret-token".into(),
             name: "episode.mp4".into(),
             headers: vec![],
@@ -1626,6 +1631,7 @@ async fn cloud_share_cancel_after_outer_check_prevents_waiting_refresh_submissio
     let service = DownloadService::new(api.clone(), store.clone());
     let source = stable_share_source(CloudProvider::Aliyun, "share", "file");
     let resolved = || ResolvedCloudDownload {
+        transform: None,
         url: "https://cdn.example/file?signature=fresh".into(),
         name: "file".into(),
         headers: vec![],
@@ -1682,6 +1688,7 @@ async fn password_cloud_refresh_uses_new_credentials_and_honors_cancellation() {
         store.fail(original.id, "expired").unwrap();
         let failed = store.find(original.id).unwrap();
         let resolved = || ResolvedCloudDownload {
+            transform: None,
             url: "https://cdn.example/new".into(),
             name: "original.bin".into(),
             headers: vec![("Cookie".into(), "fresh-session".into())],
@@ -1739,6 +1746,7 @@ async fn cloud_share_refresh_resubmits_same_task_with_current_headers_once() {
     let service = DownloadService::new(api.clone(), store.clone());
     let source = stable_share_source(CloudProvider::Aliyun, "share", "file");
     let resolved = |revision| ResolvedCloudDownload {
+        transform: None,
         url: format!("https://cdn.example/file?signature={revision}"),
         name: "file".into(),
         headers: vec![("x-share-token".into(), format!("token-{revision}"))],
@@ -1801,6 +1809,7 @@ async fn cloud_share_stale_gid_is_skipped_even_when_task_is_failed_again() {
     let service = DownloadService::new(api.clone(), store.clone());
     let source = stable_share_source(CloudProvider::Aliyun, "share", "file");
     let resolved = || ResolvedCloudDownload {
+        transform: None,
         url: "https://cdn.example/file?signature=fresh".into(),
         name: "file".into(),
         headers: vec![],
@@ -1840,6 +1849,7 @@ async fn cloud_share_manual_retry_can_restart_an_explicitly_cancelled_snapshot()
     let service = DownloadService::new(api.clone(), store.clone());
     let source = stable_share_source(CloudProvider::Aliyun, "share", "file");
     let resolved = || ResolvedCloudDownload {
+        transform: None,
         url: "https://cdn.example/file?signature=fresh".into(),
         name: "file".into(),
         headers: vec![],

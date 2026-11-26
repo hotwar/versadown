@@ -13,6 +13,7 @@ export function xunleiDownloadMessage(message: string): string {
     return t(key, { versions });
   }
   switch (message) {
+    case 'download.mega.accountQuota':
     case 'download.xunlei.native':
     case 'download.xunlei.accelerating':
     case 'download.xunlei.proxyCheckpoint':

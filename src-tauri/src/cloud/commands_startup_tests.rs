@@ -43,13 +43,13 @@ fn test_runtime() -> tokio::runtime::Runtime {
 fn delayed_registration_allows_all_enabled_provider_startup_restores() {
     let root = tempfile::tempdir().unwrap();
     // Construct the real HTTP client outside any async runtime; no requests
-    // occur because all seven isolated credential-store entries are absent.
+    // occur because each account provider's credential-store entry is absent.
     let state = Arc::new(CloudState::new(root.path().join("sessions")).unwrap());
     let registry = Arc::new(OnceLock::new());
     let initial_lookups = Arc::new(AtomicUsize::new(0));
     let providers = CloudProvider::ALL
         .into_iter()
-        .filter(|provider| provider.is_enabled())
+        .filter(|provider| provider.is_enabled() && crate::cloud::ProviderRegistry::global().get(*provider).account)
         .collect::<Vec<_>>();
     let provider_count = providers.len();
     test_runtime().block_on(async {

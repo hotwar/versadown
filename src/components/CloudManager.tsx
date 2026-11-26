@@ -5,12 +5,14 @@ import type { LocalUploadListing } from '../lib/localUpload';
 import { CloudCapacityController, formatCloudCapacity, type CloudCapacityViewState } from '../lib/cloudCapacity';
 import type { XunleiAccountProfile, CloudUploadAction, CloudUploadProgress } from '../lib/cloudTypes';
 import type { CloudAuthorizationStateEvent, CloudCapacityInvalidated } from '../lib/cloudTypes';
-import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider, CloudShare, CloudShareCancelOutcome, CloudShareOptions, CloudUploadOutcome, SharePassCodeConstraint } from '../lib/cloudTypes';
+import type { ProviderDescriptor, CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadFailure, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider, CloudShare, CloudShareCancelOutcome, MegaCredentials, CloudShareOptions, CloudUploadOutcome, SharePassCodeConstraint } from '../lib/cloudTypes';
 import { t, useTranslation } from '../i18n';
 import { xunleiDownloadMessage } from '../i18n/xunleiDownloadMessage';
 import { isXunleiVerificationFailure as hasXunleiVerificationCode, xunleiVerificationMessage } from '../lib/xunleiVerification';
 import { failedShareItemIds, normalizeShareCancelOutcome } from '../lib/cloudShareCancel';
 import { cloudProviderLabel } from '../i18n/cloudProviderLabel';
+import { shareFailureMessage } from '../i18n/shareFailureMessage';
+import { MegaLoginForm } from './MegaLoginForm';
 
 export type { CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, CloudCredentials, CloudDirectory, CloudDirectoryDownloadOutcome, CloudFile, CloudProvider } from '../lib/cloudTypes';
 
@@ -24,6 +26,7 @@ export interface CloudManagerClient {
   getCompletedCloudAuthorization?(provider: CloudProvider): Promise<CloudAccount | null>;
   subscribeCloudAuthorization?(provider: CloudProvider, receive: (event: CloudAuthorizationStateEvent) => void): Promise<() => void>;
   loginCloudWithPassword(provider: CloudProvider, credentials: CloudCredentials): Promise<CloudAccount>;
+  loginMega?(credentials: MegaCredentials): Promise<CloudAccount>;
   getSavedCloudCredentials?(provider: CloudProvider): Promise<import('../lib/cloudTypes').SavedCloudCredentialInfo | null>;
   getCloudAccount(provider: CloudProvider): Promise<CloudAccount>;
   getXunleiAccountProfile?(): Promise<XunleiAccountProfile>;
@@ -205,6 +208,10 @@ function isXunleiVerificationFailure(error: unknown, reason: 'metadata_expired' 
 }
 
 export function errorMessage(error: unknown, fallback: string) {
+  if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as { message?: unknown }).message === 'string') {
+    const localized = shareFailureMessage((error as { message: string }).message);
+    if (localized) return localized;
+  }
   if (hasXunleiVerificationCode(error)) return xunleiVerificationMessage((error as { message?: unknown }).message);
   if (typeof error === 'object' && error !== null && 'code' in error) {
     if (error.code === 'provider_error' && 'message' in error &&
@@ -224,7 +231,8 @@ export function errorMessage(error: unknown, fallback: string) {
     }
   }
   if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as { message?: unknown }).message === 'string') {
-    return xunleiDownloadMessage((error as { message: string }).message);
+    const text = (error as { message: string }).message;
+    return shareFailureMessage(text) ?? xunleiDownloadMessage(text);
   }
   return fallback;
 }
@@ -351,11 +359,11 @@ function CloudActionIcon({ action }: { action: CloudActionIconType }) {
   return <svg aria-hidden="true" viewBox="0 0 24 24">{paths[action]}</svg>;
 }
 
-function CloudContextMenu({ state, selectedCount, recycleBin, virtualDirectory, myShares, canUpdateSharePassCode, onAction, onClose }: { state: CloudContextMenuState; selectedCount: number; recycleBin: boolean; virtualDirectory: boolean; myShares: boolean; canUpdateSharePassCode: boolean; onAction(action: CloudMenuAction): void; onClose(): void }) {
+function CloudContextMenu({ state, selectedCount, recycleBin, readOnlyDirectory, virtualDirectory, myShares, canUpdateSharePassCode, onAction, onClose }: { state: CloudContextMenuState; selectedCount: number; recycleBin: boolean; readOnlyDirectory: boolean; virtualDirectory: boolean; myShares: boolean; canUpdateSharePassCode: boolean; onAction(action: CloudMenuAction): void; onClose(): void }) {
   const { t } = useTranslation();
   const menuRef = useRef<HTMLDivElement>(null);
   const items: Array<{ action: CloudMenuAction; label: Parameters<typeof t>[0]; danger?: boolean; separated?: boolean }> = state.kind === 'background'
-    ? recycleBin || myShares ? [{ action: 'refresh', label: 'cloud.action.refresh' as const }] : [{ action: 'create', label: 'cloud.action.newFolder' as const }, { action: 'upload', label: 'cloud.action.upload' as const }, { action: 'refresh', label: 'cloud.action.refresh' as const, separated: true }]
+    ? recycleBin || myShares || readOnlyDirectory ? [{ action: 'refresh', label: 'cloud.action.refresh' as const }] : [{ action: 'create', label: 'cloud.action.newFolder' as const }, { action: 'upload', label: 'cloud.action.upload' as const }, { action: 'refresh', label: 'cloud.action.refresh' as const, separated: true }]
     : virtualDirectory
       ? [{ action: 'open', label: 'cloud.action.open' as const }]
       : myShares
@@ -520,7 +528,7 @@ function sharePassCodeError(passCode: string, constraint?: SharePassCodeConstrai
   return hasValidLength && hasValidCharacters ? null : sharePassCodeHint(constraint);
 }
 
-function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstraint, onCreate, onCopy, onClose, onUpdatePassCode }: { provider: CloudProvider; items: readonly CloudFile[]; share: CloudShare | null; busy: boolean; sharePassCodeConstraint?: SharePassCodeConstraint; onCreate(options: CloudShareOptions): void; onCopy(value: string): void; onClose(): void; onUpdatePassCode?(passCode: string): Promise<void> }) {
+function CloudShareDialog({ provider, items, share, busy, linkOnly, sharePassCodeConstraint, onCreate, onCopy, onClose, onUpdatePassCode }: { provider: CloudProvider; items: readonly CloudFile[]; share: CloudShare | null; busy: boolean; linkOnly: boolean; sharePassCodeConstraint?: SharePassCodeConstraint; onCreate(options: CloudShareOptions): void; onCopy(value: string): void; onClose(): void; onUpdatePassCode?(passCode: string): Promise<void> }) {
   const { t } = useTranslation();
   const dialogRef = useRef<HTMLElement>(null);
   const initialFocusRef = useRef<HTMLInputElement>(null);
@@ -553,6 +561,7 @@ function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstrain
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (passCodeError) return;
+    if (linkOnly) { onCreate({ name: title }); return; }
     onCreate({ name: title, ...(generatePassCode || alwaysGeneratedPassCode ? { generatePassCode: true } : (passCode.trim() ? { passCode: passCode.trim() } : {})), ...(expiresInDays ? { expiresInDays: Number(expiresInDays) } : {}) });
   };
   return createPortal(<div className="cloud-confirm-backdrop">
@@ -571,16 +580,16 @@ function CloudShareDialog({ provider, items, share, busy, sharePassCodeConstrain
         <button className="secondary" onClick={() => onCopy(cloudShareCopyUrl(share.url, share.passCode))}>{t('cloud.share.copyLink')}</button><button className="primary" disabled={savingPassCode} onClick={onClose}>{t('common.done')}</button>
       </> : <form onSubmit={submit}>
         <h3>{t('cloud.share.create')}</h3>
-        <p>{t('cloud.share.description', { name: title, options: alwaysGeneratedPassCode ? t('cloud.share.generatedOptions') : sharePassCodeConstraint?.required ? t('cloud.share.requiredOptions', { hint: sharePassCodeHint(sharePassCodeConstraint) }) : sharePassCodeConstraint ? t('cloud.share.optionsWithHint', { hint: sharePassCodeHint(sharePassCodeConstraint) }) : t('cloud.share.options') })}</p>
-        {serverGeneratedPassCode && onUpdatePassCode && <p>{t('cloud.share.generatedThenChangeable')}</p>}
-        <div className="cloud-share-options">
+        {linkOnly ? <p>{t('cloud.share.linkOnlyNote')}</p> : <p>{t('cloud.share.description', { name: title, options: alwaysGeneratedPassCode ? t('cloud.share.generatedOptions') : sharePassCodeConstraint?.required ? t('cloud.share.requiredOptions', { hint: sharePassCodeHint(sharePassCodeConstraint) }) : sharePassCodeConstraint ? t('cloud.share.optionsWithHint', { hint: sharePassCodeHint(sharePassCodeConstraint) }) : t('cloud.share.options') })}</p>}
+        {!linkOnly && serverGeneratedPassCode && onUpdatePassCode && <p>{t('cloud.share.generatedThenChangeable')}</p>}
+        {!linkOnly && <div className="cloud-share-options">
           {alwaysGeneratedPassCode ? <label>{t('cloud.share.passCodeGeneratedByProvider')}</label> : serverGeneratedPassCode ? <div className="cloud-share-code-field">
             <span>{t('cloud.share.passCodeLabel')}</span>
             <label className="cloud-share-checkbox"><input ref={initialFocusRef} aria-label={t('cloud.share.autoGenerate')} type="checkbox" checked={generatePassCode} onChange={(event) => setGeneratePassCode(event.target.checked)} /><span>{t('cloud.share.autoGenerate')}</span></label>
           </div> : <label>{t(sharePassCodeConstraint?.required ? 'cloud.share.requiredPassCode' : 'cloud.share.optionalPassCode')}<input ref={initialFocusRef} aria-invalid={Boolean(passCodeError)} aria-label={t('cloud.share.passCodeLabel')} disabled={busy || generatePassCode} value={passCode} maxLength={sharePassCodeConstraint?.maxLength ?? 32} onChange={(event) => setPassCode(event.target.value)} /></label>}
           {sharePassCodeConstraint?.required && <label className="cloud-share-checkbox"><input type="checkbox" checked={generatePassCode} disabled={busy} onChange={(event) => setGeneratePassCode(event.target.checked)} />{t('cloud.share.autoGenerate')}</label>}
           <label>{t('cloud.share.expiration')}<select aria-label={t('cloud.share.expiration')} value={expiresInDays} onChange={(event) => setExpiresInDays(event.target.value)}>{expiryOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-        </div>
+        </div>}
         <button type="button" className="secondary" disabled={busy} onClick={onClose}>{t('dialog.cancel')}</button><button className="primary" disabled={busy || Boolean(passCodeError)} type="submit">{busy ? t('cloud.share.creating') : t('cloud.share.create')}</button>
       </form>}
     </section>
@@ -748,9 +757,14 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const isMyShares = currentDirectoryId === MY_SHARES_DIRECTORY_ID;
   const isVirtualRecycleBinItem = (item: CloudFile | undefined) => item?.id === recycleBinId;
   const isVirtualMySharesItem = (item: CloudFile | undefined) => item?.id === MY_SHARES_DIRECTORY_ID;
-  const isVirtualDirectoryItem = (item: CloudFile | undefined) => isVirtualRecycleBinItem(item) || isVirtualMySharesItem(item);
+  const incomingSharesId = descriptor.incomingSharesDirectoryId;
+  // Everything under the "shared with me" virtual folder is read-only: no upload / new folder.
+  const isReadOnlyDirectory = Boolean(incomingSharesId) && breadcrumbs.some((crumb) => crumb.id === incomingSharesId);
+  const isVirtualIncomingSharesItem = (item: CloudFile | undefined) => Boolean(incomingSharesId) && item?.id === incomingSharesId;
+  const isVirtualDirectoryItem = (item: CloudFile | undefined) => isVirtualRecycleBinItem(item) || isVirtualMySharesItem(item) || isVirtualIncomingSharesItem(item);
   const selectedVirtualRecycleBin = selected.some(isVirtualRecycleBinItem);
-  const selectedVirtualMyShares = selected.some(isVirtualMySharesItem);
+  // Any other open-only virtual folder behaves like "my shares" for selection rules.
+  const selectedVirtualMyShares = selected.some((item) => isVirtualMySharesItem(item) || isVirtualIncomingSharesItem(item));
   const selectableItems = sortedItems.filter((item) => !isVirtualDirectoryItem(item));
   const operationBusy = operationRunning || operation?.kind === 'working';
   const passwordSession = activeAccount?.authMethod === 'password';
@@ -945,11 +959,13 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         : await client.listCloudDirectory(provider, parentId);
       if (requestId !== directoryRequestSequence.current) return null;
       const recycleBinId = descriptor.recycleBinDirectoryId;
+      const incomingSharesId = descriptor.incomingSharesDirectoryId;
       const rootItems = parentId === rootId
         ? [
           ...next.items,
       ...(next.items.some((item) => item.id === recycleBinId) ? [] : [{ id: recycleBinId, parentId: rootId, name: t('cloud.recycleBin'), kind: 'folder' as const }]),
       ...(next.items.some((item) => item.id === MY_SHARES_DIRECTORY_ID) ? [] : [{ id: MY_SHARES_DIRECTORY_ID, parentId: rootId, name: t('cloud.myShares'), kind: 'folder' as const }]),
+      ...(!incomingSharesId || next.items.some((item) => item.id === incomingSharesId) ? [] : [{ id: incomingSharesId, parentId: rootId, name: t('cloud.incomingShares'), kind: 'folder' as const }]),
         ]
         : next.items;
       const items = rootItems;
@@ -1683,7 +1699,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     const showAuthorizationError = expired || authorizationStatus === expiredAuthorizationStatus;
     return <section className={`cloud-manager cloud-authorization cloud-provider-${provider}${authorizationCardDrag?.dragging ? ' cloud-provider-dragging' : ''}${authorizationCardDrag?.dropTarget ? ' cloud-provider-drop-target' : ''}`} data-cloud-provider={authorizationCardDrag ? provider : undefined} aria-label={t('cloud.accountAuthorization', { name: label })}>
       <header className="cloud-heading cloud-authorization-drag-handle" onPointerDown={authorizationCardDrag?.onPointerDown}><h2>{t('cloud.providerDrive', { name: label })}</h2><button type="button" onPointerDown={(event) => event.stopPropagation()} className="cloud-provider-info-button" aria-label={providerInfoOpen ? t('cloud.closeProviderInfo', { name: label }) : t('cloud.viewProviderInfo', { name: label })} aria-expanded={providerInfoOpen} onClick={() => setProviderInfoOpen((open) => !open)}>{providerInfoOpen ? '×' : <CloudActionIcon action="details" />}</button></header>
-      {providerInfoOpen ? <CloudProviderInfo provider={provider} label={label} officialUrl={descriptor.authorizationUrl} /> : <><form className="cloud-login-form" onSubmit={submitPasswordLogin}>
+      {providerInfoOpen ? <CloudProviderInfo provider={provider} label={label} officialUrl={descriptor.authorizationUrl} /> : <>{provider === 'mega' && client.loginMega ? <MegaLoginForm onLogin={(credentials) => addAccount(() => client.loginMega!(credentials))} /> : <form className="cloud-login-form" onSubmit={submitPasswordLogin}>
         {supportsPasswordLogin && <>
           <input aria-label={t('cloud.username')} placeholder={t('cloud.username')} autoComplete="username" value={username} onChange={(event) => { passwordFieldsEdited.current = true; passwordInputVersion.current += 1; setUsername(event.target.value); }} />
           <input aria-label={t('cloud.password')} placeholder={useSavedPassword ? "******" : t('cloud.password')} type="password" autoComplete="current-password" value={password} onChange={(event) => { passwordFieldsEdited.current = true; passwordInputVersion.current += 1; setSavedUsername(null); setPassword(event.target.value); }} />
@@ -1691,7 +1707,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         </>}
         {effectiveAuthorizationCapabilities.web && <button type="button" className="secondary" disabled={passwordLoginBusy} onClick={() => void beginWebAuthorization()}>{t('cloud.webAuthorization')}</button>}
         {webAuthorization && <button type="button" className="secondary" onClick={() => void completeWebAuthorization()}>{t('cloud.authorizationCompleted')}</button>}
-      </form>
+      </form>}
       {showAuthorizationFeedback && <p className={`cloud-authorization-feedback${showAuthorizationError ? ' error' : ''}`} role="status">{expired && <b>{t('cloud.credentialsExpired')}</b>}<span>{displayedAuthorizationStatus}</span></p>}</>}
     </section>;
   }
@@ -1821,8 +1837,8 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         <div className="cloud-breadcrumbs" role="navigation" aria-label={t('cloud.currentDirectory', { name: breadcrumbs.at(-1)?.name ?? '' })}>{breadcrumbs.map((crumb, index) => <span key={`${crumb.id}-${index}`}><button title={crumb.name} aria-current={index === breadcrumbs.length - 1 ? 'page' : undefined} disabled={index === breadcrumbs.length - 1 || operationBusy} onClick={() => navigateToDirectory(crumb.id, breadcrumbs.slice(0, index + 1))}>{crumb.name}</button>{index < breadcrumbs.length - 1 && <i aria-hidden="true">›</i>}</span>)}</div>
       </div>
       <div className="cloud-toolbar cloud-toolbar--single-line" aria-label={t('cloud.fileActions')}>
-        {!isRecycleBin && !isMyShares && <button aria-label={t('cloud.action.upload')} disabled={operationBusy} onClick={uploadFiles}><CloudActionIcon action="upload" />{t('cloud.action.upload')}</button>}
-        {!isRecycleBin && !isMyShares && <button aria-label={t('cloud.action.newFolder')} disabled={operationBusy} onClick={() => openEditor('create')}><CloudActionIcon action="create" />{t('cloud.action.newFolder')}</button>}
+        {!isRecycleBin && !isMyShares && !isReadOnlyDirectory && <button aria-label={t('cloud.action.upload')} disabled={operationBusy} onClick={uploadFiles}><CloudActionIcon action="upload" />{t('cloud.action.upload')}</button>}
+        {!isRecycleBin && !isMyShares && !isReadOnlyDirectory && <button aria-label={t('cloud.action.newFolder')} disabled={operationBusy} onClick={() => openEditor('create')}><CloudActionIcon action="create" />{t('cloud.action.newFolder')}</button>}
         {isMyShares && descriptor.capabilities.shareUpdatePassCode && selected.length === 1 && <button disabled={operationBusy} onClick={() => openSharePassCodeEditor()}><CloudActionIcon action="updateSharePassCode" />{t('cloud.share.changePassCode')}</button>}
       </div>
     </div>
@@ -1873,9 +1889,9 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       })}
     </div>}
     {uploadPickerOpen && <LocalUploadPicker listEntries={client.listLocalUploadEntries ?? unavailableLocalUploadListing} onCancel={() => setUploadPickerOpen(false)} onConfirm={paths => { setUploadPickerOpen(false); void uploadSelectedFiles(paths); }} />}
-    {contextMenu && <CloudContextMenu state={contextMenu} selectedCount={selected.length} recycleBin={isRecycleBin} virtualDirectory={contextMenu.kind === 'selection' && isVirtualDirectoryItem(contextMenu.item)} myShares={isMyShares} canUpdateSharePassCode={Boolean(descriptor.capabilities.shareUpdatePassCode)} onClose={() => setContextMenu(null)} onAction={runContextAction} />}
+    {contextMenu && <CloudContextMenu state={contextMenu} selectedCount={selected.length} recycleBin={isRecycleBin} readOnlyDirectory={isReadOnlyDirectory} virtualDirectory={contextMenu.kind === 'selection' && isVirtualDirectoryItem(contextMenu.item)} myShares={isMyShares} canUpdateSharePassCode={Boolean(descriptor.capabilities.shareUpdatePassCode)} onClose={() => setContextMenu(null)} onAction={runContextAction} />}
     {selectionMenuAnchor && <CloudSelectionOverflowMenu anchor={selectionMenuAnchor} singleSelection={selected.length === 1} recycleBin={isRecycleBin} disabled={Boolean(operationBusy)} onClose={() => setSelectionMenuAnchor(null)} onAction={runSelectionOverflowAction} />}
-    {shareItems && <CloudShareDialog provider={provider} items={shareItems} share={createdShare} busy={operationBusy} sharePassCodeConstraint={descriptor.sharePassCodeConstraint} onUpdatePassCode={descriptor.capabilities.shareUpdatePassCode ? updateSharePassCode : undefined} onCreate={submitCloudShare} onCopy={copyShareLink} onClose={() => { setShareItems(null); setCreatedShare(null); }} />}
+    {shareItems && <CloudShareDialog provider={provider} items={shareItems} share={createdShare} busy={operationBusy} linkOnly={descriptor.capabilities.shareConfigurable === false} sharePassCodeConstraint={descriptor.sharePassCodeConstraint} onUpdatePassCode={descriptor.capabilities.shareUpdatePassCode ? updateSharePassCode : undefined} onCreate={submitCloudShare} onCopy={copyShareLink} onClose={() => { setShareItems(null); setCreatedShare(null); }} />}
     {destinationAction && <CloudDestinationPicker action={destinationAction} descriptor={descriptor} provider={provider} client={client} excludedIds={selectedIds} onOfficialWebAuthorizationRequired={(error) => { const action = destinationAction; setDestinationAction(null); queueAuthorizationContinuation(`选择${action === 'copy' ? '复制' : '移动'}目标`, async () => { setDestinationAction(action); }, errorMessage(error, `读取${action === 'copy' ? '复制' : '移动'}目标目录需要网页验证。`)); }} onClose={() => setDestinationAction(null)} onChoose={(targetParentId) => { const action = destinationAction; const sourceIds = selectedIds.slice(); setDestinationAction(null); if (action === 'move') void runOperation('移动', () => client.moveCloudFiles(provider, sourceIds, targetParentId), true, undefined, (directory) => sourceIds.every((id) => !directory.items.some((item) => item.id === id))); else void runOperation('复制', () => client.copyCloudFiles(provider, sourceIds, targetParentId)); }} />}
   </section>;
 }

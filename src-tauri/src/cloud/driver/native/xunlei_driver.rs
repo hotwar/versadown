@@ -162,6 +162,7 @@ impl DownloadOps for XunleiDriver<'_> {
             headers.extend(membership);
             append_native_download_markers(&mut headers, &download);
             Ok(ResolvedCloudDownload {
+                transform: None,
                 url: download.url,
                 name: download.name,
                 headers,

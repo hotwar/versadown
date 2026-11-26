@@ -243,6 +243,7 @@ mod tests {
                 ProbeReply::Direct(url) => Ok(ShareOperationResult {
                     result: Ok(ShareResolution::Direct(
                         crate::cloud::commands::ResolvedCloudDownload {
+                            transform: None,
                             url,
                             name: entry.entry.name.clone(),
                             headers: vec![],

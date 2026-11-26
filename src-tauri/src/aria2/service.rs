@@ -1216,10 +1216,13 @@ impl DownloadService {
         let mut interrupted_gid = None;
         if action == DownloadAction::Pause {
             self.ensure_accepting()?;
-            if let Some(gid) = self.store.find(task_id)?.aria_gid.as_deref() {
-                let version = self.resume_version(gid);
-                if self.api().force_pause(gid).await.is_ok() {
-                    interrupted_gid = Some((gid.to_owned(), version));
+            let current = self.store.find(task_id)?;
+            if !crate::store::is_mega_integrity_pending(&current) {
+                if let Some(gid) = current.aria_gid.as_deref() {
+                    let version = self.resume_version(gid);
+                    if self.api().force_pause(gid).await.is_ok() {
+                        interrupted_gid = Some((gid.to_owned(), version));
+                    }
                 }
             }
         }
@@ -1245,6 +1248,23 @@ impl DownloadService {
         } else {
             action
         };
+        if crate::store::is_mega_integrity_pending(&task) {
+            if action == DownloadAction::Cancel {
+                // aria2 has already finished (and may have forgotten this GID).
+                // Only the local verification owns this task now.
+                let removed = self.persist_removed(task)?;
+                self.release_external_rpc_slot_if_terminal(&removed).await?;
+                return Ok(removed);
+            }
+            return Err(StoreError::InvalidTransition {
+                from: task.status,
+                to: if action == DownloadAction::Pause {
+                    TaskStatus::Paused
+                } else {
+                    TaskStatus::Downloading
+                },
+            }.into());
+        }
         let mut gid = task
             .aria_gid
             .clone()
@@ -1318,6 +1338,16 @@ impl DownloadService {
         self.store.note_download_route(task_id, gid, message)
     }
 
+    pub(crate) async fn clear_download_route(
+        &self,
+        task_id: Uuid,
+        gid: &str,
+        message: &str,
+    ) -> Result<DownloadTask, StoreError> {
+        let _guard = self.operation.lock().await;
+        self.store.clear_download_route(task_id, gid, message)
+    }
+
     pub async fn reconcile_task(
         &self,
         task_id: Uuid,
@@ -1332,6 +1362,11 @@ impl DownloadService {
     ) -> Result<DownloadTask, DownloadServiceError> {
         let current = self.store.find(task_id)?;
         if self.store.cli_dispatch_pending(task_id)? { return Ok(current); }
+        if crate::store::is_mega_integrity_pending(&current)
+            || crate::store::is_mega_integrity_failure(&current)
+        {
+            return Ok(current);
+        }
         let gid = current
             .aria_gid
             .clone()
@@ -1647,6 +1682,8 @@ impl DownloadService {
             .into_iter()
             .filter(|task| {
                 task.aria_gid.is_some()
+                    && !crate::store::is_mega_integrity_pending(task)
+                    && !crate::store::is_mega_integrity_failure(task)
                     && !self.store.cli_dispatch_pending(task.id).unwrap_or(true)
                     && !crate::xunlei_native::is_native_gid(task.aria_gid.as_deref())
                     && !crate::cloud::download_dispatch::cloud_task_requires_provider_dispatch(task)
@@ -1910,6 +1947,13 @@ impl DownloadService {
         mut status: Aria2Status,
         confirmed: bool,
     ) -> Result<DownloadTask, DownloadServiceError> {
+        // The MAC worker may have taken ownership while this RPC was in flight.
+        let persisted = self.store.find(current.id)?;
+        if crate::store::is_mega_integrity_pending(&persisted)
+            || crate::store::is_mega_integrity_failure(&persisted)
+        {
+            return Ok(persisted);
+        }
         let mut seen = std::collections::BTreeSet::new();
         if current.aria_gid.as_deref() != Some(status.gid.as_str())
             && current.metadata_gid.as_deref() != Some(status.gid.as_str())

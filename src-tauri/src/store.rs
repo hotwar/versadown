@@ -21,6 +21,9 @@ mod agent_cloud;
 mod agent_permissions;
 #[path = "store/agent_interactions.rs"]
 mod agent_interactions;
+#[path = "store/mega_integrity.rs"]
+mod mega_integrity;
+pub(crate) use mega_integrity::{is_mega_integrity_failure, is_mega_integrity_pending};
 
 use crate::{
     cloud::CloudProvider,
@@ -1569,6 +1572,23 @@ impl TaskStore {
         find_with_connection(&connection, id)
     }
 
+    /// Removes `message` from the task's status when it is exactly that
+    /// route notice: the route it described no longer applies.
+    pub(crate) fn clear_download_route(
+        &self,
+        id: Uuid,
+        gid: &str,
+        message: &str,
+    ) -> Result<DownloadTask, StoreError> {
+        let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
+        connection.execute(
+            "UPDATE tasks SET status_message = NULL WHERE id = ?1 AND aria_gid = ?2
+             AND status_message = ?3",
+            params![id.to_string(), gid, message],
+        )?;
+        find_with_connection(&connection, id)
+    }
+
     pub fn bind_gid(&self, id: Uuid, gid: impl AsRef<str>) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         update_gid(&connection, id, gid.as_ref(), None)?;
@@ -1842,14 +1862,19 @@ impl TaskStore {
 
     pub fn apply_transfer_snapshot_with_files(
         &self,
-        snapshot: DownloadTask,
+        mut snapshot: DownloadTask,
         files: &[(u32, String, u64, u64, bool)],
     ) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let transaction = connection.unchecked_transaction()?;
         let current = find_with_transaction(&transaction, snapshot.id)?
             .ok_or(StoreError::NotFound(snapshot.id))?;
-        let completed_at = if snapshot.status == TaskStatus::Completed {
+        if mega_integrity::hold_mega_completion(&mut snapshot, &current) {
+            return Ok(current);
+        }
+        let completed_at = if is_mega_integrity_pending(&snapshot) {
+            None
+        } else if snapshot.status == TaskStatus::Completed {
             current.completed_at.or(Some(current_timestamp()))
         } else {
             current.completed_at
@@ -2426,16 +2451,10 @@ fn parse_cloud_directory_uuid(value: &str) -> rusqlite::Result<Uuid> {
 }
 
 fn cloud_provider_from_db(value: &str) -> rusqlite::Result<CloudProvider> {
-    match value {
-        "quark" => Ok(CloudProvider::Quark),
-        "pikpak" => Ok(CloudProvider::Pikpak),
-        "baidu" => Ok(CloudProvider::Baidu),
-        "tianyi" => Ok(CloudProvider::Tianyi),
-        "aliyun" => Ok(CloudProvider::Aliyun),
-        "xunlei" => Ok(CloudProvider::Xunlei),
-        "uc" => Ok(CloudProvider::Uc),
-        _ => Err(rusqlite::Error::InvalidQuery),
-    }
+    crate::cloud::ProviderRegistry::global()
+        .by_key(value)
+        .map(|descriptor| descriptor.provider)
+        .ok_or(rusqlite::Error::InvalidQuery)
 }
 
 fn no_rows_to_none<T>(error: rusqlite::Error) -> Result<Option<T>, StoreError> {

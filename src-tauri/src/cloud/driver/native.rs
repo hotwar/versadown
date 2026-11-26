@@ -39,10 +39,16 @@ impl ProviderDriverFactory for NativeDriverFactory {
                 store: StoreRef(store),
                 http: HttpRef(http),
             }),
+            CloudProvider::Mega => Box::new(MegaDriver {
+                store: StoreRef(store),
+                http: HttpRef(http),
+            }),
         }
     }
 }
 
+mod mega_driver;
+use mega_driver::MegaDriver;
 mod quark_driver;
 use quark_driver::QuarkDriver;
 mod pikpak_driver;

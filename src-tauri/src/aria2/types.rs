@@ -278,9 +278,15 @@ impl TryFrom<Aria2Status> for TransferSnapshot {
 pub(crate) const TRUNCATED_RESPONSE_MESSAGE: &str =
     "下载服务器提前中断传输，文件尚未接收完整；请重试";
 
+/// Localization key: the storage node refused the transfer because the
+/// bandwidth quota is used up (HTTP 509). aria2 reports exactly `HTTP 509`.
+pub(crate) const BANDWIDTH_LIMITED_MESSAGE: &str = "download.error.bandwidthLimited";
+
 pub(crate) fn cloud_share_transfer_error_message(message: String) -> String {
     if message == TRUNCATED_RESPONSE_MESSAGE {
         message
+    } else if message == "HTTP 509" {
+        BANDWIDTH_LIMITED_MESSAGE.into()
     } else {
         "网盘分享下载失败，请重试或重新解析分享链接".into()
     }
@@ -325,6 +331,14 @@ mod tests {
         assert_eq!(
             cloud_share_transfer_error_message("https://signed.example/file?token=secret".into()),
             "网盘分享下载失败，请重试或重新解析分享链接"
+        );
+    }
+
+    #[test]
+    fn share_transfer_names_an_exhausted_bandwidth_quota() {
+        assert_eq!(
+            cloud_share_transfer_error_message("HTTP 509".into()),
+            "download.error.bandwidthLimited"
         );
     }
 

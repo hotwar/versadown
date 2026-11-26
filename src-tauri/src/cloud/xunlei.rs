@@ -1297,6 +1297,7 @@ impl XunleiShareAdapter<'_> {
             headers.push((crate::xunlei_native::GCID_MARKER_HEADER.into(), gcid));
         }
         Ok(super::commands::ResolvedCloudDownload {
+            transform: None,
             url: download.url,
             name,
             headers,
@@ -1840,6 +1841,7 @@ fn resolve_xunlei_share_with_context(
         super::share::validate_direct_url(url)?;
         Ok(ShareResolution::Direct(
             super::commands::ResolvedCloudDownload {
+                transform: None,
                 url: url.into(),
                 name: entry.entry.name.clone(),
                 headers: xunlei_cdn_headers(&session.user_agent),

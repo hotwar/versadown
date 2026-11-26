@@ -1,6 +1,6 @@
 import type { TaskActionResult } from './types';
 
-export type CloudProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc';
+export type CloudProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc' | 'mega';
 export type CloudAuthMethod = 'web' | 'password';
 
 export interface ProviderCapabilities {
@@ -8,6 +8,8 @@ export interface ProviderCapabilities {
   trash: boolean; delete: boolean; restore: boolean; download: boolean; upload: boolean;
   shareInspect: boolean; shareTransfer: boolean; recordedTransferResolve: boolean;
   shareCreate: boolean; shareList: boolean; shareCancel: boolean; shareUpdatePassCode?: boolean;
+  /** False when share links cannot carry a pass code or expiry (MEGA links embed the key). Defaults to true. */
+  shareConfigurable?: boolean;
 }
 export interface DownloadConcurrencyPolicy {
   maxConnectionsPerFile: number;
@@ -23,12 +25,16 @@ export interface SharePassCodeConstraint {
 }
 export interface ProviderDescriptor {
   provider: CloudProvider;
+  /** False for providers that only serve public share links: no sign-in, no personal drive. */
+  account: boolean;
   displayName: string;
   shareDisplayName: string;
   uploadDisplayName: string;
   shareDirectoryName: string;
   rootDirectoryId: string;
   recycleBinDirectoryId: string;
+  /** Id of the read-only "shared with me" virtual folder, when the provider has one. */
+  incomingSharesDirectoryId?: string;
   authorization: CloudAuthorizationCapabilities;
   authorizationUrl: string;
   passwordLoginHosts: readonly string[];
@@ -98,6 +104,7 @@ export type CloudCredentials = { username: string } & (
   | { password: string; useSavedPassword?: false }
   | { password?: never; useSavedPassword: true }
 );
+export interface MegaCredentials { email: string; password: string; secondFactor?: string }
 export interface CloudDirectoryDownloadFailure { relativePath: string; code: string; message: string; }
 export interface CloudDirectoryDownloadOutcome {
   task: TaskActionResult;

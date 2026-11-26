@@ -193,13 +193,36 @@ pub enum RecordedTransferDownload {
     Available(crate::cloud::commands::ResolvedCloudDownload),
 }
 
+/// Per-use choices a share adapter cannot derive from its credentials.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShareAdapterOptions {
+    /// MEGA: request public-link downloads with the signed-in account so the
+    /// account's transfer quota is used. The caller sets it only when the
+    /// user allows it and the account session is ready.
+    pub mega_account_quota: bool,
+}
+
 /// A recognized share page must never fall back to ordinary URI downloading.
 pub fn provider_share_adapter<'a>(
     provider: CloudProvider,
     credentials: &'a dyn CredentialStore,
     http: &'a dyn crate::cloud::CloudHttpTransport,
 ) -> Result<Box<ShareCapabilities<'a>>, QuarkError> {
+    provider_share_adapter_with(provider, credentials, http, ShareAdapterOptions::default())
+}
+
+pub fn provider_share_adapter_with<'a>(
+    provider: CloudProvider,
+    credentials: &'a dyn CredentialStore,
+    http: &'a dyn crate::cloud::CloudHttpTransport,
+    options: ShareAdapterOptions,
+) -> Result<Box<ShareCapabilities<'a>>, QuarkError> {
     Ok(Box::new(
-        crate::cloud::ProviderRegistry::global().share_capabilities(provider, credentials, http),
+        crate::cloud::ProviderRegistry::global().share_capabilities_with(
+            provider,
+            credentials,
+            http,
+            options,
+        ),
     ))
 }

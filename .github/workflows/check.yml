@@ -94,9 +94,14 @@ jobs:
           cargo test --locked --manifest-path src-tauri/Cargo.toml --test launcher_native
       - name: Check cloud range streaming and retry recovery
         run: |
-          cargo test --locked --manifest-path src-tauri/Cargo.toml --test baidu_range_gateway --test cloud_gateway_proxy --test downloader
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --test range_gateway --test cloud_gateway_proxy --test downloader
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib aria2::native_resume::tests
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib aria2::service::tests
+      - name: Check MEGA encryption, account changes and empty-file streaming
+        run: |
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib mega
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --test mega_range_gateway --test aria2_recovery
+          pnpm exec vitest run src/components/CloudWorkspace.test.tsx src/lib/cloudApi.test.ts src/lib/queueTask.test.ts src/i18n/shareFailureMessage.test.ts --exclude '.worktrees/**'
       - name: Check Quark download cookie binding
         run: |
           cargo test --locked --manifest-path src-tauri/Cargo.toml --test cloud_quark --test quark_cookie_binding

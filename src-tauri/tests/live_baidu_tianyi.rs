@@ -268,6 +268,13 @@ fn provider_error_kind(error: &QuarkError) -> &'static str {
         QuarkError::ShareTransferDownloadUnavailable => "transfer-saved-download-unavailable",
         QuarkError::BaiduDriveVerificationRequired | QuarkError::BaiduOperationVerificationRequired => "baidu-operation-verification-required",
         QuarkError::ProviderUnsupported => "provider-unsupported",
+        QuarkError::XunleiVerificationUnavailable(_) => "xunlei-verification-unavailable",
+        QuarkError::BaiduOperationVerificationRequired => "operation-verification-required",
+        QuarkError::BaiduUploadAuthorizationRequired(_) => "baidu-upload-authorization-required",
+        QuarkError::XunleiNativeDownload(_) => "xunlei-native-download-error",
+        QuarkError::BaiduTransferPending => "baidu-transfer-pending",
+        QuarkError::ShareTransferDownloadUnavailable => "transfer-saved-download-unavailable",
+        QuarkError::Mega(_) => "mega-link-error",
         QuarkError::BaiduUploadPrecreateRejected { .. } => "baidu-upload-precreate-rejected",
         QuarkError::BaiduUploadWebSessionRequired => "baidu-upload-web-session-required",
     }

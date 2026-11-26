@@ -98,6 +98,7 @@ impl DownloadOps for AliyunDriver<'_> {
         {
             let (url, name) = aliyun::AliyunClient::new(store, http).download(file_id)?;
             Ok(ResolvedCloudDownload {
+                transform: None,
                 url,
                 name,
                 headers: vec![("Referer".into(), "https://www.aliyundrive.com/".into())],

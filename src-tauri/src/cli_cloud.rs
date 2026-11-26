@@ -110,7 +110,7 @@ async fn prepare(app:&AppHandle,input:&CloudPrepareInput)->CodeResult<CloudPrepa
                 plan.targets.push(target);
             }
             let options=CloudShareOptions{name:name.clone(),pass_code:pass_code.clone(),generate_pass_code:*generate_pass_code,expires_in_days:if *expires_in_days==0{None}else{Some(*expires_in_days)}};
-            crate::cloud::commands::validate_share_options(plan.provider,&options).map_err(cloud_code)?;
+            validate_share_preparation(plan.provider,plan.targets.len(),&options)?;
             plan.share_options=Some(options);
         }
     }
@@ -120,6 +120,10 @@ async fn prepare(app:&AppHandle,input:&CloudPrepareInput)->CodeResult<CloudPrepa
     allowed_plan(app,&plan)?;
     state.store.save_agent_cloud_plan(&plan,now())?;
     Ok(preview(&plan))
+}
+fn validate_share_preparation(provider:CloudProvider,count:usize,options:&CloudShareOptions)->CodeResult<()> {
+    if provider == CloudProvider::Mega && count != 1 { return Err("UNSUPPORTED"); }
+    crate::cloud::commands::validate_share_options(provider,options).map_err(cloud_code)
 }
 fn fingerprint(preparation_id:&str)->String{format!("{:x}",Sha256::digest(format!("agent_cloud_confirm:{preparation_id}")))}
 fn operation_dto(plan:&CloudPlan,request_id:&str)->CloudOperationDto{
@@ -257,6 +261,20 @@ mod tests{
     use super::*;
     #[test]fn cloud_upload_snapshot_detects_changes_and_rejects_directories(){let dir=tempfile::tempdir().unwrap();assert!(matches!(snapshot(dir.path()),Err("UNSUPPORTED")));let p=dir.path().join("sample.txt");std::fs::write(&p,b"one").unwrap();let a=snapshot(&p).unwrap();std::fs::write(&p,b"longer").unwrap();let b=snapshot(&p).unwrap();assert_ne!(a.size,b.size);}
     #[test]fn cloud_write_errors_do_not_turn_account_changes_or_uncertain_mutations_into_login(){assert_eq!(cloud_code(QuarkError::AccountMismatch),"ACCOUNT_MISMATCH");assert_eq!(cloud_code(QuarkError::SessionRenewedRetryOperation),"CLOUD_RESULT_UNCERTAIN");assert_eq!(cloud_code(QuarkError::InvalidInput("agent.error.fileConflict".into())),"FILE_CONFLICT");}
+
+    #[test]
+    fn mega_share_prepare_rejects_unsupported_policies_before_acceptance() {
+        let options = CloudShareOptions { name:"file".into(),pass_code:None,generate_pass_code:false,expires_in_days:None };
+        assert_eq!(validate_share_preparation(CloudProvider::Mega,1,&options),Ok(()));
+        assert_eq!(validate_share_preparation(CloudProvider::Mega,2,&options),Err("UNSUPPORTED"));
+        for options in [
+            CloudShareOptions { pass_code:Some("aB12".into()),..options.clone() },
+            CloudShareOptions { generate_pass_code:true,..options.clone() },
+            CloudShareOptions { expires_in_days:Some(7),..options.clone() },
+        ] {
+            assert_eq!(validate_share_preparation(CloudProvider::Mega,1,&options),Err("UNSUPPORTED"));
+        }
+    }
 
     #[test]
     fn baidu_upload_errors_preserve_verification_and_uncertain_commit() {

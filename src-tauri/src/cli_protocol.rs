@@ -82,6 +82,7 @@ impl ApiError {
             "HOST_DISABLED" => (false, Some("enable_desktop_agent")),
             "FORBIDDEN" => (false, Some("review_directory_permissions")),
             "AUTH_REQUIRED" => (false, Some("begin_cloud_authorization")),
+            "CLOUD_DESKTOP_LOGIN_REQUIRED" => (false, Some("sign_in_in_vd")),
             "CLOUD_OPERATION_VERIFICATION_REQUIRED" => (false, Some("complete_cloud_operation_verification")),
             "CLOUD_AUTHORIZATION_PENDING" => (false, Some("wait_for_current_cloud_authorization")),
             "INTERACTION_EXPIRED" => (false, Some("await_user_request")),
@@ -373,6 +374,8 @@ pub fn message(key: &str, lang: &str) -> &'static str {
         ("INTERRUPTED", true) => "操作已中断，任务未被取消。",
         ("PROTOCOL_ERROR", false) => "Invalid local interface response or discovery file.",
         ("PROTOCOL_ERROR", true) => "本机接口响应或发现文件无效。",
+        ("CLOUD_DESKTOP_LOGIN_REQUIRED", false) => "Sign in to this provider using its login form in VD, then retry the original request.",
+        ("CLOUD_DESKTOP_LOGIN_REQUIRED", true) => "请先在 VD 中使用此网盘的登录表单完成登录，再重试原请求。",
         ("UNSUPPORTED", false) => "This operation or resource is not supported by this CLI version.",
         ("UNSUPPORTED", true) => "当前 CLI 版本不支持此操作或资源。",
         ("ENGINE_UNAVAILABLE", false) => "The download engine is unavailable.",
@@ -389,7 +392,7 @@ pub fn message(key: &str, lang: &str) -> &'static str {
 pub fn exit_code(response: &Response) -> u8 {
     if response.ok { return 0; }
     match response.error.as_ref().map(|e| e.code.as_str()) {
-        Some("INVALID_ARGUMENT" | "UNSUPPORTED" | "RESOURCE_LIMIT") => 2,
+        Some("INVALID_ARGUMENT" | "UNSUPPORTED" | "RESOURCE_LIMIT" | "CLOUD_DESKTOP_LOGIN_REQUIRED") => 2,
         Some("HOST_UNAVAILABLE") => 3,
         Some("ENGINE_UNAVAILABLE" | "ACTION_FAILED") => 1,
         Some("UNAUTHORIZED" | "FORBIDDEN" | "HOST_DISABLED" | "AUTH_REQUIRED" | "CLOUD_WRITE_REQUIRED" | "ACCESS_CODE_REQUIRED" | "CLOUD_PERMISSION_REQUIRED" | "CLOUD_OPERATION_VERIFICATION_REQUIRED" | "CLOUD_AUTHORIZATION_PENDING" | "ACCOUNT_MISMATCH") => 4,

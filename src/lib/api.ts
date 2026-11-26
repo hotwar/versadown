@@ -1,5 +1,6 @@
 import { AgentConnectionInfo, AgentAccessSettings, AiSettings, AiSettingsInput, AppSettings, AppUpdate, CloudShareAccessCodeRequired, CloudShareBatchFailure, CloudShareBatchResult, ConfirmResource, DownloadEngineState, DownloadGlobalStat, DuplicateDownloadState, ParseDownloadResult, PrivacyTaskVisibility, QueueTask, ScanDownloadResult, TaskActionResult, TaskCommand } from './types';
 import { videoMessage } from './webVideo';
+import { shareFailureMessage } from '../i18n/shareFailureMessage';
 import type { ScanDownloadProgress, VideoPreview } from './types';
 import { Channel, invoke } from '@tauri-apps/api/core';
 import type { ThemeId } from './theme';
@@ -102,6 +103,8 @@ export async function parseDownload(input: string, accessCode?: string, requireC
         throw new Error(xunleiVerificationMessage(typeof error === 'string' ? error : (error as { message?: unknown }).message));
       }
       if (typeof error === 'string' && error.startsWith('video.error.')) throw new Error(videoMessage(error));
+      const shareFailure = typeof error === 'string' ? shareFailureMessage(error) : undefined;
+      if (shareFailure) throw new Error(shareFailure);
       throw error;
     });
   if (result.kind === 'web_video') return { videos: result.videos };

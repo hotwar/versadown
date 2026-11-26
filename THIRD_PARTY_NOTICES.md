@@ -4,6 +4,10 @@
 
 - [Aria2 Next 3.0.9](https://github.com/AnInsomniacy/aria2-next/releases/tag/v3.0.9), GPL-2.0: bundled official Windows x86_64 transfer engine for HTTP/HTTPS, BitTorrent, ED2K, and native HLS/MPEG-DASH segments. The pinned executable SHA-256 is `e74899ce4a39815a509bc663d29aca5028f9bdd6b390fe33141eb11d478d1c13`; corresponding source is available from the linked upstream release tag.
 - [suppaftp 11.0.0](https://github.com/veeso/suppaftp), MIT OR Apache-2.0: linked as the in-process asynchronous FTP client, including binary transfers and REST-based resume.
+- [aes 0.9.3](https://github.com/RustCrypto/block-ciphers), MIT OR Apache-2.0: linked for AES-128 block operations in MEGA public-link attribute decryption and file integrity MAC.
+- [ctr 0.10.1](https://github.com/RustCrypto/block-modes), MIT OR Apache-2.0: linked for AES-128-CTR stream decryption of MEGA downloads in the local range gateway.
+- [aes-gcm 0.11.1](https://github.com/RustCrypto/AEADs), Apache-2.0 OR MIT: linked for AES-128-GCM decryption and encryption of the MEGA `^!keys` key container.
+- [hkdf 0.13.0](https://github.com/RustCrypto/KDFs), MIT OR Apache-2.0: linked for the HKDF-SHA256 derivation of the MEGA `^!keys` container key from the account master key.
 
 - Quark CloudDrive official skill (`quark-clouddrive/quarkclouddrive_offical`), Apache-2.0: request shapes and file-operation protocol reference. No upstream source is copied verbatim.
 - `lnzx/pikpak`, MIT: PikPak non-official mobile API protocol reference (password sign-in, token refresh and file operations). Provider protocol may change and captcha/risk controls require interactive web authorization.

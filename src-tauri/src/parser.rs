@@ -805,6 +805,76 @@ mod tests {
         }
     }
 
+    const MEGA_FILE_KEY: &str = "q6urq6urq6urq6urq6urq6urq6urq6urq6urq6urq6s";
+    const MEGA_FOLDER_KEY: &str = "q6urq6urq6urq6urq6urqw";
+
+    #[test]
+    fn mega_links_keep_their_decryption_key_and_are_not_direct_downloads() {
+        for (url, expected_kind) in [
+            (format!("https://mega.nz/file/Ab-_9Z#{MEGA_FILE_KEY}"), "file"),
+            (format!("https://mega.nz/folder/Ab-_9Z#{MEGA_FOLDER_KEY}"), "folder"),
+            (format!("https://www.mega.nz/file/Ab-_9Z#{MEGA_FILE_KEY}"), "file"),
+            (format!("https://mega.co.nz/folder/Ab-_9Z#{MEGA_FOLDER_KEY}"), "folder"),
+        ] {
+            let candidate = extract_cloud_share_candidate(&url, None).unwrap().unwrap();
+            assert_eq!(candidate.provider, CloudProvider::Mega, "{expected_kind}");
+            // The fragment is the key: it must reach the adapter untouched.
+            assert_eq!(candidate.url, url);
+            assert_eq!(candidate.access_code, None);
+            assert_eq!(
+                validate_download_input(&url).unwrap().kind,
+                CandidateKind::CloudShare
+            );
+            assert_ne!(classify_input(&url).kind, CandidateKind::Direct);
+            // Debug output never exposes the key.
+            assert!(!format!("{candidate:?}").contains(MEGA_FILE_KEY));
+        }
+    }
+
+    #[test]
+    fn mega_link_inside_pasted_text_is_found_with_its_key() {
+        let url = format!("https://mega.nz/folder/Ab-_9Z#{MEGA_FOLDER_KEY}");
+        let text = format!("资料合集\n链接：{url}\n请尽快下载");
+        let candidate = extract_cloud_share_candidate(&text, None).unwrap().unwrap();
+        assert_eq!(candidate.provider, CloudProvider::Mega);
+        assert_eq!(candidate.url, url);
+    }
+
+    #[test]
+    fn mega_link_without_a_key_is_still_routed_to_the_provider_for_a_clear_error() {
+        // The adapter reports "link incomplete"; falling back to a plain
+        // direct download of the HTML page would fail silently instead.
+        let candidate = extract_cloud_share_candidate("https://mega.nz/file/Ab-_9Z", None)
+            .unwrap()
+            .unwrap();
+        assert_eq!(candidate.provider, CloudProvider::Mega);
+        assert_eq!(candidate.url, "https://mega.nz/file/Ab-_9Z");
+    }
+
+    #[test]
+    fn legacy_mega_link_forms_are_rejected_instead_of_downloaded_as_pages() {
+        for legacy in [
+            "https://mega.nz/#!Ab-_9Z!keykeykeykeykeykeykeykeykeykeykeykeykeykey",
+            "https://mega.nz/#F!Ab-_9Z!keykeykeykeykeykeykeykey",
+            "https://mega.nz/",
+        ] {
+            assert_eq!(
+                extract_cloud_share_candidate(legacy, None),
+                Err(ShareInputError::InvalidShare),
+                "{legacy}"
+            );
+        }
+    }
+
+    #[test]
+    fn mega_download_hosts_are_not_mistaken_for_share_links() {
+        // Temporary storage URLs live on subdomains and must stay direct.
+        assert_eq!(
+            extract_cloud_share_candidate("https://gfs204n123.userstorage.mega.co.nz/dl/abc", None),
+            Ok(None)
+        );
+    }
+
     fn share_copy_samples() -> Vec<(
         &'static str,
         CloudProvider,

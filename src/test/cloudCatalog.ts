@@ -5,7 +5,7 @@ const cloudCatalogRows = [
   ['quark', '夸克', '0', 'none', 4, 4], ['pikpak', 'PikPak', '0', 'rustDirect', 4, 4],
   ['baidu', '百度', '/', 'rustDirect', 4, 4], ['tianyi', '天翼', '-11', 'rustDirect', 1, 1],
   ['aliyun', '阿里', 'root', 'officialWebView', 4, 4], ['xunlei', '迅雷', '0', 'officialWebView', 1, 4],
-  ['uc', 'UC', '0', 'officialWebView', 4, 4]
+  ['uc', 'UC', '0', 'officialWebView', 4, 4], ['mega', 'MEGA', '0', 'none', 4, 2]
 ] as const satisfies readonly (readonly [
   CloudProvider,
   string,
@@ -24,14 +24,18 @@ export const cloudCatalog: ProviderDescriptor[] = cloudCatalogRows.map(([
   maxConcurrentTasks,
 ]) => ({
   provider: provider as CloudProvider, displayName, rootDirectoryId,
+  account: true,
   shareDisplayName: displayName + '网盘',
   uploadDisplayName: displayName,
   shareDirectoryName: displayName + '分享目录',
   passwordLoginHosts: [],
   recycleBinDirectoryId: `__versa_down_${provider}_recycle_bin__`,
   authorizationUrl: 'https://example.test', shareHosts: ['example.test'], sharePatterns: ['/s/'],
-  authorization: { provider: provider as CloudProvider, web: true, password: passwordLoginMode === 'rustDirect' || provider === 'xunlei', passwordLoginMode: passwordLoginMode as ProviderDescriptor['authorization']['passwordLoginMode'] },
-  capabilities: { list: true, createDirectory: true, rename: true, move: true, copy: true, trash: true, delete: true, restore: true, download: true, upload: true, shareInspect: true, shareTransfer: true, recordedTransferResolve: true, shareCreate: true, shareList: true, shareCancel: true },
+  authorization: { provider: provider as CloudProvider, web: provider !== 'mega', password: passwordLoginMode === 'rustDirect' || provider === 'xunlei', passwordLoginMode: passwordLoginMode as ProviderDescriptor['authorization']['passwordLoginMode'] },
+  capabilities: provider === 'mega'
+    ? { list: true, createDirectory: true, rename: true, move: true, copy: true, trash: true, delete: true, restore: true, download: true, upload: true, shareInspect: true, shareTransfer: true, recordedTransferResolve: true, shareCreate: true, shareList: true, shareCancel: true, shareConfigurable: false }
+    : { list: true, createDirectory: true, rename: true, move: true, copy: true, trash: true, delete: true, restore: true, download: true, upload: true, shareInspect: true, shareTransfer: true, recordedTransferResolve: true, shareCreate: true, shareList: true, shareCancel: true },
+  ...(provider === 'mega' ? { incomingSharesDirectoryId: '__versa_down_mega_incoming_shares__' } : {}),
   maxUploadConcurrency: 2,
   downloadConcurrency: { maxConnectionsPerFile, maxConcurrentTasks },
   ...((provider === 'quark' || provider === 'uc' || provider === 'baidu') ? {

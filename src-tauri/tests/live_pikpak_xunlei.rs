@@ -63,14 +63,16 @@ fn error_kind(error: &QuarkError) -> &'static str {
         QuarkError::UploadUnavailable => "upload-unavailable",
         QuarkError::ProviderUnsupported => "provider-unsupported",
         QuarkError::XunleiVerificationUnavailable(_) => "xunlei-verification-unavailable",
-        QuarkError::BaiduOperationVerificationRequired => "baidu-operation-verification-required",
-        QuarkError::BaiduDriveVerificationRequired => "baidu-operation-verification-required",
+        QuarkError::BaiduOperationVerificationRequired => "operation-verification-required",
         QuarkError::BaiduUploadAuthorizationRequired(_) => "baidu-upload-authorization-required",
-        QuarkError::BaiduUploadPrecreateRejected { .. } => "baidu-upload-precreate-rejected",
-        QuarkError::BaiduUploadWebSessionRequired => "baidu-upload-web-session-required",
         QuarkError::XunleiNativeDownload(_) => "xunlei-native-download-error",
         QuarkError::BaiduTransferPending => "baidu-transfer-pending",
         QuarkError::ShareTransferDownloadUnavailable => "transfer-saved-download-unavailable",
+        QuarkError::Mega(_) => "mega-link-error",
+        QuarkError::BaiduOperationVerificationRequired => "baidu-operation-verification-required",
+        QuarkError::BaiduDriveVerificationRequired => "baidu-operation-verification-required",
+        QuarkError::BaiduUploadPrecreateRejected { .. } => "baidu-upload-precreate-rejected",
+        QuarkError::BaiduUploadWebSessionRequired => "baidu-upload-web-session-required",
     }
 }
 

@@ -150,7 +150,7 @@ export interface ScanDownloadProgress {
   pending: string[];
 }
 
-export type CloudShareProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc';
+export type CloudShareProvider = 'quark' | 'pikpak' | 'baidu' | 'tianyi' | 'aliyun' | 'xunlei' | 'uc' | 'mega';
 
 export interface CloudShareAccessCodeRequired {
   provider: CloudShareProvider;

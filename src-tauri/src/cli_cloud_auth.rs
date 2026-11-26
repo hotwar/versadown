@@ -368,7 +368,7 @@ pub(crate) fn authorization_window_completed(app: &AppHandle, account: &CloudAcc
 
 fn provider(key: &str) -> Result<CloudProvider, &'static str> {
     ProviderRegistry::global().by_key(key)
-        .filter(|descriptor| descriptor.provider.is_enabled())
+        .filter(|descriptor| descriptor.account && descriptor.provider.is_enabled())
         .map(|descriptor| descriptor.provider).ok_or("UNSUPPORTED")
 }
 
@@ -433,8 +433,16 @@ fn fail_session(app: &AppHandle, id: &str) {
     }
 }
 
+fn authorization_provider(key: &str) -> Result<CloudProvider, &'static str> {
+    let provider = provider(key)?;
+    if !ProviderRegistry::global().get(provider).authorization.web {
+        return Err("CLOUD_DESKTOP_LOGIN_REQUIRED");
+    }
+    Ok(provider)
+}
+
 async fn begin(app: AppHandle, key: &str, expected: Option<String>, lang: &str) -> Response {
-    let provider = match provider(key) { Ok(provider) => provider, Err(code) => return Response::failure(code, lang) };
+    let provider = match authorization_provider(key) { Ok(provider) => provider, Err(code) => return Response::failure(code, lang) };
     if expected.as_ref().is_some_and(|value| {
         !value.strip_prefix("acct_").is_some_and(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
     }) {
@@ -567,7 +575,7 @@ async fn read_account(app: AppHandle, provider: CloudProvider, lang: String) -> 
 async fn accounts(app: AppHandle, filter: Option<&str>, lang: &str) -> Response {
     let providers = match filter {
         Some(key) => match provider(key) { Ok(provider) => vec![provider], Err(code) => return Response::failure(code, lang) },
-        None => ProviderRegistry::global().catalog().iter().map(|descriptor| descriptor.provider).collect(),
+        None => ProviderRegistry::global().catalog().iter().filter(|descriptor| descriptor.account).map(|descriptor| descriptor.provider).collect(),
     };
     let mut jobs = tokio::task::JoinSet::new();
     for provider in providers {
@@ -778,6 +786,17 @@ mod tests {
         }
         assert_eq!(sessions.sessions.len(), MAX_SESSIONS);
         assert_eq!(sessions.sessions[&pending.session_id].status, Status::Pending);
+    }
+
+    #[test]
+    fn cli_cloud_auth_native_login_has_actionable_guidance_without_a_pending_session() {
+        assert_eq!(provider("mega"), Ok(CloudProvider::Mega));
+        assert_eq!(authorization_provider("mega"), Err("CLOUD_DESKTOP_LOGIN_REQUIRED"));
+        assert_eq!(authorization_provider("baidu"), Ok(CloudProvider::Baidu));
+        let error = ApiError::new("CLOUD_DESKTOP_LOGIN_REQUIRED", "en");
+        assert_eq!(error.next_action.as_deref(), Some("sign_in_in_vd"));
+        assert!(!error.retryable);
+        assert!(error.message.contains("VD"));
     }
 
     #[test]

@@ -160,7 +160,7 @@ async fn prepare(app:&AppHandle,input:&ResourcePrepareInput)->ResultCode<Resourc
         }
         "cloud"=> {
             if !input.input.is_empty()||input.access_code.is_some(){return Err("INVALID_ARGUMENT")}
-            let provider=input.provider.as_deref().and_then(|key|crate::cloud::ProviderRegistry::global().by_key(key)).map(|d|d.provider).filter(|p|p.is_enabled()).ok_or("INVALID_ARGUMENT")?;
+            let provider=input.provider.as_deref().and_then(|key|crate::cloud::ProviderRegistry::global().by_key(key)).filter(|d|d.account).map(|d|d.provider).filter(|p|p.is_enabled()).ok_or("INVALID_ARGUMENT")?;
             if input.parent_id.is_none() {
                 let account=crate::cloud::commands::cloud_account(app.clone(),provider).await.map_err(cloud_error)?;
                 crate::agent_access::require_cloud_account(&state,provider.key(),&account.id)?;
@@ -398,7 +398,7 @@ mod tests {
     }
     #[test]
     fn agent_resource_cloud_root_is_a_real_account_bound_browse_and_upload_selection() {
-        for provider in [CloudProvider::Baidu,CloudProvider::Quark,CloudProvider::Aliyun,CloudProvider::Pikpak] {
+        for provider in [CloudProvider::Baidu,CloudProvider::Quark,CloudProvider::Aliyun,CloudProvider::Pikpak,CloudProvider::Mega] {
             let root=cloud_root_choice(provider,"private-owner");
             let ResourceTarget::Cloud {provider:p,account_id,file_id,folder,directory_chain,..}=&root.target else {panic!("cloud root expected")};
             assert_eq!(*p,provider);

@@ -1,7 +1,16 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { readFileSync } from 'node:fs';
 import userEvent from '@testing-library/user-event';
 import { ParseConfirmDialog } from './ParseConfirmDialog';
+import { cloudCatalog } from '../test/cloudCatalog';
+
+const cloudApi = vi.hoisted(() => ({ getCloudProviderCatalog: vi.fn() }));
+vi.mock('../lib/cloudApi', () => cloudApi);
+
+beforeEach(() => {
+  cloudApi.getCloudProviderCatalog.mockReset();
+  cloudApi.getCloudProviderCatalog.mockResolvedValue(cloudCatalog);
+});
 
 const result = {
   taskId: 'task-1', requiresConfirmation: true,

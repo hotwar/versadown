@@ -1,5 +1,9 @@
-//! Process-local adapter for Baidu CDN endpoints that reject large Range requests.
-//! aria2 remains the only writer and checkpoint owner; this service only reshapes HTTP.
+//! Process-local adapter between aria2 and provider storage endpoints that cannot
+//! be handed to aria2 directly: CDNs that reject large Range requests (Baidu,
+//! PikPak, which only need their ranges reshaped) and providers whose objects
+//! are end-to-end encrypted (a [`DownloadTransform`] decrypts them on the fly).
+//! aria2 remains the only writer and checkpoint owner; this service only
+//! reshapes HTTP and, when asked, the bytes.
 
 use axum::{
     body::{Body, Bytes},
@@ -9,13 +13,14 @@ use axum::{
     routing::get,
     Router,
 };
+use super::download_transform::{Decryptor, DownloadTransform};
 use futures_util::stream;
 use rand::RngCore;
 use reqwest::{Client, Proxy};
 use std::{
     collections::HashMap,
     io,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
 };
 use thiserror::Error;
 use tokio::task::JoinHandle;
@@ -42,14 +47,66 @@ struct Target {
     upstream: String,
     headers: HeaderMap,
     client: Client,
+    /// When present the upstream is addressed by URL path ranges and its bytes
+    /// are transformed (decrypted) before they reach aria2.
+    transform: Option<DownloadTransform>,
+    quota_waits: Arc<QuotaWaits>,
 }
+
+/// What an upstream said when it answered HTTP 509 (transfer quota used up),
+/// per task. aria2 reports only `HTTP 509`, so the details travel here until
+/// the task's failure is published.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuotaWait {
+    /// Seconds the upstream asked the client to wait, when it said so.
+    pub seconds: Option<u64>,
+    /// The download URL was issued against a signed-in account's quota.
+    pub account: bool,
+}
+
+impl QuotaWait {
+    /// The failure to show for the refusal: the account's quota is named even
+    /// when MEGA gave no wait; the IP quota only with a known wait, otherwise
+    /// the generic bandwidth-limit message stays.
+    pub fn failure(self) -> Option<super::mega::MegaFailure> {
+        use super::mega::MegaFailure;
+        if self.account {
+            Some(MegaFailure::AccountQuotaExceeded {
+                retry_after_secs: self.seconds,
+            })
+        } else {
+            self.seconds.map(|seconds| MegaFailure::QuotaExceeded {
+                retry_after_secs: Some(seconds),
+            })
+        }
+    }
+}
+
+#[derive(Default)]
+struct QuotaWaits(Mutex<HashMap<Uuid, QuotaWait>>);
 
 #[derive(Default)]
 struct Shared {
     targets: RwLock<HashMap<String, Arc<Target>>>,
+    quota_waits: Arc<QuotaWaits>,
 }
 
-pub struct BaiduRangeGateway {
+/// MEGA's storage nodes answer HTTP 509 with this header carrying the seconds
+/// until the quota resets (megajs `lib/file.mjs`, `handleMegaErrors`).
+const QUOTA_WAIT_HEADER: &str = "x-mega-time-left";
+
+fn quota_wait_seconds(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(QUOTA_WAIT_HEADER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|seconds| *seconds > 0)
+}
+
+pub struct RangeGateway {
     port: u16,
     shared: Arc<Shared>,
     server: JoinHandle<()>,
@@ -90,7 +147,7 @@ impl Drop for GatewayRegistration {
     }
 }
 
-impl BaiduRangeGateway {
+impl RangeGateway {
     pub async fn start() -> Result<Self, GatewayError> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let port = listener.local_addr()?.port();
@@ -115,7 +172,22 @@ impl BaiduRangeGateway {
         headers: Vec<(String, String)>,
         proxy: Option<String>,
     ) -> Result<GatewayRegistration, GatewayError> {
-        self.register_inner(task_id, upstream, headers, proxy, false)
+        self.register_inner(task_id, upstream, headers, proxy, false, None)
+    }
+
+    /// Registers an upstream whose bytes must be transformed before they are
+    /// served. `refreshing` retains the paused task's local endpoint like
+    /// [`Self::register_refreshing`].
+    pub fn register_transformed(
+        &self,
+        task_id: Uuid,
+        upstream: String,
+        headers: Vec<(String, String)>,
+        proxy: Option<String>,
+        transform: DownloadTransform,
+        refreshing: bool,
+    ) -> Result<GatewayRegistration, GatewayError> {
+        self.register_inner(task_id, upstream, headers, proxy, refreshing, Some(transform))
     }
 
     /// Refresh the upstream while retaining the paused task's local endpoint,
@@ -127,7 +199,7 @@ impl BaiduRangeGateway {
         headers: Vec<(String, String)>,
         proxy: Option<String>,
     ) -> Result<GatewayRegistration, GatewayError> {
-        self.register_inner(task_id, upstream, headers, proxy, true)
+        self.register_inner(task_id, upstream, headers, proxy, true, None)
     }
 
     fn register_inner(
@@ -137,6 +209,7 @@ impl BaiduRangeGateway {
         headers: Vec<(String, String)>,
         proxy: Option<String>,
         reuse_existing: bool,
+        transform: Option<DownloadTransform>,
     ) -> Result<GatewayRegistration, GatewayError> {
         let parsed = url::Url::parse(&upstream).map_err(|_| GatewayError::InvalidTarget)?;
         if !matches!(parsed.scheme(), "http" | "https")
@@ -187,6 +260,8 @@ impl BaiduRangeGateway {
         }
         let client = builder.build().map_err(|_| GatewayError::Transport)?;
         let mut targets = self.shared.targets.write().unwrap();
+        // A fresh submission starts a fresh quota episode.
+        self.shared.quota_waits.0.lock().unwrap().remove(&task_id);
         let existing = reuse_existing
             .then(|| {
                 targets
@@ -214,6 +289,8 @@ impl BaiduRangeGateway {
                 upstream,
                 headers: upstream_headers,
                 client,
+                transform,
+                quota_waits: Arc::clone(&self.shared.quota_waits),
             }),
         );
         Ok(GatewayRegistration {
@@ -237,6 +314,11 @@ impl BaiduRangeGateway {
         self.shared.targets.write().unwrap().remove(token);
     }
 
+    /// The quota refusal most recently seen for `task_id`, consumed once.
+    pub fn take_quota_wait(&self, task_id: Uuid) -> Option<QuotaWait> {
+        self.shared.quota_waits.0.lock().unwrap().remove(&task_id)
+    }
+
     pub fn remove_task(&self, task_id: Uuid) {
         self.shared
             .targets
@@ -246,7 +328,7 @@ impl BaiduRangeGateway {
     }
 }
 
-impl Drop for BaiduRangeGateway {
+impl Drop for RangeGateway {
     fn drop(&mut self) {
         self.server.abort();
     }
@@ -313,6 +395,87 @@ impl Target {
         end: u64,
         expected_total: Option<u64>,
     ) -> Result<UpstreamRange, StatusCode> {
+        match &self.transform {
+            None => self.fetch_http_range(start, end, expected_total).await,
+            Some(transform) => self.fetch_path_range(transform, start, end).await,
+        }
+    }
+
+    /// Fetch one plain range of a path-addressed upstream whose body is
+    /// ciphertext of the same length (no `Content-Range` is reported).
+    async fn fetch_path_range(
+        &self,
+        transform: &DownloadTransform,
+        start: u64,
+        end: u64,
+    ) -> Result<UpstreamRange, StatusCode> {
+        let total = transform.total_size();
+        if start >= total {
+            return Err(StatusCode::RANGE_NOT_SATISFIABLE);
+        }
+        let end = end.min(total - 1);
+        if end - start >= CHUNK_BYTES {
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+        let url = transform
+            .range_url(&self.upstream, start, end)
+            .ok_or(StatusCode::BAD_GATEWAY)?;
+        let response = self
+            .client
+            .get(url)
+            .headers(self.headers.clone())
+            .send()
+            .await
+            .map_err(|_| StatusCode::BAD_GATEWAY)?;
+        match response.status() {
+            StatusCode::OK | StatusCode::PARTIAL_CONTENT => {}
+            StatusCode::FORBIDDEN => return Err(StatusCode::FORBIDDEN),
+            // Transfer quota exhausted. Surface the provider's own status so
+            // the engine does not report a generic gateway failure.
+            status if status.as_u16() == 509 => {
+                self.quota_waits.0.lock().unwrap().insert(
+                    self.task_id,
+                    QuotaWait {
+                        seconds: quota_wait_seconds(response.headers()),
+                        account: self
+                            .transform
+                            .as_ref()
+                            .is_some_and(|transform| transform.uses_account_quota()),
+                    },
+                );
+                return Err(status);
+            }
+            _ => return Err(StatusCode::BAD_GATEWAY),
+        }
+        if response
+            .headers()
+            .get(header::CONTENT_ENCODING)
+            .is_some_and(|value| value != "identity")
+        {
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+        let expected_length = end - start + 1;
+        if response
+            .content_length()
+            .is_some_and(|length| length != expected_length)
+        {
+            return Err(StatusCode::BAD_GATEWAY);
+        }
+        Ok(UpstreamRange {
+            response,
+            end,
+            total,
+            remaining: expected_length,
+            decryptor: Some(transform.decryptor(start)),
+        })
+    }
+
+    async fn fetch_http_range(
+        &self,
+        start: u64,
+        end: u64,
+        expected_total: Option<u64>,
+    ) -> Result<UpstreamRange, StatusCode> {
         let response = self
             .client
             .get(&self.upstream)
@@ -322,7 +485,12 @@ impl Target {
             .await
             .map_err(|_| StatusCode::BAD_GATEWAY)?;
         if response.status() != StatusCode::PARTIAL_CONTENT {
-            return Err(if response.status() == StatusCode::FORBIDDEN {
+            // A rejected or expired credential is reported as 403 so the
+            // engine's failure leads to a refreshed URL and token.
+            return Err(if matches!(
+                response.status(),
+                StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED
+            ) {
                 StatusCode::FORBIDDEN
             } else {
                 StatusCode::BAD_GATEWAY
@@ -359,6 +527,7 @@ impl Target {
             end: actual_end,
             total,
             remaining: expected_length,
+            decryptor: None,
         })
     }
 }
@@ -368,6 +537,7 @@ struct UpstreamRange {
     end: u64,
     total: u64,
     remaining: u64,
+    decryptor: Option<Decryptor>,
 }
 
 impl UpstreamRange {
@@ -399,7 +569,14 @@ impl UpstreamRange {
                 ));
             }
         }
-        Ok(chunk)
+        Ok(match self.decryptor.as_mut() {
+            Some(decryptor) => {
+                let mut plain = chunk.to_vec();
+                decryptor.apply(&mut plain);
+                Bytes::from(plain)
+            }
+            None => chunk,
+        })
     }
 }
 
@@ -450,6 +627,20 @@ async fn serve(
             Err(status) => return empty(status),
         }
     };
+    if let Some(transform) = &target.transform {
+        // Known-size HEAD and empty-file GET need no upstream byte range.
+        let total = transform.total_size();
+        if method == Method::HEAD || (total == 0 && !requested.partial) {
+            return head_response(total);
+        }
+        if total == 0 {
+            return Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, "bytes */0")
+                .body(Body::empty())
+                .unwrap();
+        }
+    }
     let first_end = requested
         .start
         .saturating_add(CHUNK_BYTES - 1)
@@ -475,12 +666,7 @@ async fn serve(
         );
     }
     if method == Method::HEAD {
-        return Response::builder()
-            .status(StatusCode::OK)
-            .header(header::ACCEPT_RANGES, "bytes")
-            .header(header::CONTENT_LENGTH, total)
-            .body(Body::empty())
-            .unwrap();
+        return head_response(total);
     }
     // Forward each received chunk immediately after validating range headers.
     // Buffering a whole 4 MiB range hides healthy slow CDN traffic from aria2,
@@ -507,6 +693,15 @@ async fn serve(
         },
     );
     builder.body(Body::from_stream(chunks)).unwrap()
+}
+
+fn head_response(total: u64) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_LENGTH, total)
+        .body(Body::empty())
+        .unwrap()
 }
 
 fn empty(status: StatusCode) -> Response {
