@@ -6,6 +6,7 @@ mod atomic_membership_tests;
 
 #[path = "share/mega_integrity.rs"]
 mod mega_integrity;
+pub(crate) use mega_integrity::resume_pending_mega_integrity_checks;
 
 struct CancelShareOnDrop(Arc<share::ShareWorkControl>);
 impl Drop for CancelShareOnDrop {

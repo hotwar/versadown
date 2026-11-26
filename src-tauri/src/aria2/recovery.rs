@@ -99,6 +99,8 @@ impl DownloadService {
         let store = self.store();
         let has_persisted_engine_tasks = store.list()?.into_iter().any(|task| {
             !matches!(task.status, TaskStatus::Completed | TaskStatus::Recycled)
+                && !crate::store::is_mega_integrity_pending(&task)
+                && !crate::store::is_mega_integrity_failure(&task)
                 && task.aria_gid.is_some()
                 && !crate::xunlei_native::is_native_gid(task.aria_gid.as_deref())
         });
@@ -147,6 +149,12 @@ impl DownloadService {
             // Accepted CLI work owns its GID before RPC. Leave its durable
             // user intent untouched until the dispatcher checks authorization.
             if store.cli_dispatch_pending(task.id)? { continue; }
+            // Completed bytes now belong to the durable MAC check, not aria2.
+            if crate::store::is_mega_integrity_pending(&task)
+                || crate::store::is_mega_integrity_failure(&task)
+            {
+                continue;
+            }
 
             if crate::cloud::download_dispatch::cloud_task_requires_provider_dispatch(&task) {
                 // The persisted engine task still contains a short-lived
@@ -211,6 +219,8 @@ impl DownloadService {
             .into_iter()
             .filter(|task| {
                 !matches!(task.status, TaskStatus::Completed | TaskStatus::Recycled)
+                    && !crate::store::is_mega_integrity_pending(task)
+                    && !crate::store::is_mega_integrity_failure(task)
                     && task.aria_gid.as_ref().is_some_and(|gid| {
                         !crate::xunlei_native::is_native_gid(Some(gid))
                             && !native_gids.contains(gid)
@@ -220,6 +230,12 @@ impl DownloadService {
             .collect::<Vec<_>>();
         for id in missing {
             if store.cli_dispatch_pending(id)? { continue; }
+            let current = store.find(id)?;
+            if crate::store::is_mega_integrity_pending(&current)
+                || crate::store::is_mega_integrity_failure(&current)
+            {
+                continue;
+            }
             let task = store.detach_missing_engine_task(id)?;
             self.publish_task(&task)?;
         }

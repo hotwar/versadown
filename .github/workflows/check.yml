@@ -99,8 +99,8 @@ jobs:
           cargo test --locked --manifest-path src-tauri/Cargo.toml --lib aria2::service::tests
       - name: Check MEGA encryption, account changes and empty-file streaming
         run: |
-          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib cloud::mega::
-          cargo test --locked --manifest-path src-tauri/Cargo.toml --test mega_range_gateway
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --lib mega
+          cargo test --locked --manifest-path src-tauri/Cargo.toml --test mega_range_gateway --test aria2_recovery
           pnpm exec vitest run src/components/CloudWorkspace.test.tsx src/lib/cloudApi.test.ts src/lib/queueTask.test.ts src/i18n/shareFailureMessage.test.ts --exclude '.worktrees/**'
       - name: Check Gofile capture context and task privacy
         run: |
