@@ -27,6 +27,7 @@ import { downloadErrorMessage, isPrivateTask, normalizeQueueTask, normalizeQueue
 import { sendDownloadNotification, shouldNotifyTask } from './lib/downloadNotifications';
 import { AiSettingsInput, AppSettings, AppUpdate, DownloadEngineState, DuplicateDownload, ParseResult, PrivacyTaskVisibility, QueueTask, QueueTaskInput, TaskActionResult, TaskCommand, VideoPreview } from './lib/types';
 import { managerViewFromLauncherPayload, ManagerView } from './lib/managerNavigation';
+import { startNativeMenuLabelSync } from './lib/nativeMenuLabels';
 import darkMintIcon from './assets/launcher/dark_mint.svg';
 import mintWhiteIcon from './assets/launcher/mint_white.svg';
 import { getResolvedTheme, getResolvedThemeId, subscribeTheme } from './lib/theme';
@@ -274,7 +275,8 @@ async function runWindowAction(action: 'minimize' | 'maximize' | 'hide') {
     const window = getCurrentWindow();
     if (action === 'minimize') await window.minimize();
     if (action === 'maximize') await window.toggleMaximize();
-    if (action === 'hide') await window.hide();
+    // The native side hides the window and keeps the tray menu label in sync.
+    if (action === 'hide') await invoke('hide_manager_window');
   } catch {
     // Window chrome is inert in browser previews and during shutdown.
   }
@@ -404,6 +406,8 @@ export function App() {
     // icon.  Keep the native taskbar icon in step with the concrete palette.
     void syncMainWindowIcon(resolvedThemeId).catch(() => undefined);
   }, [resolvedThemeId]);
+  // The tray menu is drawn natively: hand it the localized text now and after each language change.
+  useEffect(() => startNativeMenuLabelSync(), []);
   useEffect(() => {
     if (!isTauriRuntime()) return;
     const mainWindow = getCurrentWindow();

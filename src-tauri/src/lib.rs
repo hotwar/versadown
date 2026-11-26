@@ -43,6 +43,7 @@ mod link_association;
 mod local_upload_picker;
 mod magnet_metadata;
 mod models;
+pub mod native_menu_labels;
 #[cfg(all(target_os = "macos", feature = "native-smoke"))]
 mod native_smoke;
 mod output_path;
@@ -75,7 +76,7 @@ pub use engine_runtime::{
 };
 pub use ftp::{parse_ftp_url, FtpDownloadEngine, FtpDownloadError, FtpDownloadLimits, FtpTarget};
 pub use launcher::{
-    launcher_menu_entries, should_apply_launcher_window_visibility, tray_menu_entries,
+    launcher_menu_actions, should_apply_launcher_window_visibility, tray_menu_entries,
     LauncherInteractionState,
 };
 pub use magnet_metadata::{
@@ -362,6 +363,8 @@ pub fn run() -> i32 {
             if startup_options.agent_host {
                 app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             }
+            // Also available when an Agent host creates its desktop UI later.
+            app.manage(native_menu_labels::NativeMenuLabelStore::open(&data_dir));
             if let Err(error) = aria2::migrate_legacy_ed2k_discovery_state(&data_dir) {
                 eprintln!("Unable to migrate legacy eD2K discovery state: {error}");
             }
@@ -721,6 +724,8 @@ pub fn run() -> i32 {
             launcher::run_launcher_menu_action,
             launcher::launcher_manager_visible,
             launcher::toggle_manager_from_launcher,
+            launcher::hide_manager_window,
+            launcher::set_native_menu_labels,
             launcher::reveal_manager_from_launcher,
             launcher::launcher_interaction_snapshot,
             launcher::manager_window_snapshot,

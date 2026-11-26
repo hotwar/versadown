@@ -61,6 +61,8 @@ vi.mock('@tauri-apps/api/core', async (importOriginal) => ({
 }));
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ writeText: state.clipboardWrite, readText: state.clipboardRead }));
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: state.openNativeFile }));
+// The tray text is pushed to the native side; it is covered by nativeMenuLabels.test.ts.
+vi.mock('./lib/nativeMenuLabels', () => ({ startNativeMenuLabelSync: () => () => undefined }));
 vi.mock('@tauri-apps/api/window', async (importOriginal) => ({
   ...await importOriginal<typeof import('@tauri-apps/api/window')>(),
   getCurrentWindow: () => ({
