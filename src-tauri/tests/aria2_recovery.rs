@@ -534,3 +534,146 @@ async fn native_recovery_does_not_import_a_completed_magnet_child_after_bad_pare
     assert_eq!(store.find(task.id).unwrap().status, TaskStatus::Completed);
     server.abort();
 }
+
+
+fn integrity_task(
+    store: &TaskStore,
+    state: TaskStatus,
+    code: &str,
+) -> versadown_lib::DownloadTask {
+    let task = store.create(NewTask {
+        source: "cloud://mega/AbCd1234".into(),
+        name: "verified.bin".into(),
+        kind: "cloud".into(),
+        is_private: false,
+    }).unwrap();
+    let mut task = store.bind_gid(task.id, "mega-integrity-gid").unwrap();
+    task.status = state;
+    task.failure_code = Some(code.into());
+    task.total_length = Some(100);
+    task.completed_length = 100;
+    task.progress = 99;
+    store.apply_transfer_snapshot(task).unwrap()
+}
+
+#[tokio::test]
+async fn native_recovery_preserves_persisted_mega_integrity_when_engine_state_is_stale_or_missing() {
+    for (state, code) in [
+        (TaskStatus::Processing, "mega_integrity_pending:fixture"),
+        (TaskStatus::Failed, "mega_integrity_failed"),
+        (TaskStatus::Failed, "mega_integrity_unavailable"),
+    ] {
+        for engine_state in [Some("active"), Some("paused"), Some("complete"), None] {
+            let root = tempfile::tempdir().unwrap();
+            let database = root.path().join("tasks.sqlite");
+            let id = {
+                let store = TaskStore::open_path(&database).unwrap();
+                integrity_task(&store, state, code).id
+            };
+            // Exercise a new process's durable state, not an in-memory marker.
+            let store = Arc::new(TaskStore::open_path(&database).unwrap());
+            let calls = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&calls);
+            let (client, server) = fixture::server(move |request| match request["method"].as_str().unwrap() {
+                "aria2.tellActive" => {
+                    observed.fetch_add(1, Ordering::SeqCst);
+                    match engine_state {
+                        Some(value) => json!([fixture::status("mega-integrity-gid", value, 0)]),
+                        None => json!([]),
+                    }
+                },
+                "aria2.tellWaiting" | "aria2.tellStopped" => json!([]),
+                other => panic!("integrity recovery must not call {other}"),
+            }).await;
+            let report = DownloadService::new(Arc::new(client), Arc::clone(&store))
+                .recover_native(root.path()).await.unwrap();
+            let task = store.find(id).unwrap();
+            assert_eq!(task.status, state);
+            assert_eq!(task.failure_code.as_deref(), Some(code));
+            assert_eq!(task.aria_gid.as_deref(), Some("mega-integrity-gid"));
+            assert_eq!(task.completed_length, 100);
+            assert_eq!(report.reconciled, 0);
+            assert_eq!(report.imported, 0);
+            assert_eq!(calls.load(Ordering::SeqCst), 1, "no engine retry is needed for local verification");
+            server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn reconciliation_leaves_mega_integrity_to_the_verifier() {
+    for (state, code) in [
+        (TaskStatus::Processing, "mega_integrity_pending:fixture"),
+        (TaskStatus::Failed, "mega_integrity_failed"),
+        (TaskStatus::Failed, "mega_integrity_unavailable"),
+    ] {
+        let store = Arc::new(TaskStore::open_in_memory().unwrap());
+        let task = integrity_task(&store, state, code);
+        let (client, server) = fixture::server(|request| match request["method"].as_str().unwrap() {
+            "aria2.tellActive" => json!([fixture::status("mega-integrity-gid", "active", 0)]),
+            "aria2.tellWaiting" => json!([]),
+            "aria2.getGlobalStat" => fixture::global(),
+            other => panic!("integrity task must not be synchronized by {other}"),
+        }).await;
+        let service = DownloadService::new(Arc::new(client), Arc::clone(&store));
+        service.reconcile_now().await.unwrap();
+        let observed = service.reconcile_task(task.id).await.unwrap();
+        assert_eq!(observed.status, state);
+        assert_eq!(observed.failure_code.as_deref(), Some(code));
+        assert_eq!(observed.completed_length, 100);
+        assert_eq!(store.list().unwrap().len(), 1);
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn an_in_flight_rpc_cannot_replace_a_new_mega_integrity_check() {
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let mut task = store.create(NewTask::direct("cloud://mega/AbCd1234")).unwrap();
+    task = store.bind_gid(task.id, "mega-integrity-gid").unwrap();
+    let id = task.id;
+    let changed_store = Arc::clone(&store);
+    let (client, server) = fixture::server(move |request| match request["method"].as_str().unwrap() {
+        "aria2.tellStatus" => {
+            let mut current = changed_store.find(id).unwrap();
+            current.status = TaskStatus::Processing;
+            current.failure_code = Some("mega_integrity_pending:fixture".into());
+            current.total_length = Some(100);
+            current.completed_length = 100;
+            changed_store.apply_transfer_snapshot(current).unwrap();
+            fixture::status("mega-integrity-gid", "paused", 0)
+        },
+        other => panic!("unexpected {other}"),
+    }).await;
+    let service = DownloadService::new(Arc::new(client), Arc::clone(&store));
+    let current = service.reconcile_task(id).await.unwrap();
+    assert_eq!(current.status, TaskStatus::Processing);
+    assert_eq!(current.failure_code.as_deref(), Some("mega_integrity_pending:fixture"));
+    assert_eq!(current.completed_length, 100);
+    server.abort();
+}
+
+
+#[tokio::test]
+async fn pending_mega_integrity_can_be_cancelled_without_a_live_engine_job() {
+    use versadown_lib::aria2::DownloadAction;
+    let root = tempfile::tempdir().unwrap();
+    let payload = root.path().join("verified.bin");
+    std::fs::write(&payload, b"downloaded bytes retained on cancel").unwrap();
+    let store = Arc::new(TaskStore::open_in_memory().unwrap());
+    let task = integrity_task(&store, TaskStatus::Processing, "mega_integrity_pending:fixture");
+    store.upsert_files(task.id, &[(1, payload.to_string_lossy().into_owned(), 35, 35, true)]).unwrap();
+    let (client, server) = fixture::server(|request| {
+        panic!("local integrity control must not call aria2: {}", request["method"])
+    }).await;
+    let service = DownloadService::new(Arc::new(client), Arc::clone(&store));
+    for action in [DownloadAction::Pause, DownloadAction::Resume] {
+        assert!(service.control(task.id, action).await.is_err());
+        assert_eq!(store.find(task.id).unwrap().status, TaskStatus::Processing);
+    }
+    let cancelled = service.control(task.id, DownloadAction::Cancel).await.unwrap();
+    assert_eq!(cancelled.status, TaskStatus::Cancelled);
+    assert_eq!(store.find(task.id).unwrap().status, TaskStatus::Cancelled);
+    assert_eq!(std::fs::read(&payload).unwrap(), b"downloaded bytes retained on cancel");
+    server.abort();
+}

@@ -21,6 +21,9 @@ mod agent_cloud;
 mod agent_permissions;
 #[path = "store/agent_interactions.rs"]
 mod agent_interactions;
+#[path = "store/mega_integrity.rs"]
+mod mega_integrity;
+pub(crate) use mega_integrity::{is_mega_integrity_failure, is_mega_integrity_pending};
 
 use crate::{
     cloud::CloudProvider,
@@ -1859,14 +1862,19 @@ impl TaskStore {
 
     pub fn apply_transfer_snapshot_with_files(
         &self,
-        snapshot: DownloadTask,
+        mut snapshot: DownloadTask,
         files: &[(u32, String, u64, u64, bool)],
     ) -> Result<DownloadTask, StoreError> {
         let connection = self.connection.lock().map_err(|_| StoreError::Poisoned)?;
         let transaction = connection.unchecked_transaction()?;
         let current = find_with_transaction(&transaction, snapshot.id)?
             .ok_or(StoreError::NotFound(snapshot.id))?;
-        let completed_at = if snapshot.status == TaskStatus::Completed {
+        if mega_integrity::hold_mega_completion(&mut snapshot, &current) {
+            return Ok(current);
+        }
+        let completed_at = if is_mega_integrity_pending(&snapshot) {
+            None
+        } else if snapshot.status == TaskStatus::Completed {
             current.completed_at.or(Some(current_timestamp()))
         } else {
             current.completed_at

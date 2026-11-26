@@ -287,3 +287,7 @@ If a Baidu upload reports `CLOUD_UPLOAD_SESSION_REQUIRED` or `CLOUD_UPLOAD_VERIF
 MEGA 使用 VD 的专用登录表单（可含两步验证码），不支持 Agent 网页授权入口。未登录时先在 VD 完成 MEGA 登录，再重试原资源请求；直接调用其 `cloud auth begin` 返回 `CLOUD_DESKTOP_LOGIN_REQUIRED`，`next_action: sign_in_in_vd`，退出码 2，不创建等待中的授权会话。已有 MEGA 登录可供经过用户授权的 Agent 网盘操作复用；公开分享解析与下载不要求登录。创建 MEGA 分享仅选一个项目，使用 `expires_in_days: 0`、不设提取码、不自动生成提取码。
 
 MEGA uses its dedicated VD login form, including two-factor authentication when required. Sign in there before retrying an Agent account request. Its `cloud auth begin` returns `CLOUD_DESKTOP_LOGIN_REQUIRED` with `next_action: sign_in_in_vd` and exit code 2, without opening a pending authorization session. Authorized Agent account operations reuse that login; public links require no login. Create a MEGA share for a single item with `expires_in_days: 0`, no pass code and `generate_pass_code: false`.
+
+Agent 的 MEGA 公开分享下载当前使用匿名/IP 配额，不会自动消耗已登录账号的会员额度。文件传输完成后，任务保持 `processing` 直到 MEGA 完整性校验通过；校验失败或无法完成时不会返回成功文件。
+
+Agent downloads of public MEGA links currently use anonymous/IP quota, without automatically using the signed-in account quota. Tasks remain `processing` after transfer until MEGA integrity verification succeeds; failed or unavailable verification never yields a successful file result.

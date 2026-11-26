@@ -519,6 +519,7 @@ pub fn run() -> i32 {
                 cloud_download_dispatch: cloud_download_dispatch.clone(),
                 range_gateway: std::sync::Arc::clone(&range_gateway),
             });
+            app.manage(std::sync::Arc::clone(&events));
             let video_events = events.clone();
             let runtime = std::sync::Arc::new(EngineRuntime::new(
                 launch_config,
@@ -544,6 +545,7 @@ pub fn run() -> i32 {
                 range_gateway,
                 xunlei_native_backend,
             });
+            cloud::commands::resume_pending_mega_integrity_checks(app.handle().clone());
             let authorization_app = app.handle().clone();
             let dispatch_state = app.state::<commands::AppState>();
             let cli_dispatcher = cli_dispatch::CliDispatcher::start(
