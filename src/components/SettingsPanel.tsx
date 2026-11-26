@@ -2,6 +2,8 @@ import { FormEvent, useEffect, useRef, useState, useSyncExternalStore } from 're
 import { AiSettings, AiSettingsInput, AppSettings, Aria2Settings, LauncherVisibility, MagnetMetadataSettings, ProxyProtocol } from '../lib/types';
 import { getThemeMode, setThemeMode, subscribeTheme, themeOptions, ThemeMode } from '../lib/theme';
 import { localeMetadata, useTranslation } from '../i18n';
+import { AgentAccessSettings } from './AgentAccessSettings';
+import type { AgentAccessSettings as AgentAccessConfiguration } from '../lib/types';
 import { videoMessage } from '../lib/webVideo';
 
 type SettingsTab = 'display' | 'network' | 'advanced';
@@ -21,6 +23,7 @@ interface SettingsPanelProps {
   loadAiModels?(settings: AiSettingsInput): Promise<string[]>;
   onNotice?(notice: { kind: 'success' | 'error'; message: string }): void;
   configurePrivacyDownload?(enabled: boolean, currentPassword?: string, newPassword?: string): Promise<AppSettings>;
+  configureAgentAccess?(settings: AgentAccessConfiguration): Promise<AppSettings>;
 }
 
 const disabledAiSettings: AiSettings = { enabled: false, baseUrl: '', model: '', apiKeyConfigured: false };
@@ -53,7 +56,7 @@ function PasswordVisibilityIcon({ visible }: { visible: boolean }) {
     : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12s3.2-8 9-8 9 8 9 8-3.2 8-9 8-9-8-9-8Z" /><circle cx="12" cy="12" r="3" /></svg>;
 }
 
-export function SettingsPanel({ initial, onChange, browseDirectory, browseVideoCookieFile, saveAiSettings, loadAiModels, onNotice, configurePrivacyDownload }: SettingsPanelProps) {
+export function SettingsPanel({ initial, onChange, browseDirectory, browseVideoCookieFile, saveAiSettings, loadAiModels, onNotice, configurePrivacyDownload, configureAgentAccess }: SettingsPanelProps) {
   const { t, localePreference, setLocalePreference } = useTranslation();
   const [downloadDirectory, setDownloadDirectory] = useState(initial.downloadDirectory);
   const [launcherVisibility, setLauncherVisibility] = useState<LauncherVisibility>(initial.launcherVisibility);
@@ -461,6 +464,7 @@ export function SettingsPanel({ initial, onChange, browseDirectory, browseVideoC
       </form>
       </>}
       {activeTab === 'advanced' && <>
+        <AgentAccessSettings initial={initial.agentAccess} onSave={configureAgentAccess} />
         <section className="aria2-debug-settings proxy-settings">
           <label className="setting-row"><span><b>{t('settings.debugLogging')}</b><small>{t('settings.debugLogging.description')}</small></span><input aria-label={t('settings.debugLogging')} type="checkbox" checked={aria2.debugLogging} onChange={(event) => void updateDebugLogging(event.target.checked)} /></label>
           {aria2Status?.kind === 'error' && <div className="settings-actions"><span role="status" className="error">{aria2Status.message}</span></div>}

@@ -381,6 +381,30 @@ pub(crate) fn validate_direct_url(url: &str) -> Result<(), QuarkError> {
     Ok(())
 }
 
+/// Agent share execution is deliberately limited to a direct URL. A transfer
+/// fallback, even if the provider recommends it, is never an implicit grant.
+pub(crate) fn resolve_agent_share_read_only_with(
+    store: &CloudSharePlanStore,
+    adapter: &dyn CloudShareAdapter,
+    source: &str,
+) -> Result<crate::cloud::commands::ResolvedCloudDownload, QuarkError> {
+    let entry = store.resolve_entry(source)?;
+    let resolved = adapter.resolve_with_context(&entry)?;
+    if let Some(context) = resolved.updated_context {
+        store.update_provider_context(source, &context)?;
+    }
+    match resolved.result? {
+        ShareResolution::Direct(mut download) => {
+            validate_direct_url(&download.url)?;
+            download.name = entry.entry.name;
+            Ok(download)
+        }
+        ShareResolution::TransferRequired(_) => Err(QuarkError::InvalidInput(
+            "agent.error.cloudWriteRequired".into(),
+        )),
+    }
+}
+
 pub fn resolve_current_share_download(
     store: &CloudSharePlanStore,
     adapter: &dyn CloudShareAdapter,

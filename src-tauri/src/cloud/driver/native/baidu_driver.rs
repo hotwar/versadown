@@ -208,9 +208,11 @@ impl ProviderAuth for BaiduDriver<'_> {
         };
         complete_native_password_login(native_result, |session| {
             let client = baidu::BaiduClient::new(session.clone(), http);
-            let account = client.account()?;
-            client.directory(ProviderRegistry::global().get(provider).root_directory_id)?;
-            save_provider_session(CloudProvider::Baidu, store, &session)?;
+            let account = client.validate_login_candidate(
+                ProviderRegistry::global().get(provider).root_directory_id,
+                |_| {},
+            )?;
+            save_provider_session(provider, store, &session)?;
             set_browser_password_login_preferred(store, provider, false)?;
             Ok(account)
         })
@@ -238,12 +240,11 @@ impl ProviderAuth for BaiduDriver<'_> {
                 Err(error) => return Err(error),
             };
             set_browser_password_login_preferred(store, provider, false)?;
-            let client = baidu::BaiduClient::new(session.clone(), http);
-            let account = client.account()?;
-            (
-                account,
-                serde_json::to_vec(&session).map_err(|_| CloudError::Storage)?,
-            )
+            let account = baidu::BaiduClient::new(session.clone(), http).account()?;
+            if account.id != credential.account_id() {
+                return Err(CloudError::AccountMismatch);
+            }
+            (account, serde_json::to_vec(&session).map_err(|_| CloudError::Storage)?)
         })
     }
     fn validate_browser_password(
@@ -257,15 +258,9 @@ impl ProviderAuth for BaiduDriver<'_> {
         Ok({
             let mut session = baidu::parse_baidu_web_session(cookies)?;
             session.auth_method = CloudAuthMethod::Password;
-            let client = baidu::BaiduClient::new(session.clone(), http);
-            report_stage("账号信息校验");
-            let account = client.account()?;
-            report_stage("目录访问校验");
-            client.directory(ProviderRegistry::global().get(provider).root_directory_id)?;
-            (
-                account,
-                serde_json::to_vec(&session).map_err(|_| QuarkError::Storage)?,
-            )
+            session.validated_login_receipt(
+                http, ProviderRegistry::global().get(provider).root_directory_id, None, report_stage,
+            )?
         })
     }
     fn web_session_snapshot(
@@ -282,15 +277,18 @@ impl ProviderAuth for BaiduDriver<'_> {
 impl UploadOps for BaiduDriver<'_> {
     fn upload(
         &mut self,
-        s: &CloudState,
         upload_http: &dyn UploadHttp,
         parent_id: &str,
         path: &Path,
     ) -> Result<CloudFile, CloudError> {
         let h = UploadHttpRef(upload_http);
-        s.with_upload_session(CloudProvider::Baidu, &h, |store| {
-            baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, store)?, &h)
-                .upload_file(&parent_id, &path, &h)
-        })
+        baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &self.store)?, &h)
+            .upload_file(parent_id, path, &h)
+    }
+
+    fn upload_no_replace(&mut self, upload_http: &dyn UploadHttp, parent_id: &str, path: &Path) -> Result<CloudFile, CloudError> {
+        let h = UploadHttpRef(upload_http);
+        baidu::BaiduClient::new(load_provider_session(CloudProvider::Baidu, &self.store)?, &h)
+            .upload_file_no_replace(parent_id, path, &h)
     }
 }

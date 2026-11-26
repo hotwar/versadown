@@ -19,7 +19,7 @@ export type { CloudAccount, CloudAuthorization, CloudAuthorizationCapabilities, 
 export interface CloudManagerClient {
   getCloudProviderCatalog(): Promise<readonly ProviderDescriptor[]>;
   getCloudAuthorizationCapabilities(provider: CloudProvider): Promise<CloudAuthorizationCapabilities>;
-  beginCloudAuthorization(provider: CloudProvider): Promise<CloudAuthorization>;
+  beginCloudAuthorization(provider: CloudProvider, expectedAccountId?: string): Promise<CloudAuthorization>;
   openCloudOperationVerification?(provider: CloudProvider, expectedAccountId: string, locale?: string): Promise<void>;
   completeCloudOperationVerification?(provider: CloudProvider, expectedAccountId: string): Promise<CloudAccount>;
   completeCloudAuthorization(provider: CloudProvider): Promise<CloudAccount>;
@@ -51,7 +51,7 @@ export interface CloudManagerClient {
   pickAndUploadDirectory(provider: CloudProvider, parentId: string): Promise<CloudUploadOutcome>;
   pickCloudUploadFiles?(): Promise<string[]>;
   pickCloudUploadDirectory?(): Promise<string | null>;
-  uploadCloudFiles?(provider: CloudProvider, parentId: string, paths: string[], onProgress?: (progress: CloudUploadProgress) => void): Promise<CloudUploadOutcome>;
+  uploadCloudFiles?(provider: CloudProvider, parentId: string, paths: string[], onProgress?: (progress: CloudUploadProgress) => void, expectedAccountId?: string): Promise<CloudUploadOutcome>;
   uploadCloudDirectory?(provider: CloudProvider, parentId: string, path: string, onProgress?: (progress: CloudUploadProgress) => void): Promise<CloudUploadOutcome>;
   controlCloudUpload?(provider: CloudProvider, uploadId: string, action: CloudUploadAction): Promise<void>;
   listLocalUploadEntries?(path?: string): Promise<LocalUploadListing>;
@@ -59,7 +59,7 @@ export interface CloudManagerClient {
 
 export interface CloudManagerProps {
   descriptor: ProviderDescriptor;
-  recoveryFailed?: boolean;
+  recoveryAuthorization?: 'expired' | 'web';
   provider: CloudProvider;
   client?: CloudManagerClient;
   initialAccount?: CloudAccount | null;
@@ -83,7 +83,11 @@ type Editor = 'create' | 'rename' | null;
 type DestinationAction = 'move' | 'copy';
 type OperationState = { kind: 'working' | 'success' | 'error' | 'cancelled'; message: string; operationVerification?: boolean; verificationOpened?: boolean; uploadProgress?: CloudUploadProgress } | null;
 type DirectoryRefreshConfirmation = (directory: CloudDirectory) => boolean;
-type PendingAuthorizationAction = { accountId: string; name: string; resume: () => Promise<void>; showOperation: boolean };
+type PendingAuthorizationAction = { accountId: string; resume: () => Promise<void>; showOperation: boolean; directoryRead: boolean; bindUploadAccount?: boolean };
+interface UploadRetry {
+  afterWebSessionUpgrade: boolean;
+  failedPaths(failures: CloudUploadOutcome['failures']): (() => Promise<void>) | undefined;
+}
 interface Breadcrumb { id: string; name: string }
 type CloudMenuAction = 'open' | 'restore' | 'download' | 'rename' | 'move' | 'copy' | 'share' | 'copyShareLink' | 'updateSharePassCode' | 'cancelShare' | 'delete' | 'create' | 'upload' | 'refresh';
 type CloudContextMenuState = { kind: 'selection'; item: CloudFile; x: number; y: number } | { kind: 'background'; x: number; y: number };
@@ -140,7 +144,9 @@ function isAuthorizationPending(error: unknown) {
 
 function baiduUploadMessageKey(code: unknown) {
   switch (code) {
+    case 'baidu_upload_web_session_required': return 'cloud.upload.baiduLoginExpired';
     case 'baidu_upload_session_required': return 'cloud.upload.baiduSessionUnavailable';
+    case 'baidu_upload_precreate_rejected': return 'cloud.upload.baiduPrecreateRejected';
     case 'baidu_upload_verification_required': return 'cloud.upload.baiduVerificationRequired';
     case 'baidu_upload_result_uncertain': return 'cloud.upload.baiduResultUncertain';
     default: return undefined;
@@ -150,10 +156,14 @@ function baiduUploadMessageKey(code: unknown) {
 function requiresOfficialWebAuthorization(error: unknown) {
   if (typeof error !== 'object' || error === null) return false;
   const code = 'code' in error ? String((error as { code?: unknown }).code).toLowerCase() : '';
-  if (baiduUploadMessageKey(code) || ['pikpak_operation_verification_required', 'xunlei_verification_unavailable'].includes(code)) return false;
-  const message = errorMessage(error, '').toLowerCase();
-  return ['web_auth_required', 'captcha_required', 'captcha_invalid', 'verification_required', 'web_verification_required', 'risk_verification_required'].includes(code)
-    || /captcha|verification required|网页验证|安全验证|风险验证/.test(message);
+  return ['web_auth_required', 'captcha_required', 'captcha_invalid', 'verification_required', 'web_verification_required', 'risk_verification_required'].includes(code);
+}
+
+export function accountRecoveryAction(error: unknown) {
+  if (isUnauthorized(error)) return 'authorize';
+  if (isCredentialExpired(error)) return 'expired';
+  if (requiresOfficialWebAuthorization(error)) return 'web';
+  return 'retry';
 }
 
 function requiresPikpakOperationVerification(error: unknown) {
@@ -182,6 +192,11 @@ function isSessionRenewedRetryOperation(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'session_renewed_retry_operation';
 }
 
+function uploadAuthorizationError(error: unknown, fallback: string) {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === 'account_mismatch'
+    ? t('cloud.authorization.accountMismatch') : errorMessage(error, fallback);
+}
+
 function isTerminalWebAuthorizationError(error: unknown) {
   return typeof error === 'object' && error !== null && 'code' in error && ['provider_error', 'invalid_response', 'credentials_expired'].includes(String((error as { code?: unknown }).code));
 }
@@ -192,16 +207,28 @@ function isXunleiVerificationFailure(error: unknown, reason: 'metadata_expired' 
     && 'message' in error && error.message === reason;
 }
 
-function errorMessage(error: unknown, fallback: string) {
+export function errorMessage(error: unknown, fallback: string) {
   if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as { message?: unknown }).message === 'string') {
     const localized = shareFailureMessage((error as { message: string }).message);
     if (localized) return localized;
   }
   if (hasXunleiVerificationCode(error)) return xunleiVerificationMessage((error as { message?: unknown }).message);
   if (typeof error === 'object' && error !== null && 'code' in error) {
+    if (error.code === 'provider_error' && 'message' in error &&
+      (error.message === 'cloud.session.maintenanceDeferred' || error.message === '网盘请求失败：cloud.session.maintenanceDeferred')) {
+      return t('cloud.session.maintenanceDeferred');
+    }
+    if (error.code === 'baidu_drive_verification_required') return t('cloud.verification.baidu.drive');
     if (error.code === 'baidu_transfer_pending') return t('cloud.error.baiduTransferPending');
     const uploadKey = baiduUploadMessageKey(error.code);
-    if (uploadKey) return t(uploadKey);
+    if (uploadKey) {
+      const message = t(uploadKey);
+      if (error.code === 'baidu_upload_precreate_rejected' && 'message' in error
+        && typeof error.message === 'string' && /^HTTP [1-5]\d{2}(?:, errno -?\d+)?$/.test(error.message)) {
+        return `${message} ${error.message}`;
+      }
+      return message;
+    }
   }
   if (typeof error === 'object' && error !== null && 'message' in error && typeof (error as { message?: unknown }).message === 'string') {
     const text = (error as { message: string }).message;
@@ -530,12 +557,12 @@ function CloudShareDialog({ provider, items, share, busy, linkOnly, sharePassCod
   const serverGeneratedPassCode = provider === 'pikpak';
   const alwaysGeneratedPassCode = provider === 'tianyi' || provider === 'xunlei';
   const expiryOptions = provider === 'tianyi' ? [['', t('cloud.share.permanent')], ['1', t('cloud.share.days', { count: 1 })], ['7', t('cloud.share.days', { count: 7 })]] : [['', t('cloud.share.permanent')], ['1', t('cloud.share.days', { count: 1 })], ['7', t('cloud.share.days', { count: 7 })], ['30', t('cloud.share.days', { count: 30 })]];
-  const passCodeError = generatePassCode ? null : sharePassCodeError(passCode, sharePassCodeConstraint);
+  const passCodeError = generatePassCode || alwaysGeneratedPassCode ? null : sharePassCodeError(passCode, sharePassCodeConstraint);
   const submit = (event: FormEvent) => {
     event.preventDefault();
     if (passCodeError) return;
     if (linkOnly) { onCreate({ name: title }); return; }
-    onCreate({ name: title, ...(generatePassCode ? { generatePassCode: true } : (passCode.trim() ? { passCode: passCode.trim() } : {})), ...(expiresInDays ? { expiresInDays: Number(expiresInDays) } : {}) });
+    onCreate({ name: title, ...(generatePassCode || alwaysGeneratedPassCode ? { generatePassCode: true } : (passCode.trim() ? { passCode: passCode.trim() } : {})), ...(expiresInDays ? { expiresInDays: Number(expiresInDays) } : {}) });
   };
   return createPortal(<div className="cloud-confirm-backdrop">
     <section ref={dialogRef} className="cloud-share-dialog" role="dialog" aria-modal="true" aria-label={share ? t('cloud.share.created') : t('cloud.share.create')}>
@@ -658,7 +685,7 @@ function CloudDestinationPicker({ action, provider, descriptor, client, excluded
   </div>, document.body);
 }
 
-export function CloudManager({ provider, descriptor, client = unavailableClient, initialAccount = null, recoveryFailed = false, onDownloadTask, authorizationOnly = false, restoreOnMount = true, showSessionActions = true, workspaceVisible = true, privacyDownloadEnabled = false, authorizationCardDrag, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
+export function CloudManager({ provider, descriptor, client = unavailableClient, initialAccount = null, recoveryAuthorization, onDownloadTask, authorizationOnly = false, restoreOnMount = true, showSessionActions = true, workspaceVisible = true, privacyDownloadEnabled = false, authorizationCardDrag, onAccountAuthorized, onAccountLoggedOut }: CloudManagerProps) {
   const { t } = useTranslation();
   const label = cloudProviderLabel(provider, t);
   const rootId = descriptor.rootDirectoryId;
@@ -682,8 +709,9 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const passwordFieldsEdited = useRef(false);
   const passwordInputVersion = useRef(0);
   const effectiveAuthorizationCapabilities = descriptor.authorization;
-  const supportsPasswordLogin = effectiveAuthorizationCapabilities.password;
-  const [authorizationStatus, setAuthorizationStatus] = useState(recoveryFailed ? expiredAuthorizationStatus : initialAuthorizationStatus);
+  const supportsPasswordLogin = effectiveAuthorizationCapabilities.password && recoveryAuthorization !== 'web';
+  const [authorizationStatus, setAuthorizationStatus] = useState(recoveryAuthorization === 'expired'
+    ? expiredAuthorizationStatus : recoveryAuthorization === 'web' ? t('cloud.authorization.completeOfficialVerification') : initialAuthorizationStatus);
   const [reauthorizationRequired, setReauthorizationRequired] = useState(false);
   const [openingOperationVerification, setOpeningOperationVerification] = useState(false);
   const [pendingAuthorizationName, setPendingAuthorizationName] = useState<string | null>(null);
@@ -707,6 +735,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   const [shareItems, setShareItems] = useState<readonly CloudFile[] | null>(null);
   const [createdShare, setCreatedShare] = useState<CloudShare | null>(null);
   const [destinationAction, setDestinationAction] = useState<DestinationAction | null>(null);
+  const directoryRequestSequence = useRef(0);
   const authorizationCompletionInFlight = useRef<number | null>(null);
   const webAuthorizationActive = useRef(false);
   const authorizationGeneration = useRef(0);
@@ -756,9 +785,11 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     return () => observer.disconnect();
   }, [directoryState]);
 
-  function queueAuthorizationContinuation(name: string, resume: () => Promise<void>, message: string, showOperation = true, expectedAccountId = activeAccount?.id) {
-    if (!expectedAccountId) return;
-    pendingAuthorizationAction.current = { accountId: expectedAccountId, name, resume, showOperation };
+  function queueAuthorizationContinuation(name: string, resume: () => Promise<void>, message: string, options?: { accountId?: string; showOperation?: boolean; directoryRead?: boolean; bindUploadAccount?: boolean }) {
+    const accountId = options?.accountId ?? activeAccount?.id;
+    if (!accountId) return;
+    const showOperation = options?.showOperation ?? true;
+    pendingAuthorizationAction.current = { accountId, resume, showOperation, directoryRead: !!options?.directoryRead, bindUploadAccount: options?.bindUploadAccount };
     setPendingAuthorizationName(name);
     setReauthorizationRequired(true);
     setAuthorizationStatus(message);
@@ -850,10 +881,6 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   }, [client, provider, supportsPasswordLogin, activeAccount?.id]);
 
   useEffect(() => {
-    if (recoveryFailed && !activeAccount) setAuthorizationStatus(expiredAuthorizationStatus);
-  }, [activeAccount, recoveryFailed]);
-
-  useEffect(() => {
     const account = activeAccount;
     if (!authorizationOnly || !account) {
       setAccountCapacity(undefined);
@@ -896,8 +923,24 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     return () => { current = false; };
   }, [activeAccount?.id, authorizationOnly, client, provider]);
 
-  async function loadDirectory(account: CloudAccount, parentId: string, nextBreadcrumbs: readonly Breadcrumb[]) {
-    setDirectoryState('loading');
+  useEffect(() => () => { directoryRequestSequence.current += 1; }, [client, provider]);
+
+  async function loadDirectory(
+    account: CloudAccount,
+    parentId: string,
+    nextBreadcrumbs: readonly Breadcrumb[],
+    purpose: 'browse' | 'confirmUpload' = 'browse'
+  ) {
+    const requestId = ++directoryRequestSequence.current;
+    if (purpose === 'browse') {
+      if (pendingAuthorizationAction.current?.directoryRead) {
+        pendingAuthorizationAction.current = null;
+        setPendingAuthorizationName(null);
+        setReauthorizationRequired(false);
+        setOperation(current => current?.kind === 'error' ? null : current);
+      }
+      setDirectoryState('loading');
+    }
     setSelectedIds([]);
     setContextMenu(null);
     selectionAnchor.current = null;
@@ -914,6 +957,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
           sharePassCode: share.passCode,
         })) }
         : await client.listCloudDirectory(provider, parentId);
+      if (requestId !== directoryRequestSequence.current) return null;
       const recycleBinId = descriptor.recycleBinDirectoryId;
       const incomingSharesId = descriptor.incomingSharesDirectoryId;
       const rootItems = parentId === rootId
@@ -931,11 +975,12 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       setDirectoryState(items.length ? 'ready' : 'empty');
       return visibleDirectory;
     } catch (error) {
+      if (requestId !== directoryRequestSequence.current) return null;
+      if (purpose === 'confirmUpload') throw error;
       if (provider === 'xunlei' && (
         isXunleiVerificationFailure(error, 'metadata_expired')
         || isXunleiVerificationFailure(error, 'metadata_missing')
       )) {
-        if (isXunleiVerificationFailure(error, 'metadata_expired')) setReauthorizationRequired(true);
         setDirectoryState(directory ? (directory.items.length ? 'ready' : 'empty') : 'error');
         const message = errorMessage(error, t('cloud.error.readDirectory'));
         setAuthorizationStatus(message);
@@ -949,11 +994,12 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       } else if (needsInPlaceWebAuthorization(error)) {
         const detail = errorMessage(error, '');
         const message = t('cloud.authorization.directoryRequiresWeb', { detail: detail ? ` ${detail}` : '' });
-        queueAuthorizationContinuation(t('cloud.action.loadDirectory'), async () => { await loadDirectory(account, parentId, nextBreadcrumbs); }, message, Boolean(directory), account.id);
+        queueAuthorizationContinuation(t('cloud.action.loadDirectory'), async () => { await loadDirectory(account, parentId, nextBreadcrumbs); }, message, { accountId: account.id, showOperation: Boolean(directory), directoryRead: true });
         setDirectoryState(directory ? (directory.items.length ? 'ready' : 'empty') : 'error');
         return null;
       }
       setDirectory(null);
+      setBreadcrumbs(nextBreadcrumbs);
       setDirectoryState(isCredentialExpired(error) ? 'expired' : 'error');
       setAuthorizationStatus(errorMessage(error, t('cloud.error.readDirectory')));
       return null;
@@ -1001,7 +1047,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     const destinations = [...new Set(topLevel.map((file) => file.parentId))];
     let destinationName: string | undefined;
     if (destinations.length === 1 && destinations[0] !== parentId) {
-      const original = await loadDirectory(account, parentId, nextBreadcrumbs);
+      const original = await loadDirectory(account, parentId, nextBreadcrumbs, 'confirmUpload');
       if (!original) return { loaded: false, confirmed: false };
       const targetId = destinations[0];
       const target = original.items.find((file) => file.id === targetId && file.kind === 'folder');
@@ -1015,21 +1061,15 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     }
     for (const delay of DIRECTORY_INDEX_CONFIRMATION_DELAYS_MS) {
       if (delay > 0) await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
-      const refreshed = await loadDirectory(account, parentId, nextBreadcrumbs);
+      const refreshed = await loadDirectory(account, parentId, nextBreadcrumbs, 'confirmUpload');
       if (!refreshed) return { loaded: false, confirmed: false };
       // Mixed file/directory batches may have more than one actual destination.
       // Confirm each one without navigating repeatedly between directories.
       const listings = new Map([[parentId, refreshed]]);
-      let lookupFailed = false;
       for (const targetId of destinations) {
-        if (listings.has(targetId)) continue;
-        try {
-          listings.set(targetId, await client.listCloudDirectory(provider, targetId));
-        } catch {
-          lookupFailed = true;
-        }
+        if (!listings.has(targetId)) listings.set(targetId, await client.listCloudDirectory(provider, targetId));
       }
-      if (!lookupFailed && topLevel.every((file) => listings.get(file.parentId)?.items.some((item) => item.id === file.id))) {
+      if (topLevel.every((file) => listings.get(file.parentId)?.items.some((item) => item.id === file.id))) {
         return { loaded: true, confirmed: true, destinationName };
       }
     }
@@ -1058,12 +1098,13 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   useEffect(() => {
     if (authorizationOnly || !restoreOnMount) return;
     let active = true;
+    const generation = authorizationGeneration.current;
     client.getCloudAccount(provider).then((account) => {
-      if (!active) return;
+      if (!active || generation !== authorizationGeneration.current) return;
       ensureProviderAccount(account);
       setActiveAccount(account);
     }).catch((error) => {
-      if (active && !isUnauthorized(error)) setAuthorizationStatus(errorMessage(error, t('cloud.authorization.restoreSessionFailed')));
+      if (active && generation === authorizationGeneration.current && !isUnauthorized(error)) setAuthorizationStatus(errorMessage(error, t('cloud.authorization.restoreSessionFailed')));
     });
     return () => { active = false; };
   }, [authorizationOnly, client, provider, restoreOnMount]);
@@ -1078,6 +1119,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   async function acceptAccount(account: CloudAccount) {
     ensureProviderAccount(account);
     const pending = pendingAuthorizationAction.current;
+    if (pending?.bindUploadAccount && (!webAuthorizationActive.current || account.authMethod !== 'web')) return false;
     const sameAccount = !pending
       || pending.accountId === account.id
       || (provider === 'tianyi' && (pending.accountId === 'tianyi-web' || account.id === 'tianyi-web'));
@@ -1090,6 +1132,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       if (pending.showOperation) setOperation({ kind: 'error', message });
       return false;
     }
+    if (pending?.bindUploadAccount) webAuthorizationActive.current = false;
     setActiveAccount(account);
     setWebAuthorization(null);
     setReauthorizationRequired(false);
@@ -1150,7 +1193,10 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     setWebAuthorization({ provider, windowLabel: '', instructions: '' });
     setAuthorizationStatus(t('cloud.authorization.preparingWindow'));
     try {
-      const authorization = await client.beginCloudAuthorization(provider);
+      const pending = pendingAuthorizationAction.current;
+      const authorization = pending?.bindUploadAccount
+        ? await client.beginCloudAuthorization(provider, pending.accountId)
+        : await client.beginCloudAuthorization(provider);
       if (!webAuthorizationActive.current || generation !== authorizationGeneration.current) return;
       authorizationRegistered.current = true;
       setWebAuthorization(authorization);
@@ -1160,7 +1206,11 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       if (generation !== authorizationGeneration.current) return;
       webAuthorizationActive.current = false;
       setWebAuthorization(null);
-      setAuthorizationStatus(errorMessage(error, t('cloud.authorization.openWindowFailed')));
+      const fallback = t('cloud.authorization.openWindowFailed');
+      const boundUpload = pendingAuthorizationAction.current?.bindUploadAccount;
+      const message = boundUpload ? uploadAuthorizationError(error, fallback) : errorMessage(error, fallback);
+      setAuthorizationStatus(message);
+      if (boundUpload) setOperation({ kind: 'error', message });
     }
   }
 
@@ -1180,8 +1230,16 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         setAuthorizationStatus(t('cloud.authorization.waitingLogin'));
         return;
       }
-      const message = errorMessage(error, t('cloud.authorization.webNotCompleted'));
+      const boundUpload = pendingAuthorizationAction.current?.bindUploadAccount;
+      const fallback = t('cloud.authorization.webNotCompleted');
+      const message = boundUpload ? uploadAuthorizationError(error, fallback) : errorMessage(error, fallback);
       setAuthorizationStatus(message);
+      if (boundUpload) {
+        webAuthorizationActive.current = false;
+        setWebAuthorization(null);
+        setOperation({ kind: 'error', message });
+        return;
+      }
       if (effectiveAuthorizationCapabilities?.passwordLoginMode === 'officialWebView' && isTerminalWebAuthorizationError(error)) {
         // A rejected verification must not automatically start another captcha.
         // Keep the account and let the user explicitly reopen authorization.
@@ -1249,7 +1307,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     };
   }, [client, provider, waitingForWebAuthorization]);
 
-  async function runOperation(name: string, action: () => Promise<unknown>, refresh = true, retryUploadFailures?: (failures: CloudUploadOutcome['failures']) => () => Promise<void>, confirmDirectoryRefresh?: DirectoryRefreshConfirmation) {
+  async function runOperation(name: string, action: () => Promise<unknown>, refresh = true, uploadRetry?: UploadRetry, confirmDirectoryRefresh?: DirectoryRefreshConfirmation) {
     if (!activeAccount || operationInFlight.current) return;
     const operationLabel = t(({ '下载': 'download.action.download', '上传': 'cloud.action.upload', '新建目录': 'cloud.action.newFolder', '重命名': 'cloud.action.rename', '恢复': 'cloud.action.restore', '永久删除': 'cloud.action.permanentDelete', '删除': 'download.action.delete', '创建分享': 'cloud.share.create', '取消分享': 'cloud.action.cancelShare', '移动': 'cloud.action.move', '复制': 'cloud.action.copy', '退出登录': 'cloud.logout', '退出授权': 'cloud.revokeAuthorization' } as Record<string, Parameters<typeof t>[0]>)[name] ?? 'cloud.action.inProgress');
     operationInFlight.current = true;
@@ -1272,29 +1330,43 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
         // The upload result is authoritative even when the follow-up listing fails.
         setUploadResult(report);
         setOperation(report);
-        const directoryRefresh = refresh
-          ? await refreshUploadedDirectory(activeAccount, currentDirectoryId, breadcrumbs, result.uploaded)
-          : { loaded: true, confirmed: true, destinationName: undefined };
-        if (!directoryRefresh.loaded) return;
-        const destinationMessage = directoryRefresh.destinationName
-          ? t('cloud.upload.destination', { name: directoryRefresh.destinationName }) : '';
-        const finalReport = {
-          ...report,
-          message: `${report.message}${destinationMessage}${directoryRefresh.confirmed ? '' : t('cloud.directoryNotSynced')}`,
-        };
+        let directoryNotice = '';
+        if (refresh && result.uploaded.length > 0) {
+          try {
+            const confirmation = await refreshUploadedDirectory(activeAccount, currentDirectoryId, breadcrumbs, result.uploaded);
+            if (confirmation.destinationName) directoryNotice = t('cloud.upload.destination', { name: confirmation.destinationName });
+            if (!confirmation.confirmed) directoryNotice += t('cloud.directoryNotSynced');
+          } catch (error) {
+            const detail = errorMessage(error, '');
+            directoryNotice = ` ${t('cloud.operation.listRefreshFailed', { name: operationLabel })}${detail ? ` ${detail}` : ''}`;
+          }
+        }
+        const finalReport = { ...report, message: report.message + directoryNotice };
         setUploadResult(finalReport);
         if (result.cancelled) {
           setOperation(finalReport);
           return;
         }
         if (result.failures.length > 0) {
-          if (provider === 'xunlei' && result.failures.some(failure => isXunleiVerificationFailure(failure, 'metadata_expired'))) {
-            setReauthorizationRequired(true);
+          if (uploadRetry?.afterWebSessionUpgrade) {
+            setOperation(finalReport);
+            return;
+          }
+          const upgradeFailures = provider === 'baidu'
+            ? result.failures.filter(failure => failure.code === 'baidu_upload_web_session_required') : [];
+          if (upgradeFailures.length) {
+            const resume = uploadRetry?.failedPaths(upgradeFailures);
+            if (resume && effectiveAuthorizationCapabilities.web) {
+              queueAuthorizationContinuation(name, resume, t('cloud.upload.baiduUpgradeAuthorization'), { bindUploadAccount: true });
+            } else {
+              setOperation(finalReport);
+            }
+            return;
           }
           const first = result.failures.find(failure => ['web_auth_required', 'credentials_expired', 'session_renewed_retry_operation'].includes(failure.code)) ?? result.failures[0];
           if (first.code === 'web_auth_required' || (first.code === 'credentials_expired' && effectiveAuthorizationCapabilities.web)) {
             const authorizationFailures = result.failures.filter(failure => failure.code === 'web_auth_required' || (failure.code === 'credentials_expired' && effectiveAuthorizationCapabilities.web));
-            queueAuthorizationContinuation(name, retryUploadFailures?.(authorizationFailures) ?? (() => runOperation(name, action, refresh, retryUploadFailures, confirmDirectoryRefresh)), t('cloud.webVerificationRequired', { name: operationLabel, detail: first.message ? ` ${first.message}` : '' }));
+            queueAuthorizationContinuation(name, uploadRetry?.failedPaths(authorizationFailures) ?? (() => runOperation(name, action, refresh, uploadRetry, confirmDirectoryRefresh)), t('cloud.webVerificationRequired', { name: operationLabel, detail: first.message ? ` ${first.message}` : '' }));
             return;
           }
           if (first.code === 'credentials_expired') {
@@ -1332,13 +1404,13 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     } catch (error) {
       if (requiresPikpakOperationVerification(error) || requiresBaiduOperationVerification(error)) {
         showOperationVerification(error);
-      } else if (needsInPlaceWebAuthorization(error)) {
+      } else if (needsInPlaceWebAuthorization(error) && !uploadRetry?.afterWebSessionUpgrade) {
         // Keep the existing account and directory alive while the official
         // browser proves the requested action. `cloud_begin_authorization`
         // only opens the WebView; the saved session is replaced later, after
         // a successful `cloud_complete_authorization` validation.
         const detail = errorMessage(error, '');
-        queueAuthorizationContinuation(name, () => runOperation(name, action, refresh, retryUploadFailures, confirmDirectoryRefresh), t('cloud.webVerificationRequired', { name: operationLabel, detail: detail ? ` ${detail}` : '' }));
+        queueAuthorizationContinuation(name, () => runOperation(name, action, refresh, uploadRetry, confirmDirectoryRefresh), t('cloud.webVerificationRequired', { name: operationLabel, detail: detail ? ` ${detail}` : '' }));
       } else if (isCredentialExpired(error)) {
         setDirectory(null);
         setDirectoryState('expired');
@@ -1346,9 +1418,6 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
       } else if (isSessionRenewedRetryOperation(error)) {
         setOperation({ kind: 'error', message: t('cloud.operation.recoveredRetry', { name: operationLabel }) });
       } else {
-        if (provider === 'xunlei' && isXunleiVerificationFailure(error, 'metadata_expired')) {
-          setReauthorizationRequired(true);
-        }
         setOperation({ kind: 'error', message: t('cloud.operation.failed', { name: operationLabel, detail: errorMessage(error, t('common.retry')) }) });
       }
     } finally {
@@ -1456,29 +1525,38 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
     setUploadPickerOpen(true);
   }
 
-  async function uploadSelectedFiles(paths: string[]) {
+  async function uploadSelectedFiles(paths: string[], parentId = currentDirectoryId, expectedAccountId?: string) {
     await runOperation('上传', async () => {
       setUploadResult(null);
       setUploadControlError(null);
       latestUploadProgress.current = null;
       let acceptingProgress = true;
       try {
-        return await client.uploadCloudFiles!(provider, currentDirectoryId, paths, progress => {
+        const receive = (progress: CloudUploadProgress) => {
           if (!acceptingProgress || progress.provider !== provider) return;
           latestUploadProgress.current = progress;
           if (['completed', 'failed', 'cancelled', 'cancelling'].includes(progress.phase)) setUploadControlError(null);
           setOperation(current => current?.kind === 'working' ? { ...current, uploadProgress: progress } : current);
-        });
+        };
+        return expectedAccountId
+          ? await client.uploadCloudFiles!(provider, parentId, paths, receive, expectedAccountId)
+          : await client.uploadCloudFiles!(provider, parentId, paths, receive);
       } finally {
         acceptingProgress = false;
         latestUploadProgress.current = null;
       }
-    }, true, (failures) => {
-      const indexed = failures
-        .map((failure) => failure.inputIndex)
-        .filter((index): index is number => typeof index === 'number' && Number.isInteger(index) && index >= 0 && index < paths.length);
-      const retryPaths = indexed.length === failures.length ? indexed.map((index) => paths[index]) : paths;
-      return () => uploadSelectedFiles(retryPaths);
+    }, true, {
+      afterWebSessionUpgrade: !!expectedAccountId,
+      failedPaths(failures) {
+        const indexed = failures.map(failure => failure.inputIndex)
+          .filter((index): index is number => typeof index === 'number' && Number.isInteger(index) && index >= 0 && index < paths.length);
+        if (failures.some(failure => failure.code === 'baidu_upload_web_session_required')) {
+          if (!activeAccount || expectedAccountId || indexed.length !== failures.length || new Set(indexed).size !== indexed.length) return undefined;
+          return () => uploadSelectedFiles(indexed.map(index => paths[index]), parentId, activeAccount.id);
+        }
+        const retryPaths = indexed.length === failures.length ? indexed.map(index => paths[index]) : paths;
+        return () => uploadSelectedFiles(retryPaths, parentId);
+      },
     });
   }
 
@@ -1528,7 +1606,7 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   // Keep only the failed shares selected so the next attempt retries just them.
   function reportPartialShareCancel(outcome: ReturnType<typeof normalizeShareCancelOutcome>) {
     if (!outcome.failures.length) return;
-    const detail = [...new Set(outcome.failures.map(failure => failure.message))].slice(0, 3).join('; ');
+    const detail = [...new Set(outcome.failures.map(failure => errorMessage(failure, failure.message)))].slice(0, 3).join('; ');
     setOperation({ kind: 'error', message: t('cloud.share.cancelPartial', { succeeded: outcome.cancelled.length, failed: outcome.failures.length, detail }) });
     setSelectedIds(failedShareItemIds(outcome.failures));
   }
@@ -1649,6 +1727,13 @@ export function CloudManager({ provider, descriptor, client = unavailableClient,
   function logoutConfirmation() {
     return pendingLogout && <div className="cloud-confirm-backdrop"><section className="cloud-trash-confirm" role="alertdialog" aria-modal="true" aria-label={t('cloud.confirmAction', { action: logoutLabel })}><h3>{t('cloud.confirmAction', { action: logoutLabel })}</h3><p>{t('cloud.logoutWarning')}</p><button className="secondary" onClick={() => setPendingLogout(false)}>{t('dialog.cancel')}</button><button className="danger-button" onClick={() => { setPendingLogout(false); void runOperation(logoutLabel, async () => {
       await client.logoutCloud(provider);
+      directoryRequestSequence.current += 1;
+      authorizationGeneration.current += 1;
+      webAuthorizationActive.current = false;
+      setWebAuthorization(null);
+      pendingAuthorizationAction.current = null;
+      setPendingAuthorizationName(null);
+      setReauthorizationRequired(false);
       passwordFieldsEdited.current = false;
       passwordInputVersion.current += 1;
       setUsername('');

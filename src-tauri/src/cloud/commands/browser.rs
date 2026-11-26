@@ -1,5 +1,21 @@
 use super::*;
 
+// A failed IPC connection or local deadline does not establish that a provider rejected the login.
+pub(crate) fn browser_unavailable() -> QuarkError {
+    QuarkError::Transport("连接失败".into())
+}
+
+fn browser_timeout() -> QuarkError {
+    QuarkError::Transport("连接超时".into())
+}
+
+fn browser_receive_error(error: std::sync::mpsc::RecvTimeoutError) -> QuarkError {
+    match error {
+        std::sync::mpsc::RecvTimeoutError::Timeout => browser_timeout(),
+        std::sync::mpsc::RecvTimeoutError::Disconnected => browser_unavailable(),
+    }
+}
+
 pub(crate) struct TianyiBrowserValidationTransport<'a, T: CloudHttpTransport> {
     pub(crate) window: &'a tauri::WebviewWindow,
     pub(crate) native: &'a T,
@@ -166,7 +182,7 @@ pub(crate) fn tianyi_browser_send(
             .get_webview_window(window.label())
             .is_none()
         {
-            return Err(QuarkError::WebAuthorizationRequired);
+            return Err(browser_unavailable());
         }
         match web_storage_tokens(window, &script) {
             Ok(state) if state["done"].as_bool() == Some(true) => {
@@ -193,7 +209,7 @@ pub(crate) fn tianyi_browser_send(
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    Err(QuarkError::WebAuthorizationRequired)
+    Err(browser_timeout())
 }
 
 #[cfg(test)]
@@ -296,8 +312,9 @@ fn capture_persistent_authorization(
     )
     .visible(false)
     .data_directory(authorization_profile_directory(app, provider)?)
-    .on_page_load(move |_, payload| {
-        if payload.event() == PageLoadEvent::Finished {
+    .on_page_load(move |window, payload| {
+        if payload.event() == PageLoadEvent::Finished
+            && record_authorization_page_finished(&window, provider, payload.url()) {
             let _ = loaded.try_send(());
         }
     });
@@ -312,11 +329,11 @@ fn capture_persistent_authorization(
     }
     let window = builder
         .build()
-        .map_err(|_| CloudError::WebAuthorizationRequired)?;
+        .map_err(|_| browser_unavailable())?;
     let result = (|| {
         ready
             .recv_timeout(std::time::Duration::from_secs(15))
-            .map_err(|_| CloudError::WebAuthorizationRequired)?;
+            .map_err(browser_receive_error)?;
         let temporary = MemoryCredentialStore::default();
         // Tianyi's browser candidate and signed App credentials are separate
         // transports for the same account. Seed only the isolated validation
@@ -330,7 +347,7 @@ fn capture_persistent_authorization(
         let mut driver = ProviderRegistry::global().driver(provider, &temporary, http);
         let recipe = driver.auth().web_authorization_recipe();
         let input = crate::cloud::driver::WebAuthorizationInput {
-            cookies: browser_cookies(&window, web_session_cookie_urls(provider))?,
+            cookies: browser_authorization_cookies(&window, provider)?,
             storage: match recipe.token_script {
                 Some(script) => {
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
@@ -367,7 +384,7 @@ fn capture_persistent_authorization(
             driver.auth().complete_web(&input)?
         };
         if account.id != expected {
-            return Err(CloudError::WebAuthorizationRequired);
+            return Err(CloudError::AccountMismatch);
         }
         if provider == CloudProvider::Baidu
             && phase == auth_supervisor::RecoveryPhase::BaiduUploadToken
@@ -454,7 +471,10 @@ pub(crate) fn browser_password_login(
     expected_account: Option<&str>,
     challenge: bool,
 ) -> Result<CloudAccount, QuarkError> {
-    if !browser_login::supports_browser_password(provider) {
+    // Password recovery can show an interactive verification window. An
+    // Agent-started host must wait for the user to open the desktop first.
+    if crate::agent_runtime::is_background_host(app)
+        || !browser_login::supports_browser_password(provider) {
         return Err(QuarkError::WebAuthorizationRequired);
     }
     let label = format!("cloud-password-{}", provider.key());
@@ -495,6 +515,7 @@ pub(crate) fn browser_password_login(
         if payload.event() == PageLoadEvent::Finished
             && browser_login::trusted_login_url(provider, payload.url())
         {
+            record_authorization_page_finished(&window, provider, payload.url());
             if ProviderRegistry::global()
                 .get(provider)
                 .browser_profile_owner
@@ -521,13 +542,14 @@ pub(crate) fn browser_password_login(
         if background_ui_test {
             QuarkError::Provider("后台验证未能创建网盘登录窗口".into())
         } else {
-            QuarkError::WebAuthorizationRequired
+            browser_unavailable()
         }
     })?;
     let started = std::time::Instant::now();
     let result = (|| {
         let mut shown = challenge || background_ui_test;
         let mut last_notice = String::new();
+        let mut deadline_error = if challenge { QuarkError::CaptchaRequired } else { browser_timeout() };
         while started.elapsed() < std::time::Duration::from_secs(180) {
             if app.get_webview_window(&label).is_none() {
                 return Err(if background_ui_test {
@@ -539,7 +561,7 @@ pub(crate) fn browser_password_login(
             if !shown && started.elapsed() >= std::time::Duration::from_secs(12) {
                 window
                     .show()
-                    .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+                    .map_err(|_| browser_unavailable())?;
                 let _ = window.set_focus();
                 shown = true;
             }
@@ -549,7 +571,7 @@ pub(crate) fn browser_password_login(
             // returning here closes the official password window before its
             // injected login script can complete.
             let cookies =
-                browser_cookies(&window, web_session_cookie_urls(provider)).unwrap_or_default();
+                browser_authorization_cookies(&window, provider).unwrap_or_default();
             let browser_context = if ProviderRegistry::global().get(provider).browser_context {
                 tianyi_browser_context(&window).ok()
             } else {
@@ -656,11 +678,14 @@ pub(crate) fn browser_password_login(
                         }
                         last_notice = notice;
                     }
+                    if matches!(error, QuarkError::CaptchaRequired | QuarkError::WebAuthorizationRequired) {
+                        deadline_error = error;
+                    }
                 }
             }
             std::thread::sleep(std::time::Duration::from_millis(1000));
         }
-        Err(QuarkError::WebAuthorizationRequired)
+        Err(deadline_error)
     })();
     // Retain a failed window only in the hidden diagnostic harness so it can
     // report the official page's non-sensitive progress flags before process
@@ -744,7 +769,7 @@ pub(crate) fn browser_cookies(
     #[cfg(target_os = "macos")]
     let available = window
         .cookies()
-        .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+        .map_err(|_| browser_unavailable())?;
     for url in urls {
         #[cfg(target_os = "macos")]
         let cookies = {
@@ -765,7 +790,7 @@ pub(crate) fn browser_cookies(
         #[cfg(not(target_os = "macos"))]
         let cookies = window
             .cookies_for_url(url.parse().map_err(|_| QuarkError::InvalidResponse)?)
-            .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+            .map_err(|_| browser_unavailable())?;
         for cookie in cookies {
             values.insert(cookie.name().to_owned(), cookie.value().to_owned());
         }
@@ -800,6 +825,30 @@ fn cookie_matches_provider_url(
     url.path() == path
         || (url.path().starts_with(path)
             && (path.ends_with('/') || url.path().as_bytes().get(path.len()) == Some(&b'/')))
+}
+
+#[cfg(test)]
+mod browser_runtime_errors {
+    use super::*;
+
+    #[test]
+    fn unavailable_browser_and_callback_timeout_preserve_authorization() {
+        use std::sync::mpsc::RecvTimeoutError;
+        for error in [
+            browser_unavailable(),
+            browser_receive_error(RecvTimeoutError::Timeout),
+            browser_receive_error(RecvTimeoutError::Disconnected),
+        ] {
+            let code = cloud_failure_code(&error);
+            assert_eq!(code, "network_error");
+            assert!(!requires_cloud_reauthorization_failure(Some(code)));
+            assert!(!should_attempt_silent_provider_recovery(&error));
+            assert!(!browser_login::can_fallback_to_browser(&error));
+        }
+        assert!(requires_cloud_reauthorization_failure(Some(
+            cloud_failure_code(&QuarkError::WebAuthorizationRequired)
+        )));
+    }
 }
 
 #[cfg(test)]
@@ -845,10 +894,10 @@ pub(crate) fn web_storage_tokens(
         .eval_with_callback(script, move |value| {
             let _ = tx.send(value);
         })
-        .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+        .map_err(|_| browser_unavailable())?;
     let raw = rx
         .recv_timeout(std::time::Duration::from_secs(15))
-        .map_err(|_| QuarkError::WebAuthorizationRequired)?;
+        .map_err(browser_receive_error)?;
     web_value(&raw)
 }
 
@@ -876,4 +925,126 @@ pub(crate) fn allows_cloud_authorization_popup(url: &url::Url) -> bool {
 
 pub(crate) fn is_baidu_authorization_page(url: &url::Url) -> bool {
     baidu::is_authorization_page(url)
+}
+
+fn is_baidu_drive_page(url: &url::Url) -> bool {
+    url.scheme() == "https" && url.host_str() == Some("pan.baidu.com")
+        && url.port_or_known_default() == Some(443)
+        && matches!(url.path(), "/disk/main" | "/disk/home")
+}
+
+/// The login provider can set its account cookie before Pan has finished its
+/// own redirect. Only a finished drive document can supply the saved session.
+pub(crate) fn record_authorization_page_finished(
+    window: &tauri::WebviewWindow,
+    provider: CloudProvider,
+    url: &url::Url,
+) -> bool {
+    if provider != CloudProvider::Baidu { return true; }
+    if !is_baidu_drive_page(url) { return false; }
+    window.eval("window.__versaDownBaiduDrivePageFinished = true").is_ok()
+}
+
+pub(crate) fn browser_authorization_cookies(
+    window: &tauri::WebviewWindow,
+    provider: CloudProvider,
+) -> Result<Vec<String>, CloudError> {
+    let page = if provider == CloudProvider::Baidu {
+        web_storage_tokens(window, r#"(() => ({
+            url: location.origin + location.pathname,
+            top: window === window.top,
+            complete: document.readyState === 'complete',
+            loaded: window.__versaDownBaiduDrivePageFinished === true
+        }))()"#)?
+    } else { serde_json::Value::Null };
+    with_browser_authorization_page(provider, &page, || {
+        let cookies = browser_cookies(window, web_session_cookie_urls(provider))?;
+        if provider == CloudProvider::Baidu
+            && std::env::var("VERSADOWN_BAIDU_DIAGNOSTIC").as_deref() == Ok("1") {
+            let present = |name: &str| cookies.iter().any(|pair| pair.split_once('=').is_some_and(|(key, value)| key == name && !value.is_empty()));
+            eprintln!("[baidu-login] ready_pan bduss={} bfess={} stoken={} panpsc={}",
+                present("BDUSS"), present("BDUSS_BFESS"), present("STOKEN"), present("PANPSC"));
+        }
+        Ok(cookies)
+    })
+}
+
+fn with_browser_authorization_page<T>(
+    provider: CloudProvider,
+    page: &serde_json::Value,
+    capture: impl FnOnce() -> Result<T, CloudError>,
+) -> Result<T, CloudError> {
+    if provider == CloudProvider::Baidu {
+        let ready = page["url"].as_str().and_then(|value| url::Url::parse(value).ok())
+            .is_some_and(|url| is_baidu_drive_page(&url))
+            && page["loaded"] == true && page["complete"] == true && page["top"] == true;
+        if !ready {
+            if std::env::var("VERSADOWN_BAIDU_DIAGNOSTIC").as_deref() == Ok("1") {
+                eprintln!("[baidu-login] waiting_pan");
+            }
+            return Err(CloudError::AuthorizationPending);
+        }
+    }
+    capture()
+}
+
+#[cfg(test)]
+mod baidu_page_completion {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct AcceptingAccount(AtomicUsize);
+    impl CloudHttpTransport for AcceptingAccount {
+        fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, CloudError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(CloudHttpResponse {
+                status: 200,
+                body: if request.url.contains("method=uinfo") {
+                    r#"{"errno":0,"uk":"fixture-owner"}"#.into()
+                } else { r#"{"errno":0,"list":[]}"#.into() },
+                ..Default::default()
+            })
+        }
+    }
+
+    #[test]
+    fn baidu_password_snapshot_waits_for_the_official_drive_page_before_saving() {
+        let provider = CloudProvider::Baidu;
+        let store = MemoryCredentialStore::default();
+        store.save(provider.key(), b"previous").unwrap();
+        let http = AcceptingAccount(AtomicUsize::new(0));
+        let finish = |page: serde_json::Value| with_browser_authorization_page(provider, &page, || {
+            finalize_baidu_web_authorization(
+                ProviderRegistry::global().get(provider),
+                baidu::BaiduSession::cookie("BDUSS=fixture"),
+                &store, &http,
+            )
+        });
+        for page in [
+            serde_json::json!({"url":"https://passport.baidu.com/v2/api/login","loaded":true,"complete":true,"top":true}),
+            serde_json::json!({"url":"https://pan.baidu.com/","loaded":true,"complete":true,"top":true}),
+            serde_json::json!({"url":"https://pan.baidu.com/disk/main","loaded":false,"complete":true,"top":true}),
+            serde_json::json!({"url":"https://pan.baidu.com/disk/main","loaded":true,"complete":false,"top":true}),
+            serde_json::json!({"url":"https://pan.baidu.com/disk/main","loaded":true,"complete":true,"top":false}),
+            serde_json::json!({"url":"https://pan.baidu.com.evil.invalid/disk/main","loaded":true,"complete":true,"top":true}),
+            serde_json::json!({"url":"http://pan.baidu.com/disk/main","loaded":true,"complete":true,"top":true}),
+            serde_json::json!({"url":"https://pan.baidu.com:444/disk/main","loaded":true,"complete":true,"top":true}),
+            serde_json::json!({"url":"https://pan.baidu.com/disk/help","loaded":true,"complete":true,"top":true}),
+        ] {
+            assert!(matches!(finish(page), Err(CloudError::AuthorizationPending)));
+            assert_eq!(store.load(provider.key()).unwrap().unwrap(), b"previous");
+        }
+        assert_eq!(http.0.load(Ordering::SeqCst), 0);
+        for path in ["/disk/main", "/disk/home"] {
+            let page = serde_json::json!({"url":format!("https://pan.baidu.com{path}"),"loaded":true,"complete":true,"top":true});
+            assert_eq!(finish(page).unwrap().id, "fixture-owner");
+        }
+        assert_eq!(http.0.load(Ordering::SeqCst), 4);
+        assert_ne!(store.load(provider.key()).unwrap().unwrap(), b"previous");
+    }
+
+    #[test]
+    fn other_provider_cookie_capture_keeps_its_existing_contract() {
+        assert_eq!(with_browser_authorization_page(CloudProvider::Quark, &serde_json::Value::Null, || Ok("cookies")).unwrap(), "cookies");
+    }
 }

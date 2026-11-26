@@ -219,16 +219,19 @@ impl CloudHttpTransport for RecordingHttp {
 struct IsolatedState {
     replies: Mutex<Vec<CloudHttpResponse>>,
     requests: Mutex<Vec<CloudHttpRequest>>,
+    snapshot_requests: Mutex<Vec<CloudHttpRequest>>,
 }
 
 struct IsolationRequiredHttp(Arc<IsolatedState>);
 struct IsolatedDelegate(Arc<IsolatedState>);
+struct SnapshotValidationHttp(Arc<IsolatedState>);
 
 impl IsolationRequiredHttp {
     fn new(replies: Vec<CloudHttpResponse>) -> Self {
         Self(Arc::new(IsolatedState {
             replies: Mutex::new(replies.into_iter().rev().collect()),
             requests: Mutex::new(Vec::new()),
+            snapshot_requests: Mutex::new(Vec::new()),
         }))
     }
 }
@@ -246,6 +249,11 @@ impl CloudHttpTransport for IsolationRequiredHttp {
 }
 
 impl CloudHttpTransport for IsolatedDelegate {
+    fn isolated_session(&self) -> Result<Option<Box<dyn CloudHttpTransport>>, QuarkError> {
+        // Persisted cookies must also work without the managed login jar.
+        Ok(Some(Box::new(SnapshotValidationHttp(Arc::clone(&self.0)))))
+    }
+
     fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
         self.0.requests.lock().unwrap().push(request);
         self.0
@@ -270,6 +278,18 @@ impl CloudHttpTransport for IsolatedDelegate {
             cookies.push("PANPSC=validation-cookie".into());
         }
         Ok(cookies)
+    }
+}
+
+impl CloudHttpTransport for SnapshotValidationHttp {
+    fn send(&self, request: CloudHttpRequest) -> Result<CloudHttpResponse, QuarkError> {
+        self.0.snapshot_requests.lock().unwrap().push(request);
+        self.0
+            .replies
+            .lock()
+            .unwrap()
+            .pop()
+            .ok_or_else(|| QuarkError::Transport("unexpected snapshot request".into()))
     }
 }
 
@@ -1295,9 +1315,15 @@ fn baidu_password_login_uses_an_isolated_transport_session() {
     assert!(session.cookie.contains("BDUSS=session"));
     assert!(session.cookie.contains("PANPSC=validation-cookie"));
     let requests = http.0.requests.lock().unwrap();
-    assert_eq!(requests.len(), 9);
+    assert_eq!(requests.len(), 7);
     assert!(!requests[5].headers.contains_key("Cookie"));
     assert!(!requests[6].headers.contains_key("Cookie"));
+    let snapshot_requests = http.0.snapshot_requests.lock().unwrap();
+    assert_eq!(snapshot_requests.len(), 2);
+    for request in snapshot_requests.iter() {
+        assert_eq!(request.headers["Cookie"], session.cookie);
+    }
+    assert!(http.0.replies.lock().unwrap().is_empty());
 }
 
 #[test]
@@ -1404,6 +1430,42 @@ fn baidu_uploads_a_local_file_then_commits_without_retaining_the_transfer_url() 
             .all(|request| !request.url.contains("upload-1")),
         "upload id must never be persisted in a follow-up URL outside the in-flight transfer"
     );
+}
+
+#[test]
+fn baidu_agent_upload_refuses_replacement_in_both_precreate_and_commit() {
+    let mut input = tempfile::Builder::new().suffix(".txt").tempfile().unwrap();
+    input.write_all(b"agent file").unwrap();
+    let hash = format!("{:x}", md5::compute(b"agent file"));
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"result":{"bdstoken":"fresh-token"}}"#,
+        r#"{"errno":0,"return_type":1,"uploadid":"upload-1","block_list":[0]}"#,
+        r#"{"errno":0,"fs_id":7,"path":"/new.txt"}"#,
+    ]);
+    let upload = UploadRecordingHttp::sequence(&[&format!(r#"{{"md5":"{hash}"}}"#)]);
+    BaiduClient::new(BaiduSession::cookie("BDUSS=local"), &http)
+        .upload_file_no_replace("/", input.path(), &upload).unwrap();
+    let requests = http.requests();
+    for request in requests.iter().filter(|request| request.url.contains("/api/precreate") || request.url.contains("/api/create")) {
+        let body = request.body.as_deref().unwrap();
+        assert!(url::form_urlencoded::parse(body.as_bytes()).any(|(key, value)| key == "rtype" && value == "0"));
+    }
+    assert_eq!(requests.iter().filter(|request| request.url.contains("/api/precreate") || request.url.contains("/api/create")).count(), 2);
+}
+
+#[test]
+fn baidu_agent_upload_conflict_does_not_fall_back_to_overwrite_or_send_file_bytes() {
+    let mut input = tempfile::NamedTempFile::new().unwrap();
+    input.write_all(b"agent file").unwrap();
+    let http = RecordingHttp::sequence(&[
+        r#"{"errno":0,"result":{"bdstoken":"fresh-token"}}"#,
+        r#"{"errno":-8,"errmsg":"file exists"}"#,
+    ]);
+    let upload = UploadRecordingHttp::sequence(&[]);
+    assert!(BaiduClient::new(BaiduSession::cookie("BDUSS=local"), &http)
+        .upload_file_no_replace("/", input.path(), &upload).is_err());
+    assert!(upload.requests().is_empty());
+    assert_eq!(http.requests().len(), 2);
 }
 
 #[test]

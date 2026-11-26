@@ -250,14 +250,11 @@ impl ProviderAuth for UcDriver<'_> {
 impl UploadOps for UcDriver<'_> {
     fn upload(
         &mut self,
-        s: &CloudState,
         upload_http: &dyn UploadHttp,
         parent_id: &str,
         path: &Path,
     ) -> Result<CloudFile, CloudError> {
         let h = UploadHttpRef(upload_http);
-        s.with_upload_session(CloudProvider::Uc, &h, |store| {
-            with_uc_client(store, &h, |client| client.upload_file(parent_id, path, &h))
-        })
+        with_uc_client(&self.store, &h, |client| client.upload_file(parent_id, path, &h))
     }
 }

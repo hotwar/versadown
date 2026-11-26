@@ -11,6 +11,9 @@ try {
     New-Item -ItemType Directory -Force -Path $binDir | Out-Null
     $pnpmPath = Join-Path $binDir 'pnpm.cmd'
     Set-Content -LiteralPath $pnpmPath -Value "@echo off`r`necho 10.0.0`r`nexit /b 0" -NoNewline
+    $fallbackPnpm = Join-Path $testRoot '.cache\codex-runtimes\codex-primary-runtime\dependencies\bin\fallback\pnpm.cmd'
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $fallbackPnpm) | Out-Null
+    Set-Content -LiteralPath $fallbackPnpm -Value "@echo off`r`necho 11.0.0`r`nexit /b 0" -NoNewline
     $env:USERPROFILE = $testRoot
     $env:RUSTUP_HOME = Join-Path $originalUserProfile '.rustup'
     $cargoBinDir = Join-Path $originalUserProfile '.cargo\bin'
@@ -28,13 +31,18 @@ try {
         throw 'Expected the explicit MSVC environment path to be selected.'
     }
 
-    Write-Host 'PASS: CI-provided pnpm and MSVC paths are discovered.'
+    Write-Host 'PASS: PATH pnpm takes priority over bundled fallback; explicit MSVC path is discovered.'
 } finally {
     $env:Path = $originalPath
     $env:USERPROFILE = $originalUserProfile
     $env:VCVARS_PATH = $originalVcvarsPath
     $env:RUSTUP_HOME = $originalRustupHome
     if (Test-Path -LiteralPath $testRoot) {
+        $resolvedTestRoot = [System.IO.Path]::GetFullPath($testRoot)
+        $tempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
+        if (-not $resolvedTestRoot.StartsWith($tempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Refusing to remove a test directory outside the temporary root.'
+        }
         Remove-Item -LiteralPath $testRoot -Recurse -Force
     }
 }

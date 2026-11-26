@@ -469,6 +469,7 @@ impl EngineRuntime {
             .into_iter()
             .filter(|task| {
                 task.aria_gid.is_some()
+                    && !self.store.cli_dispatch_pending(task.id).unwrap_or(true)
                     && !crate::cloud::download_dispatch::is_cloud_download_source(&task.source)
                     && !crate::xunlei_native::is_native_gid(task.aria_gid.as_deref())
                     && matches!(task.status, TaskStatus::Queued | TaskStatus::Downloading)
@@ -590,6 +591,13 @@ impl EngineRuntime {
             stat.num_stopped_total = stat.num_stopped_total.saturating_add(ftp.num_stopped_total);
         }
         Ok(stat)
+    }
+
+    pub(crate) async fn dispatch_cli_ftp_intent(
+        self: &Arc<Self>, intent: &crate::store::CliDispatchIntent,
+        authorize: &(dyn Fn(&std::path::Path) -> bool + Send + Sync),
+    ) -> Result<DownloadTask, crate::ftp::FtpDownloadError> {
+        self.ftp.dispatch_cli_intent(intent, authorize).await
     }
 
     pub async fn submit_uri_with_options(
@@ -900,6 +908,7 @@ impl EngineRuntime {
             return;
         };
         for mut task in tasks {
+            if self.store.cli_dispatch_pending(task.id).unwrap_or(true) { continue; }
             if matches!(task.kind.as_str(), "ftp" | "web_video") {
                 continue;
             }

@@ -519,8 +519,49 @@ fn verify_failed_password_profile_reset_after_restart(provider: CloudProvider) {
     use versadown_lib::cloud::{
         prepare_password_account_login, reset_password_profile_if_required, SystemCredentialStore,
     };
+    // A TempDir also creates an independent system-credential namespace. Remove
+    // its entries on assertion failures as well as success; never remove the
+    // shared macOS protector key or credentials belonging to the real app.
+    struct TestCredentials<'a> {
+        store: SystemCredentialStore,
+        provider: CloudProvider,
+        root: &'a std::path::Path,
+        cleaned: bool,
+    }
+    impl TestCredentials<'_> {
+        fn cleanup(&mut self) -> Result<(), QuarkError> {
+            remove_password_credential(&self.store, self.provider)?;
+            self.store.remove(self.provider.key())?;
+            self.store.remove(&format!("cloud-password-profile-reset-{}", self.provider.key()))?;
+            #[cfg(windows)]
+            {
+                use sha2::{Digest, Sha256};
+                // This matches SystemCredentialStore's namespace derivation for
+                // this owned temporary root, not the production data directory.
+                let root_id = format!("{:x}", Sha256::digest(self.root.to_string_lossy().as_bytes()));
+                let service = format!("com.versadown.desktop.{}", &root_id[..24]);
+                let key = keyring::Entry::new(&service, "cloud-session-key-v1").map_err(|_| QuarkError::Storage)?;
+                match key.delete_credential() {
+                    Ok(()) | Err(keyring::Error::NoEntry) => (),
+                    Err(_) => return Err(QuarkError::Storage),
+                }
+            }
+            #[cfg(not(windows))]
+            let _ = self.root;
+            self.cleaned = true;
+            Ok(())
+        }
+    }
+    impl Drop for TestCredentials<'_> {
+        fn drop(&mut self) {
+            if !self.cleaned && self.cleanup().is_err() {
+                eprintln!("Unable to clean the isolated password-profile test credentials");
+            }
+        }
+    }
     let root = tempfile::tempdir().unwrap();
     let store = SystemCredentialStore::new(root.path().to_owned()).unwrap();
+    let mut cleanup = TestCredentials { store: store.clone(), provider, root: root.path(), cleaned: false };
     save_password_credential(
         &store,
         CloudPasswordCredential::new(provider, "old-account", "alice", "old-secret"),
@@ -542,10 +583,20 @@ fn verify_failed_password_profile_reset_after_restart(provider: CloudProvider) {
     );
     let marker = format!("cloud-password-profile-reset-{}", provider.key());
     assert_eq!(reopened.load(&marker).unwrap(), Some(b"1".to_vec()));
-    assert_ne!(
-        std::fs::read(root.path().join(format!("{marker}.bin"))).unwrap(),
-        b"1"
-    );
+    // Windows/Linux keep the marker in the system credential service; macOS
+    // stores encrypted SQLite rows. Persistence must not require a .bin file,
+    // and any local credential payload must not expose the test's plaintext.
+    for entry in std::fs::read_dir(root.path()).unwrap() {
+        let entry = entry.unwrap();
+        if entry.file_type().unwrap().is_file() {
+            let bytes = std::fs::read(entry.path()).unwrap();
+            assert_ne!(bytes, b"1", "a local reset marker must not be plaintext");
+            for secret in [b"old-secret".as_slice(), b"old-session".as_slice()] {
+                assert!(!bytes.windows(secret.len()).any(|window| window == secret),
+                    "local credential storage must not expose plaintext secrets");
+            }
+        }
+    }
     // A real successful reset is the sole path allowed to remove the marker.
     let reset_calls = Cell::new(0);
     reset_password_profile_if_required(&reopened, provider, false, || {
@@ -558,6 +609,7 @@ fn verify_failed_password_profile_reset_after_restart(provider: CloudProvider) {
     // Until Bob logs in successfully, Alice remains the saved login, so a new
     // attempt for Bob still isolates the previous profile.
     assert!(prepare_password_account_login(&reopened, provider, "bob").unwrap());
+    cleanup.cleanup().unwrap();
 }
 
 #[test]

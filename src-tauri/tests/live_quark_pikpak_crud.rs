@@ -94,7 +94,7 @@ fn error_kind(error: &CloudError) -> &'static str {
         CloudError::AccountMismatch => "account-mismatch",
         CloudError::AuthorizationExpired => "authorization-expired",
         CloudError::WebAuthorizationRequired => "web-authorization-required",
-        CloudError::BaiduOperationVerificationRequired => "baidu-operation-verification-required",
+        CloudError::BaiduDriveVerificationRequired | CloudError::BaiduOperationVerificationRequired => "baidu-operation-verification-required",
         CloudError::CaptchaRequired => "captcha-required",
         CloudError::PikpakRegionalMembershipRestricted => "regional-membership-restricted",
         CloudError::PikpakOperationVerificationRequired(_) => "operation-verification-required",
@@ -110,6 +110,11 @@ fn error_kind(error: &CloudError) -> &'static str {
         CloudError::Provider(_) => "provider",
         CloudError::InvalidInput(_) => "invalid-input",
         CloudError::UploadUnavailable => "upload-unavailable",
+        CloudError::XunleiVerificationUnavailable(_) => "xunlei-verification-unavailable",
+        CloudError::BaiduUploadAuthorizationRequired(_) => "baidu-upload-authorization-required",
+        CloudError::XunleiNativeDownload(_) => "xunlei-native-download-error",
+        CloudError::BaiduTransferPending => "baidu-transfer-pending",
+        CloudError::ShareTransferDownloadUnavailable => "transfer-saved-download-unavailable",
         CloudError::ProviderUnsupported => "provider-unsupported",
         CloudError::XunleiVerificationUnavailable(_) => "xunlei-verification-unavailable",
         CloudError::BaiduUploadAuthorizationRequired(_) => "baidu-upload-authorization-required",
@@ -117,6 +122,8 @@ fn error_kind(error: &CloudError) -> &'static str {
         CloudError::BaiduTransferPending => "baidu-transfer-pending",
         CloudError::ShareTransferDownloadUnavailable => "transfer-saved-download-unavailable",
         CloudError::Mega(_) => "mega-link-error",
+        CloudError::BaiduUploadPrecreateRejected { .. } => "baidu-upload-precreate-rejected",
+        CloudError::BaiduUploadWebSessionRequired => "baidu-upload-web-session-required",
     }
 }
 
@@ -175,9 +182,7 @@ fn upload(
     parent: &str,
     path: &Path,
 ) -> LiveResult<CloudFile> {
-    let mut driver = ProviderRegistry::global().driver(provider, &state.store, http);
-    driver
-        .upload(state, http, parent, path)
+    state.upload_file(provider, http, parent, path)
         .map_err(|error| failure(format!("{} upload: {}", provider.key(), error_kind(&error))))
 }
 

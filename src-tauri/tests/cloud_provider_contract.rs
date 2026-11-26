@@ -15,6 +15,42 @@ use std::{
 };
 
 #[test]
+fn provider_upload_uses_the_bound_snapshot_once_after_live_credentials_change() {
+    use std::sync::Arc;
+    use versadown_lib::cloud::{auth_supervisor::SessionSnapshot, driver::*, CloudFile, CloudError, ProviderRegistry};
+    struct Factory(Arc<Mutex<Vec<Vec<u8>>>>);
+    struct BoundUpload<'a> { store: &'a dyn CredentialStore, calls: Arc<Mutex<Vec<Vec<u8>>>> }
+    impl DriveOps for BoundUpload<'_> {}
+    impl DownloadOps for BoundUpload<'_> {}
+    impl ShareOps for BoundUpload<'_> {}
+    impl ProviderAuth for BoundUpload<'_> {}
+    impl UploadOps for BoundUpload<'_> {
+        fn upload(&mut self, _: &dyn UploadHttp, parent: &str, _: &std::path::Path) -> Result<CloudFile, CloudError> {
+            self.calls.lock().unwrap().push(self.store.load("quark")?.unwrap());
+            Ok(CloudFile { id: "new-file".into(), parent_id: parent.into(), name: "input.txt".into(),
+                kind: "file".into(), size: Some(1), modified_at: None })
+        }
+    }
+    impl ProviderBackend for BoundUpload<'_> {}
+    impl ProviderDriverFactory for Factory {
+        fn create<'a>(&self, _: CloudProvider, store: &'a dyn CredentialStore, _: &'a dyn CloudHttpTransport) -> Box<dyn ProviderBackend + 'a> {
+            Box::new(BoundUpload { store, calls: self.0.clone() })
+        }
+    }
+    let live = MemoryCredentialStore::default();
+    live.save("quark", b"verified-account-a").unwrap();
+    let snapshot = SessionSnapshot::new(&live, CloudProvider::Quark).unwrap();
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let registry = ProviderRegistry::with_driver_factory(Arc::new(Factory(calls.clone())));
+    let http = versadown_lib::cloud::ReqwestTransport::new().unwrap();
+    let mut driver = registry.driver(CloudProvider::Quark, &snapshot, &http);
+    live.save("quark", b"different-account-b").unwrap();
+    driver.upload_no_replace(&http, "approved-folder", std::path::Path::new("input.txt")).unwrap();
+    assert_eq!(*calls.lock().unwrap(), vec![b"verified-account-a".to_vec()]);
+    assert_eq!(live.load("quark").unwrap().unwrap(), b"different-account-b");
+}
+
+#[test]
 fn baidu_and_quark_wait_for_web_login_without_persisting_an_empty_session() {
     use versadown_lib::cloud::{driver::WebAuthorizationInput, CloudAuthMethod, ProviderRegistry};
     struct NoNetwork;
@@ -298,7 +334,10 @@ fn seven_provider_contract_matrix_preserves_registry_authorization_and_sources()
             }),
             Err(CloudError::WebAuthorizationRequired)
         ));
-        let expected = if direct {
+        let expected = if provider == Baidu {
+            // Reuse Baidu's existing browser session before another login attempt.
+            vec!["profile", "refresh", "password"]
+        } else if direct {
             vec!["refresh", "password", "profile"]
         } else {
             vec!["refresh", "profile"]
@@ -491,7 +530,6 @@ fn capability_facade_dispatches_and_rejects_missing_operations_before_io() {
     impl UploadOps for RecordingDriver {
         fn upload(
             &mut self,
-            _state: &versadown_lib::cloud::commands::CloudState,
             _http: &dyn UploadHttp,
             parent: &str,
             path: &std::path::Path,
@@ -559,14 +597,10 @@ fn capability_facade_dispatches_and_rejects_missing_operations_before_io() {
         facade.copy_files(&["file".into()], "parent"),
         Err(CloudError::ProviderUnsupported)
     ));
-    let upload_root = tempfile::tempdir().unwrap();
-    let state =
-        versadown_lib::cloud::commands::CloudState::new(upload_root.path().into()).unwrap();
     let upload_http = versadown_lib::cloud::ReqwestTransport::new().unwrap();
     assert_eq!(
         facade
             .upload(
-                &state,
                 &upload_http,
                 "parent",
                 std::path::Path::new("file.bin")
@@ -599,7 +633,6 @@ fn capability_facade_dispatches_and_rejects_missing_operations_before_io() {
     ));
     assert!(matches!(
         unsupported.upload(
-            &state,
             &upload_http,
             "parent",
             std::path::Path::new("forbidden.bin")

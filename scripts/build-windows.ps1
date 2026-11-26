@@ -29,7 +29,9 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'build-tools.ps1')
 
 $profile = if ($Mode -eq 'Quick') { 'quick' } else { 'release' }
-$targetRoot = if ($Mode -eq 'Quick') {
+$targetRoot = if ($env:CARGO_TARGET_DIR) {
+    [System.IO.Path]::GetFullPath($env:CARGO_TARGET_DIR)
+} elseif ($Mode -eq 'Quick') {
     Join-Path $projectRoot '.tools\quick-target'
 } else {
     Join-Path $projectRoot '.tools\release-target'
@@ -40,6 +42,8 @@ $publishedDir = if ($Mode -eq 'Quick') {
     Join-Path $projectRoot 'artifacts'
 }
 $publishedBinary = Join-Path $publishedDir 'versadown.exe'
+$publishedCliBinary = Join-Path $publishedDir 'vd-cli.exe'
+$publishedMcpBinary = Join-Path $publishedDir 'vd-mcp-server.exe'
 $publishedSidecarDir = Join-Path $publishedDir 'binaries'
 $sidecarName = 'aria2-next-x86_64-pc-windows-msvc.exe'
 $sidecarSource = Join-Path $projectRoot "src-tauri\binaries\$sidecarName"
@@ -289,7 +293,7 @@ function Invoke-MsvcBuild {
         $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && set "VERSADOWN_FRONTEND_SIGNATURE={3}" && call "{4}" exec tauri build --bundles nsis --config .tools/video-bundle.config.json --runner "{5}"' -f $VcvVars, $TargetRoot, $incremental, $FrontendSignature, $PnpmCommand, $CargoCommand
     } elseif ($Profile -eq 'quick') {
         $manifest = Join-Path $projectRoot 'src-tauri\Cargo.toml'
-        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && set "VERSADOWN_FRONTEND_SIGNATURE={3}" && "{4}" build --manifest-path "{5}" --profile quick --features custom-protocol,gui-subsystem' -f $VcvVars, $TargetRoot, $incremental, $FrontendSignature, $CargoCommand, $manifest
+        $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && set "VERSADOWN_FRONTEND_SIGNATURE={3}" && "{4}" build --manifest-path "{5}" --profile quick --bin versadown --bin vd-cli --bin vd-mcp-server --features custom-protocol,gui-subsystem' -f $VcvVars, $TargetRoot, $incremental, $FrontendSignature, $CargoCommand, $manifest
     } else {
         $manifest = Join-Path $projectRoot 'src-tauri\Cargo.toml'
         $command = 'call "{0}" >nul && set "CARGO_TARGET_DIR={1}" && set "CARGO_INCREMENTAL={2}" && set "VERSADOWN_FRONTEND_SIGNATURE={3}" && "{4}" build --manifest-path "{5}" --release --features custom-protocol' -f $VcvVars, $TargetRoot, $incremental, $FrontendSignature, $CargoCommand, $manifest
@@ -313,7 +317,7 @@ function Assert-PublishedBinaryAvailable {
         [Parameter(Mandatory)]
         [string]$PublishedBinary,
 
-        [object[]]$Processes = @(Get-Process -Name 'versadown' -ErrorAction SilentlyContinue)
+        [object[]]$Processes = @(Get-Process -Name ([System.IO.Path]::GetFileNameWithoutExtension($PublishedBinary)) -ErrorAction SilentlyContinue)
     )
 
     $destination = [System.IO.Path]::GetFullPath($PublishedBinary)
@@ -323,6 +327,29 @@ function Assert-PublishedBinaryAvailable {
             throw "The published executable is running (PID $($existingProcess.Id)): $destination. Close it before starting the build."
         }
     }
+}
+
+function Publish-ConsoleBinary {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$BuiltBinary,
+
+        [Parameter(Mandatory)]
+        [string]$PublishedBinary
+    )
+
+    if (-not (Test-Path -LiteralPath $BuiltBinary -PathType Leaf)) {
+        throw "Publish input was not found: $BuiltBinary"
+    }
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $PublishedBinary) | Out-Null
+    $builtHash = Get-FileSha256 -Path $BuiltBinary
+    Copy-Item -LiteralPath $BuiltBinary -Destination $PublishedBinary -Force
+    $publishedHash = Get-FileSha256 -Path $PublishedBinary
+    if ($publishedHash -ne $builtHash) {
+        throw "Published executable hash did not match the build output: $PublishedBinary"
+    }
+    Write-Host "Published ($Mode): $PublishedBinary (SHA-256: $publishedHash)"
 }
 
 function Publish-BuildOutput {
@@ -379,6 +406,8 @@ if ($DryRun) {
     Write-Host "Cargo target: $targetRoot"
     Write-Host "Published executable: $publishedBinary"
     if ($Mode -eq 'Quick') {
+        Write-Host "Published CLI executable: $publishedCliBinary"
+        Write-Host "Published MCP executable: $publishedMcpBinary"
         Write-Host 'Frontend: rebuild only when its source signature changes.'
         Write-Host 'Rust: recompile the versadown package when its source signature changes.'
     } elseif ($Installer) {
@@ -397,6 +426,10 @@ $env:Path = "$(Split-Path -Parent $pnpmCommand);$(Split-Path -Parent $cargoComma
 
 Set-Location $projectRoot
 Assert-PublishedBinaryAvailable -PublishedBinary $publishedBinary
+if ($Mode -eq 'Quick') {
+    Assert-PublishedBinaryAvailable -PublishedBinary $publishedCliBinary
+    Assert-PublishedBinaryAvailable -PublishedBinary $publishedMcpBinary
+}
 $quickRustSignature = $null
 if ($Installer) {
     & node scripts/prepare-video-tools.mjs
@@ -422,3 +455,7 @@ if ($Installer) {
 
 $builtBinary = Join-Path $targetRoot "$profile\versadown.exe"
 Publish-BuildOutput -BuiltBinary $builtBinary -PublishedBinary $publishedBinary -SidecarSource $sidecarSource -PublishedSidecar $publishedSidecar -RetiredXunleiHelper $retiredXunleiHelper -LegacyPublishedSidecar $legacyPublishedSidecar
+if ($Mode -eq 'Quick') {
+    Publish-ConsoleBinary -BuiltBinary (Join-Path $targetRoot 'quick\vd-cli.exe') -PublishedBinary $publishedCliBinary
+    Publish-ConsoleBinary -BuiltBinary (Join-Path $targetRoot 'quick\vd-mcp-server.exe') -PublishedBinary $publishedMcpBinary
+}
